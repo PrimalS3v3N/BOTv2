@@ -33,11 +33,9 @@ DATA_CONFIG = {
 BACKTEST_CONFIG = {
     'lookback_days': 5,
     'initial_capital': 10000.0,
-    'position_size_pct': 0.02,
     'default_contracts': 1,
     'slippage_pct': 0.001,
     'commission_per_contract': 0.65,
-    'instrument_type': 'option',
 }
 
 
