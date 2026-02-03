@@ -1,60 +1,37 @@
 """
 Signal.py - Discord Trading Signal Parser
 
-FUNCTIONALITY:
-This module parses Discord trading alert messages into structured order data.
+Module Goal: Parse Discord trading alert messages into structured order data.
 Extracts ticker, strike price, option type, expiration, and contract cost.
 
-SUPPORTED MODULES:
-- Main.py: Parses real-time Discord signals for live trading
-- Test.py: Parses historical Discord messages for backtesting
-- Discord.py: Receives raw messages that are parsed here
-
-MAINTENANCE INSTRUCTIONS:
-=========================
-When adding new features:
-1. Add function to appropriate section below based on functionality
-2. Update the section header comment with new function name
-3. If function uses Config values, document which Config keys it reads
-4. Test with sample Discord messages to verify parsing accuracy
-
-When removing features:
-1. Remove function and update section header
-2. Check for dependencies in Main.py, Test.py, Discord.py
-3. Remove any Config keys that are no longer used
-
-Section Organization:
-- UTILITY FUNCTIONS: Helper functions for validation and parsing
-- EXPIRATION PARSING: Date/expiration string parsing
-- ORDER BUILDING: Main BuildOrder function and variants
+================================================================================
+INTERNAL - Signal Parsing Logic
+================================================================================
 """
 
-####### REQUIRED IMPORTS
 import re
 import datetime as dt
 from datetime import timedelta, date
 import pandas as pd
 import robin_stocks.robinhood as RH
 
-# Import centralized config
+
+"""
+================================================================================
+EXTERNAL - Module Interface
+================================================================================
+Modules: Config.py, Test.py
+"""
+
 import Config
 
-
-# =============================================================================
-# CONFIGURATION (Config.py)
-# =============================================================================
-# Config keys: discord.alert_marker
-
-# Discord alert marker - loaded from Config
+# Discord alert marker from Config
 ALERT_MARKER = Config.DISCORD_CONFIG.get('alert_marker', '<a:RedAlert:759583962237763595>')
 
 
 # =============================================================================
-# UTILITY FUNCTIONS (Main.py, Test.py)
+# INTERNAL - Utility Functions
 # =============================================================================
-# Functions: is_number, validate_ticker
-# Config keys: None
-
 
 def is_number(n):
     """Check if value is a valid number."""
@@ -83,11 +60,8 @@ def validate_ticker(ticker):
 
 
 # =============================================================================
-# EXPIRATION PARSING (Main.py, Test.py)
+# INTERNAL - Expiration Parsing
 # =============================================================================
-# Functions: parse_expiration
-# Config keys: None
-
 
 def parse_expiration(tokens, start_idx):
     """Parse expiration date from tokens. Returns (expiration_str, success)."""
@@ -138,11 +112,9 @@ def parse_expiration(tokens, start_idx):
 
 
 # =============================================================================
-# ORDER BUILDING (Main.py, Test.py, Discord.py)
+# EXTERNAL - Order Building (Main Interface)
 # =============================================================================
-# Functions: BuildOrder, BuildOrderFromLog
-# Config keys: discord.alert_marker, contract_limits.*
-
+# Used by: Test.py
 
 def BuildOrder(message):
     """
@@ -188,7 +160,6 @@ def BuildOrder(message):
     for i in range(idx, len(tokens)):
         parts = re.findall(r'[\d.]+', tokens[i])
         if parts and is_number(parts[0]):
-            # Handle formats like "450" or "450.5" or "$450"
             strike = parts[0]
             if len(parts) > 1:
                 strike = f"{parts[0]}.{parts[1]}"
@@ -226,52 +197,16 @@ def BuildOrder(message):
     # 5. CONTRACT PRICE/COST
     for i in range(idx, len(tokens)):
         token = tokens[i]
-        # Handle $1.50 or 1.50 or .50
         if token.startswith('$'):
             token = token[1:]
-        # Strip trailing punctuation (commas, periods, etc.)
         token = token.rstrip(',.;:!?')
         if is_number(token) or (token.startswith('.') and is_number(token)):
-            # Convert cents to dollars if needed
-            # If the token is a whole number (like "90"), it's in cents format
-            # If it has a decimal point (like "1.50" or "0.90"), it's already in dollars
             if '.' not in token:
-                # Whole number means cents format, convert to dollars
                 price_value = float(token) / 100.0
                 order["Cost"] = str(price_value)
             else:
                 order["Cost"] = token
             break
-
-    # 6. VALIDATE CONTRACT PRICE LIMITS
-    # Check if contract price exceeds configured limits
-    if order.get("Cost") and is_number(order["Cost"]):
-        try:
-            import Strategy
-            contract_price = float(order["Cost"])
-            validation = Strategy.validate_contract_order_limits(contract_price)
-
-            # Add validation result to order
-            order["price_validation"] = validation
-
-            # Log warning if price exceeds limits
-            if not validation['is_valid']:
-                print(f"\n{'='*60}")
-                print("WARNING: Contract price exceeds configured limits!")
-                print(f"{'='*60}")
-                print(f"Contract Price: ${contract_price:.2f}")
-                print(f"Total Capital Required: ${validation['total_capital']:.2f}")
-                print(f"\nViolations:")
-                for violation in validation['violations']:
-                    print(f"  - {violation}")
-                print(f"\nConfigured Limits:")
-                print(f"  - Max Contract Price: ${validation['max_contract_price']:.2f}")
-                print(f"  - Max Contract Capital: ${validation['max_contract_capital']:.2f}")
-                print(f"\nThis order will be REJECTED unless limits are adjusted in config.json")
-                print(f"{'='*60}\n")
-        except Exception as e:
-            # Don't fail if validation fails, just log
-            print(f"Warning: Could not validate contract price limits: {e}")
 
     return order
 
