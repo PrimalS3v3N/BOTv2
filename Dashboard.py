@@ -369,7 +369,7 @@ def create_trade_chart(df, trade_label, show_all_exits=False, market_hours_only=
 
 
 def get_trade_summary(df):
-    """Extract concise trade summary."""
+    """Extract concise trade summary including max/min prices after entry."""
     entry_row, exit_row, opt_col = find_entry_exit(df)
 
     entry_price = entry_row[opt_col] if entry_row is not None and opt_col in entry_row else 0
@@ -385,12 +385,23 @@ def get_trade_summary(df):
     pnl_pct = ((exit_price - entry_price) / entry_price * 100) if entry_price > 0 else 0
     duration = df['minutes_held'].max() if 'minutes_held' in df.columns else 0
 
+    # Calculate max/min contract prices AFTER entry (only during holding period)
+    max_price = 0
+    min_price = 0
+    if 'holding' in df.columns and opt_col in df.columns:
+        holding_df = df[df['holding'] == True]
+        if not holding_df.empty and holding_df[opt_col].notna().any():
+            max_price = holding_df[opt_col].max()
+            min_price = holding_df[opt_col].min()
+
     return {
         'entry': entry_price,
         'exit': exit_price,
         'pnl_pct': pnl_pct,
         'exit_reason': exit_reason,
-        'duration': duration
+        'duration': duration,
+        'max_price': max_price,
+        'min_price': min_price
     }
 
 
@@ -460,6 +471,17 @@ def get_trade_table(df):
         table_data['Metric'].append('Duration')
         table_data['Value'].append(f"{duration:.0f} min")
 
+    # Max/Min contract prices after entry
+    if 'holding' in df.columns and opt_col in df.columns:
+        holding_df = df[df['holding'] == True]
+        if not holding_df.empty and holding_df[opt_col].notna().any():
+            max_price = holding_df[opt_col].max()
+            min_price = holding_df[opt_col].min()
+            table_data['Metric'].append('Contract High')
+            table_data['Value'].append(f"${max_price:.2f}")
+            table_data['Metric'].append('Contract Low')
+            table_data['Value'].append(f"${min_price:.2f}")
+
     return pd.DataFrame(table_data)
 
 
@@ -517,21 +539,24 @@ def main():
     trade_label, pos_id, _ = trade_list[selected_idx]
     df = matrices[pos_id]
 
-    # Summary metrics row
-    summary = get_trade_summary(df)
-    cols = st.columns(5)
-    cols[0].metric("Entry", f"${summary['entry']:.2f}")
-    cols[1].metric("Exit", f"${summary['exit']:.2f}")
-    cols[2].metric("P&L", f"{summary['pnl_pct']:+.1f}%")
-    cols[3].metric("Exit Reason", summary['exit_reason'])
-    cols[4].metric("Duration", f"{summary['duration']:.0f}m")
-
-    # Chart
+    # Chart (no summary above)
     fig = create_trade_chart(df, trade_label, show_all_exits, market_hours_only)
     if fig:
         st.plotly_chart(fig, use_container_width=True)
     else:
         st.error("Could not create chart")
+
+    # Trade Summary below chart
+    st.subheader("Trade Summary")
+    summary = get_trade_summary(df)
+    cols = st.columns(7)
+    cols[0].metric("Entry", f"${summary['entry']:.2f}")
+    cols[1].metric("Exit", f"${summary['exit']:.2f}")
+    cols[2].metric("P&L", f"{summary['pnl_pct']:+.1f}%")
+    cols[3].metric("Exit Reason", summary['exit_reason'])
+    cols[4].metric("Duration", f"{summary['duration']:.0f}m")
+    cols[5].metric("Max Price", f"${summary['max_price']:.2f}")
+    cols[6].metric("Min Price", f"${summary['min_price']:.2f}")
 
     # Data table
     st.subheader("Trade Details")
