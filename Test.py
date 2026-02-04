@@ -705,26 +705,33 @@ class Backtest:
         print(f"{'='*60}\n")
 
         # Step 1: Fetch Discord messages
+        print("Step 1: Fetching Discord messages...")
         messages_df = self.discord_fetcher.fetch_messages_for_days(self.lookback_days)
 
         if messages_df.empty:
-            print("No messages found")
+            print("  ✗ No messages found - check Discord token and channel ID in Config.py")
             return self._empty_results()
 
+        print(f"  ✓ Fetched {len(messages_df)} messages")
+
         # Step 2: Parse signals
-        print("\nParsing signals...")
+        print("\nStep 2: Parsing signals...")
         self.signals_df = self.signal_parser.parse_all_messages(messages_df)
 
         if self.signals_df.empty:
-            print("No valid signals found")
+            print(f"  ✗ No valid signals found in {len(messages_df)} messages")
+            print(f"    Check that messages contain the alert marker: '{self.signal_parser.alert_marker}'")
             return self._empty_results()
 
-        print(f"  Found {len(self.signals_df)} signals")
+        print(f"  ✓ Found {len(self.signals_df)} valid signals")
 
         # Step 3: Process each signal
-        print("\nProcessing signals...")
+        print("\nStep 3: Processing signals...")
         self.positions = []
         self.tracking_matrices = {}
+
+        processed = 0
+        failed = 0
 
         for idx, signal in self.signals_df.iterrows():
             print(f"\n  [{idx+1}/{len(self.signals_df)}] {signal['ticker']} "
@@ -735,9 +742,15 @@ class Backtest:
             if position:
                 self.positions.append(position)
                 self.tracking_matrices[position.get_trade_label()] = matrix
+                processed += 1
 
                 pnl = position.get_pnl(position.exit_price) if position.exit_price else 0
-                print(f"    Exit: {position.exit_reason} | P&L: ${pnl:+.2f}")
+                print(f"    ✓ Exit: {position.exit_reason} | P&L: ${pnl:+.2f}")
+            else:
+                failed += 1
+                print(f"    ✗ No data available for signal")
+
+        print(f"\n  Summary: {processed} successful, {failed} failed")
 
         # Step 4: Compile results
         print(f"\n{'='*60}")
@@ -999,7 +1012,7 @@ class Backtest:
 
         Args:
             filepath: Path to save the pickle file. If None, saves to BT_DATA.pkl
-                     in the same directory as Dashboard.py
+                     in the same directory as this file
         """
         import pickle
         import os
@@ -1008,23 +1021,41 @@ class Backtest:
             print("Backtest has not been run yet. Call run() first.")
             return False
 
-        # If no filepath specified, save to same directory as Dashboard.py
+        # If no filepath specified, save to same directory as this file
         if filepath is None:
             script_dir = os.path.dirname(os.path.abspath(__file__))
             filepath = os.path.join(script_dir, 'BT_DATA.pkl')
 
         try:
+            # Get the tracking matrices from results
+            tracking_matrices = self.results.get('Tracking_matrices', {})
+
             # Format data for Dashboard.py which expects 'matrices' and 'exit_signals' keys
             dashboard_data = {
-                'matrices': self.results.get('Tracking_matrices', {}),
+                'matrices': tracking_matrices,
                 'exit_signals': {},  # Placeholder for future exit signal tracking
+                'metadata': {
+                    'total_trades': len(self.positions),
+                    'closed_trades': sum(1 for p in self.positions if p.is_closed),
+                    'lookback_days': self.lookback_days,
+                }
             }
+
             with open(filepath, 'wb') as f:
                 pickle.dump(dashboard_data, f)
-            print(f"Backtest results saved to {filepath}")
+
+            # Log what was saved
+            num_trades = len(tracking_matrices)
+            print(f"✓ Backtest results saved to {filepath}")
+            print(f"  Trades saved: {num_trades}")
+            if num_trades == 0:
+                print(f"  ⚠ No trades in matrices - check Discord data and signal parsing")
+
             return True
         except Exception as e:
-            print(f"Error saving backtest results: {e}")
+            print(f"✗ Error saving backtest results: {e}")
+            import traceback
+            traceback.print_exc()
             return False
 
 

@@ -64,21 +64,23 @@ EXIT_SYMBOLS = {
 def load_data():
     """Load backtest data from pickle file, caching in session state."""
     if 'matrices' in st.session_state and st.session_state.matrices:
-        return st.session_state.matrices, st.session_state.exit_signals
+        return st.session_state.matrices, st.session_state.exit_signals, st.session_state.get('metadata', {})
 
     if not os.path.exists(DATA_PATH):
-        return {}, {}
+        return {}, {}, {}
     try:
         with open(DATA_PATH, 'rb') as f:
             data = pickle.load(f)
         matrices = data.get('matrices', {})
         exit_signals = data.get('exit_signals', {})
+        metadata = data.get('metadata', {})
         st.session_state.matrices = matrices
         st.session_state.exit_signals = exit_signals
-        return matrices, exit_signals
+        st.session_state.metadata = metadata
+        return matrices, exit_signals, metadata
     except Exception as e:
         st.error(f"Error loading data: {e}")
-        return {}, {}
+        return {}, {}, {}
 
 
 def parse_time(ts):
@@ -466,10 +468,28 @@ def get_trade_table(df):
 def main():
     st.title("Trade Dashboard")
 
-    matrices, _ = load_data()
+    matrices, _, metadata = load_data()
 
     if not matrices:
         st.warning("No backtest data found. Run Test.py first.")
+
+        # Provide diagnostic information
+        st.info("**How to fix:**\n"
+                "1. Run `python Test.py` to fetch Discord signals and backtest trades\n"
+                "2. Check that your Discord token and channel ID are configured in Config.py\n"
+                "3. Ensure there are recent signals in your Discord channel\n"
+                "4. Reload this page once Test.py completes")
+
+        # Show metadata if file exists but no trades
+        if os.path.exists(DATA_PATH):
+            st.write("**Pickle file found but no trades:**")
+            if metadata:
+                st.write(f"- Total trades processed: {metadata.get('total_trades', 0)}")
+                st.write(f"- Closed trades: {metadata.get('closed_trades', 0)}")
+                st.write(f"- Lookback period: {metadata.get('lookback_days', 0)} days")
+            else:
+                st.write("- Metadata not available")
+
         return
 
     # Sidebar
