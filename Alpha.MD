@@ -72,16 +72,23 @@ Config.py ───────────────────────�
 ### Analysis.py
 **Goal:** Process all math here (technical indicators).
 
-**Status:** Placeholder (to be implemented)
+**Status:** Active
+
+**Implemented Indicators:**
+- EMA (Exponential Moving Average) - 30-period default
+- VWAP (Volume Weighted Average Price) - resets daily
 
 **Planned Indicators:**
 - RSI (Relative Strength Index)
 - MACD (Moving Average Convergence Divergence)
 - VPOC (Volume Point of Control)
-- VWAP (Volume Weighted Average Price)
 - EWO (Elliott Wave Oscillator)
 - SuperTrend
-- EMA (Exponential Moving Averages)
+
+**Functions:**
+- `EMA(df, column='close', period=30)` - Calculate EMA on any column
+- `VWAP(df, price_col='close', volume_col='volume')` - Calculate intraday VWAP
+- `add_indicators(df, ema_period=30)` - Add all standard indicators to DataFrame
 
 **Rules:**
 - Pure calculation functions only
@@ -93,7 +100,29 @@ Config.py ───────────────────────�
 ### Strategy.py
 **Goal:** Logic for strategies. Process inputs from Data & Analysis, output decision logic.
 
-**Status:** Placeholder (to be implemented)
+**Status:** Active
+
+**Implemented Strategies:**
+- Dynamic Stop Loss (3-phase exit strategy)
+
+**Dynamic Stop Loss:**
+Three-phase stop loss system for options contracts:
+
+1. **INITIAL Phase**: Fixed stop loss at entry price - (stop_loss_pct × entry price)
+   - Default: 30% below entry if no stop loss specified in signal
+   - Example: Entry $1.00 → Stop at $0.70
+
+2. **BREAKEVEN Phase**: When price rises above threshold, move stop to entry price
+   - Threshold = entry_price / (1 - stop_loss_pct)
+   - Example: Entry $1.00, 30% SL → threshold = $1.43
+
+3. **TRAILING Phase**: When price reaches 50% above entry, trail at 30% below highest price
+   - Only uses price highs AFTER entry (not before)
+   - Stop only moves up, never down
+
+**Classes:**
+- `DynamicStopLoss` - Stateful stop loss manager
+- `check_stop_loss()` - Stateless function for backtesting
 
 **Rules:**
 - Entry logic goes here
@@ -125,10 +154,21 @@ Config.py ───────────────────────�
 - Get historical stock data (yfinance)
 - Track positions through market hours
 - Generate results: Signals, Positions, Tracking matrices
+- Dynamic stop loss with 3-phase strategy
+- Technical indicators (EMA_30, VWAP) in tracking data
+
+**Exit Strategies:**
+- Dynamic Stop Loss (3-phase: initial → breakeven → trailing)
+- Market close exit (default fallback)
+
+**Tracking Matrix Columns:**
+- timestamp, stock_price, option_price, volume
+- holding, entry_price, pnl, pnl_pct
+- stop_loss, stop_loss_mode (initial/breakeven/trailing)
+- vwap, ema_30
 
 **Rules:**
-- Exit strategies will be added incrementally
-- Currently exits at market close only
+- Exit strategies configurable via Config.py
 - Use Config.py for all parameters
 
 ---
@@ -140,8 +180,18 @@ Config.py ───────────────────────�
 - Streamlit-based web dashboard
 - Dual-axis charts (stock price vs option price)
 - Entry/exit markers with annotations
-- Stop loss tracking visualization
+- Stop loss tracking visualization (shows mode changes)
+- Technical indicator overlays (EMA_30, VWAP)
 - Trade summary metrics
+- Matrix data table with all tracking columns
+
+**Chart Displays:**
+- Stock price (blue line, left axis)
+- Option price (orange line, right axis)
+- VWAP (green dashed line, left axis)
+- EMA 30 (purple dotted line, left axis)
+- Stop Loss (red dashed line, right axis)
+- Entry/Exit markers with annotations
 
 **Usage:**
 ```bash
@@ -202,19 +252,19 @@ import Config
 |--------|--------|
 | Config.py | Active |
 | Signal.py | Active |
-| Test.py | Active (market close exit only) |
-| Dashboard.py | Active |
+| Test.py | Active (dynamic stop loss + indicators) |
+| Dashboard.py | Active (EMA_30, VWAP, Stop Loss display) |
 | Data.py | Placeholder |
-| Analysis.py | Placeholder |
-| Strategy.py | Placeholder |
+| Analysis.py | Active (EMA, VWAP) |
+| Strategy.py | Active (Dynamic Stop Loss) |
 | Orders.py | Placeholder |
 
 ---
 
 ## Next Steps
 
-1. Implement exit strategies in Strategy.py (one at a time)
+1. Add more exit strategies (profit targets, time stops)
 2. Build out Data.py for data sourcing
-3. Implement technical indicators in Analysis.py
-4. Connect Strategy.py to Test.py for backtesting
+3. Add more technical indicators in Analysis.py (RSI, MACD, VPOC)
+4. Expand Strategy.py with entry conditions
 5. Build Orders.py for live trading

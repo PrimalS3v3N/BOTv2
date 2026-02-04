@@ -50,11 +50,13 @@ EASTERN = ZoneInfo('America/New_York')
 ================================================================================
 EXTERNAL - Module Interface
 ================================================================================
-Modules: Config.py, Signal.py
+Modules: Config.py, Signal.py, Analysis.py, Strategy.py
 """
 
 import Config
 import Signal
+import Analysis
+from Strategy import DynamicStopLoss
 
 
 # =============================================================================
@@ -557,7 +559,8 @@ class TrackingMatrix:
         self.trade_label = position.get_trade_label()
         self.records = []
 
-    def add_record(self, timestamp, stock_price, option_price, volume, holding=True):
+    def add_record(self, timestamp, stock_price, option_price, volume, holding=True,
+                   stop_loss=np.nan, stop_loss_mode=None, vwap=np.nan, ema_30=np.nan):
         """Add a tracking record."""
         pnl_pct = self.position.get_pnl_pct(option_price) if holding else np.nan
 
@@ -573,6 +576,12 @@ class TrackingMatrix:
             'highest_price': self.position.highest_price if holding else np.nan,
             'lowest_price': self.position.lowest_price if holding else np.nan,
             'minutes_held': self.position.get_minutes_held(timestamp) if holding else np.nan,
+            # Dynamic stop loss tracking
+            'stop_loss': stop_loss,
+            'stop_loss_mode': stop_loss_mode,
+            # Technical indicators
+            'vwap': vwap,
+            'ema_30': ema_30,
         }
 
         self.records.append(record)
@@ -813,9 +822,35 @@ class Backtest:
         """Simulate position through historical data."""
         days_to_expiry = (signal['expiration'] - position.entry_time.date()).days if signal['expiration'] else 30
 
+        # Get indicator settings from config
+        indicator_config = self.config.get('indicators', {})
+        ema_period = indicator_config.get('ema_period', 30)
+
+        # Add technical indicators to stock data
+        stock_data = Analysis.add_indicators(stock_data, ema_period=ema_period)
+
+        # Get dynamic stop loss settings from config
+        dsl_config = self.config.get('dynamic_stop_loss', {})
+        dsl_enabled = dsl_config.get('enabled', True)
+        stop_loss_pct = dsl_config.get('default_stop_loss_pct', 0.30)
+        trailing_trigger_pct = dsl_config.get('trailing_trigger_pct', 0.50)
+        trailing_stop_pct = dsl_config.get('trailing_stop_pct', 0.30)
+
+        # Initialize dynamic stop loss manager
+        dynamic_sl = DynamicStopLoss(
+            entry_price=position.entry_price,
+            stop_loss_pct=stop_loss_pct,
+            trailing_trigger_pct=trailing_trigger_pct,
+            trailing_stop_pct=trailing_stop_pct
+        )
+
         for i, (timestamp, bar) in enumerate(stock_data.iterrows()):
             stock_price = bar['close']
             volume = bar.get('volume', 0)
+
+            # Get indicator values for this bar
+            vwap = bar.get('vwap', np.nan)
+            ema_30 = bar.get('ema_30', np.nan)
 
             current_days_to_expiry = max(0, days_to_expiry - (timestamp.date() - position.entry_time.date()).days)
 
@@ -837,26 +872,52 @@ class Backtest:
             if holding:
                 position.update(timestamp, option_price, stock_price)
 
-                # Record tracking data
+                # Update dynamic stop loss and check if triggered
+                stop_loss_price = np.nan
+                stop_loss_mode = None
+                stop_triggered = False
+
+                if dsl_enabled:
+                    sl_result = dynamic_sl.update(option_price)
+                    stop_loss_price = sl_result['stop_loss']
+                    stop_loss_mode = sl_result['mode']
+                    stop_triggered = sl_result['triggered']
+
+                # Record tracking data with stop loss and indicators
                 matrix.add_record(
                     timestamp=timestamp,
                     stock_price=stock_price,
                     option_price=option_price,
                     volume=volume,
-                    holding=True
+                    holding=True,
+                    stop_loss=stop_loss_price,
+                    stop_loss_mode=stop_loss_mode,
+                    vwap=vwap,
+                    ema_30=ema_30
                 )
 
+                # Check for stop loss exit (only if dynamic stop loss is enabled)
+                if dsl_enabled and stop_triggered and not position.is_closed:
+                    exit_price = option_price * (1 - self.slippage_pct)
+                    exit_reason = f'stop_loss_{stop_loss_mode}'
+                    position.close(exit_price, timestamp, exit_reason)
+
                 # Exit at market close
-                if timestamp.time() >= dt.time(15, 55) and not position.is_closed:
+                elif timestamp.time() >= dt.time(15, 55) and not position.is_closed:
                     exit_price = option_price * (1 - self.slippage_pct)
                     position.close(exit_price, timestamp, 'market_close')
             else:
+                # Record tracking data for non-holding periods (pre-entry or post-exit)
                 matrix.add_record(
                     timestamp=timestamp,
                     stock_price=stock_price,
                     option_price=option_price,
                     volume=volume,
-                    holding=False
+                    holding=False,
+                    stop_loss=np.nan,
+                    stop_loss_mode=None,
+                    vwap=vwap,
+                    ema_30=ema_30
                 )
 
         # Close at end of data if still open
