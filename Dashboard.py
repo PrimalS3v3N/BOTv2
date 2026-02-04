@@ -470,6 +470,19 @@ def create_trade_chart(df, trade_label, show_all_exits=False, market_hours_only=
             row=2, col=1
         )
 
+        # EWO 15-min average line (if available)
+        if 'ewo_15min_avg' in df.columns and df['ewo_15min_avg'].notna().any():
+            fig.add_trace(
+                go.Scatter(
+                    x=df['time'],
+                    y=df['ewo_15min_avg'],
+                    name='EWO 15m Avg',
+                    line=dict(color='#FF9800', width=2, dash='dot'),
+                    hovertemplate='EWO 15m Avg: %{y:.3f}<extra></extra>'
+                ),
+                row=2, col=1
+            )
+
         # Zero line for EWO
         fig.add_hline(y=0, line_dash="dash", line_color="gray", line_width=1, row=2, col=1)
 
@@ -746,7 +759,7 @@ def main():
         'option_price', 'pnl_pct', 'max_option_price',
         'stop_loss', 'stop_loss_mode', 'sl_cushion',
         'profit_target', 'profit_target_mode', 'profit_target_active',
-        'vwap', 'ema_20', 'ema_30', 'ewo',
+        'vwap', 'ema_20', 'ema_30', 'ewo', 'ewo_15min_avg',
         'SL_C1', 'SL_C2'
     ]
 
@@ -788,6 +801,9 @@ def main():
 
         if 'ewo' in matrix_df.columns:
             matrix_df['ewo'] = matrix_df['ewo'].apply(lambda x: f"{x:.3f}" if pd.notna(x) else "")
+
+        if 'ewo_15min_avg' in matrix_df.columns:
+            matrix_df['ewo_15min_avg'] = matrix_df['ewo_15min_avg'].apply(lambda x: f"{x:.3f}" if pd.notna(x) else "")
 
         st.dataframe(matrix_df, use_container_width=True, hide_index=True)
     else:
