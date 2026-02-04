@@ -143,7 +143,7 @@ def find_entry_exit(df):
 
 
 def create_trade_chart(df, trade_label, show_all_exits=False, market_hours_only=False):
-    """Create dual-axis chart with stock/option prices and entry/exit markers."""
+    """Create dual-axis chart with stock/option prices, error bars, and EWO subplot."""
     df = df.copy()
     df['time'] = df['timestamp'].apply(parse_time)
     df = df.dropna(subset=['time'])
@@ -167,19 +167,50 @@ def create_trade_chart(df, trade_label, show_all_exits=False, market_hours_only=
 
     entry_row, exit_row, opt_col = find_entry_exit(df)
 
-    fig = make_subplots(specs=[[{"secondary_y": True}]])
+    # Check if EWO data is available for subplot
+    has_ewo = 'ewo' in df.columns and df['ewo'].notna().any()
 
-    # Stock price (left y-axis)
-    fig.add_trace(
-        go.Scatter(
-            x=df['time'],
-            y=df['stock_price'],
-            name='Stock',
-            line=dict(color=COLORS['stock'], width=2),
-            hovertemplate='Stock: $%{y:.2f}<extra></extra>'
-        ),
-        secondary_y=False
+    # Create subplots: main chart with secondary y-axis, and EWO subplot below
+    if has_ewo:
+        fig = make_subplots(
+            rows=2, cols=1,
+            shared_xaxes=True,
+            vertical_spacing=0.08,
+            row_heights=[0.75, 0.25],
+            specs=[[{"secondary_y": True}], [{"secondary_y": False}]]
+        )
+    else:
+        fig = make_subplots(specs=[[{"secondary_y": True}]])
+
+    # Calculate error bar values (distance from close to high/low)
+    error_y_plus = None
+    error_y_minus = None
+    if 'stock_high' in df.columns and 'stock_low' in df.columns:
+        error_y_plus = df['stock_high'] - df['stock_price']
+        error_y_minus = df['stock_price'] - df['stock_low']
+
+    # Stock price with error bars (left y-axis)
+    stock_trace = go.Scatter(
+        x=df['time'],
+        y=df['stock_price'],
+        name='Stock',
+        line=dict(color=COLORS['stock'], width=2),
+        hovertemplate='Stock: $%{y:.2f}<extra></extra>'
     )
+
+    # Add error bars if high/low data available
+    if error_y_plus is not None and error_y_minus is not None:
+        stock_trace.error_y = dict(
+            type='data',
+            symmetric=False,
+            array=error_y_plus,
+            arrayminus=error_y_minus,
+            color=COLORS['stock'],
+            thickness=1,
+            width=0
+        )
+
+    fig.add_trace(stock_trace, row=1, col=1, secondary_y=False)
 
     # VWAP (left y-axis, same as stock price)
     if 'vwap' in df.columns and df['vwap'].notna().any():
@@ -191,7 +222,7 @@ def create_trade_chart(df, trade_label, show_all_exits=False, market_hours_only=
                 line=dict(color=COLORS['vwap'], width=2, dash='dash'),
                 hovertemplate='VWAP: $%{y:.2f}<extra></extra>'
             ),
-            secondary_y=False
+            row=1, col=1, secondary_y=False
         )
 
     # EMA_20 (left y-axis, same as stock price)
@@ -204,7 +235,7 @@ def create_trade_chart(df, trade_label, show_all_exits=False, market_hours_only=
                 line=dict(color=COLORS['ema_20'], width=1.5, dash='dot'),
                 hovertemplate='EMA 20: $%{y:.2f}<extra></extra>'
             ),
-            secondary_y=False
+            row=1, col=1, secondary_y=False
         )
 
     # EMA_30 (left y-axis, same as stock price)
@@ -217,7 +248,7 @@ def create_trade_chart(df, trade_label, show_all_exits=False, market_hours_only=
                 line=dict(color=COLORS['ema_30'], width=1.5, dash='dot'),
                 hovertemplate='EMA 30: $%{y:.2f}<extra></extra>'
             ),
-            secondary_y=False
+            row=1, col=1, secondary_y=False
         )
 
     # Option price (right y-axis)
@@ -230,7 +261,7 @@ def create_trade_chart(df, trade_label, show_all_exits=False, market_hours_only=
                 line=dict(color=COLORS['option'], width=2),
                 hovertemplate='Option: $%{y:.2f}<extra></extra>'
             ),
-            secondary_y=True
+            row=1, col=1, secondary_y=True
         )
 
     # Stop Loss line (right y-axis, tracks dynamic stop loss price)
@@ -253,7 +284,7 @@ def create_trade_chart(df, trade_label, show_all_exits=False, market_hours_only=
                 hovertemplate='%{text}<extra></extra>',
                 text=hover_text
             ),
-            secondary_y=True
+            row=1, col=1, secondary_y=True
         )
 
     # SL_C1 markers: Conditional trailing active (profit target + VWAP hold)
@@ -269,7 +300,7 @@ def create_trade_chart(df, trade_label, show_all_exits=False, market_hours_only=
                     marker=dict(symbol='circle', size=8, color=COLORS['sl_c1'], opacity=0.6),
                     hovertemplate='SL_C1: Conditional Trailing<br>$%{y:.2f}<extra></extra>'
                 ),
-                secondary_y=True
+                row=1, col=1, secondary_y=True
             )
 
     # SL_C2 markers: EMA/VWAP bearish condition
@@ -285,7 +316,7 @@ def create_trade_chart(df, trade_label, show_all_exits=False, market_hours_only=
                     marker=dict(symbol='triangle-down', size=8, color=COLORS['sl_c2'], opacity=0.6),
                     hovertemplate='SL_C2: EMA30>VWAP & Price<EMA30<br>$%{y:.2f}<extra></extra>'
                 ),
-                secondary_y=True
+                row=1, col=1, secondary_y=True
             )
 
     # Entry marker
@@ -301,7 +332,7 @@ def create_trade_chart(df, trade_label, show_all_exits=False, market_hours_only=
                 marker=dict(symbol='triangle-down', size=18, color=COLORS['entry'], line=dict(color='white', width=2)),
                 hovertemplate='ENTRY<br>$%{y:.2f}<extra></extra>'
             ),
-            secondary_y=True
+            row=1, col=1, secondary_y=True
         )
 
     # Exit marker
@@ -323,7 +354,7 @@ def create_trade_chart(df, trade_label, show_all_exits=False, market_hours_only=
                 textfont=dict(size=10, color=COLORS['exit']),
                 hovertemplate=f'EXIT: {exit_reason}<br>${{y:.2f}}<extra></extra>'
             ),
-            secondary_y=True
+            row=1, col=1, secondary_y=True
         )
 
     # Show all exit strategy markers (when toggle is on)
@@ -348,28 +379,77 @@ def create_trade_chart(df, trade_label, show_all_exits=False, market_hours_only=
                         marker=dict(symbol=symbol, size=10, color=color, opacity=0.7),
                         hovertemplate=f'{sig_type.replace("_", " ").title()}<br>${{y:.2f}}<extra></extra>'
                     ),
-                    secondary_y=True
+                    row=1, col=1, secondary_y=True
                 )
 
+    # EWO subplot (row 2)
+    if has_ewo:
+        # EWO line
+        fig.add_trace(
+            go.Scatter(
+                x=df['time'],
+                y=df['ewo'],
+                name='EWO',
+                line=dict(color='#00BCD4', width=1.5),
+                hovertemplate='EWO: %{y:.3f}<extra></extra>'
+            ),
+            row=2, col=1
+        )
+
+        # Zero line for EWO
+        fig.add_hline(y=0, line_dash="dash", line_color="gray", line_width=1, row=2, col=1)
+
+        # Color fill for positive/negative EWO
+        fig.add_trace(
+            go.Scatter(
+                x=df['time'],
+                y=df['ewo'].clip(lower=0),
+                fill='tozeroy',
+                fillcolor='rgba(0, 200, 83, 0.3)',
+                line=dict(width=0),
+                showlegend=False,
+                hoverinfo='skip'
+            ),
+            row=2, col=1
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=df['time'],
+                y=df['ewo'].clip(upper=0),
+                fill='tozeroy',
+                fillcolor='rgba(255, 23, 68, 0.3)',
+                line=dict(width=0),
+                showlegend=False,
+                hoverinfo='skip'
+            ),
+            row=2, col=1
+        )
+
     # Layout
+    chart_height = 650 if has_ewo else 500
     fig.update_layout(
         title=trade_label,
         template='plotly_dark',
-        height=500,
+        height=chart_height,
         hovermode='x unified',
         legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1),
         margin=dict(l=60, r=60, t=60, b=40)
     )
 
-    fig.update_xaxes(title_text="Time", tickformat='%H:%M')
-    fig.update_yaxes(title_text="Stock ($)", secondary_y=False, tickformat='$.2f')
-    fig.update_yaxes(title_text="Option ($)", secondary_y=True, tickformat='$.2f')
+    # Update axes
+    fig.update_xaxes(title_text="Time", tickformat='%H:%M', row=1, col=1)
+    fig.update_yaxes(title_text="Stock ($)", secondary_y=False, tickformat='$.2f', row=1, col=1)
+    fig.update_yaxes(title_text="Option ($)", secondary_y=True, tickformat='$.2f', row=1, col=1)
+
+    if has_ewo:
+        fig.update_xaxes(title_text="Time", tickformat='%H:%M', row=2, col=1)
+        fig.update_yaxes(title_text="EWO", row=2, col=1)
 
     return fig
 
 
 def get_trade_summary(df):
-    """Extract concise trade summary including max/min prices after entry."""
+    """Extract concise trade summary including max/min profit percentages."""
     entry_row, exit_row, opt_col = find_entry_exit(df)
 
     entry_price = entry_row[opt_col] if entry_row is not None and opt_col in entry_row else 0
@@ -388,11 +468,17 @@ def get_trade_summary(df):
     # Calculate max/min contract prices AFTER entry (only during holding period)
     max_price = 0
     min_price = 0
+    max_profit_pct = 0
+    min_profit_pct = 0
     if 'holding' in df.columns and opt_col in df.columns:
         holding_df = df[df['holding'] == True]
         if not holding_df.empty and holding_df[opt_col].notna().any():
             max_price = holding_df[opt_col].max()
             min_price = holding_df[opt_col].min()
+            # Max Profit % = (max_price / entry_price - 1) * 100
+            if entry_price > 0:
+                max_profit_pct = (max_price / entry_price - 1) * 100
+                min_profit_pct = (min_price / entry_price - 1) * 100
 
     return {
         'entry': entry_price,
@@ -401,7 +487,9 @@ def get_trade_summary(df):
         'exit_reason': exit_reason,
         'duration': duration,
         'max_price': max_price,
-        'min_price': min_price
+        'min_price': min_price,
+        'max_profit_pct': max_profit_pct,
+        'min_profit_pct': min_profit_pct
     }
 
 
@@ -539,7 +627,7 @@ def main():
     trade_label, pos_id, _ = trade_list[selected_idx]
     df = matrices[pos_id]
 
-    # Chart (no summary above)
+    # Chart first (no summary above)
     fig = create_trade_chart(df, trade_label, show_all_exits, market_hours_only)
     if fig:
         st.plotly_chart(fig, use_container_width=True)
@@ -553,10 +641,10 @@ def main():
     cols[0].metric("Entry", f"${summary['entry']:.2f}")
     cols[1].metric("Exit", f"${summary['exit']:.2f}")
     cols[2].metric("P&L", f"{summary['pnl_pct']:+.1f}%")
-    cols[3].metric("Exit Reason", summary['exit_reason'])
-    cols[4].metric("Duration", f"{summary['duration']:.0f}m")
-    cols[5].metric("Max Price", f"${summary['max_price']:.2f}")
-    cols[6].metric("Min Price", f"${summary['min_price']:.2f}")
+    cols[3].metric("Max Profit", f"{summary['max_profit_pct']:+.1f}%")
+    cols[4].metric("Min Profit", f"{summary['min_profit_pct']:+.1f}%")
+    cols[5].metric("Exit Reason", summary['exit_reason'])
+    cols[6].metric("Duration", f"{summary['duration']:.0f}m")
 
     # Data table
     st.subheader("Trade Details")
@@ -568,9 +656,10 @@ def main():
 
     # Define columns to display in matrix
     matrix_cols = [
-        'timestamp', 'holding', 'stock_price', 'option_price', 'pnl_pct',
+        'timestamp', 'holding', 'stock_price', 'stock_high', 'stock_low',
+        'option_price', 'pnl_pct',
         'stop_loss', 'stop_loss_mode', 'sl_cushion',
-        'vwap', 'ema_20', 'ema_30',
+        'vwap', 'ema_20', 'ema_30', 'ewo',
         'SL_C1', 'SL_C2'
     ]
 
@@ -600,7 +689,7 @@ def main():
             matrix_df = matrix_df[df['holding'] == True]
 
         # Format numeric columns
-        for col in ['stock_price', 'option_price', 'stop_loss', 'vwap', 'ema_20', 'ema_30']:
+        for col in ['stock_price', 'stock_high', 'stock_low', 'option_price', 'stop_loss', 'vwap', 'ema_20', 'ema_30']:
             if col in matrix_df.columns:
                 matrix_df[col] = matrix_df[col].apply(lambda x: f"${x:.2f}" if pd.notna(x) else "")
 
@@ -609,6 +698,9 @@ def main():
 
         if 'sl_cushion' in matrix_df.columns:
             matrix_df['sl_cushion'] = matrix_df['sl_cushion'].apply(lambda x: f"${x:.2f}" if pd.notna(x) else "")
+
+        if 'ewo' in matrix_df.columns:
+            matrix_df['ewo'] = matrix_df['ewo'].apply(lambda x: f"{x:.3f}" if pd.notna(x) else "")
 
         st.dataframe(matrix_df, use_container_width=True, hide_index=True)
     else:
