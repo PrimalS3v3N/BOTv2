@@ -559,6 +559,17 @@ def get_trade_table(df):
         table_data['Metric'].append('Duration')
         table_data['Value'].append(f"{duration:.0f} min")
 
+    # Max/Min contract prices after entry
+    if 'holding' in df.columns and opt_col in df.columns:
+        holding_df = df[df['holding'] == True]
+        if not holding_df.empty and holding_df[opt_col].notna().any():
+            max_price = holding_df[opt_col].max()
+            min_price = holding_df[opt_col].min()
+            table_data['Metric'].append('Contract High')
+            table_data['Value'].append(f"${max_price:.2f}")
+            table_data['Metric'].append('Contract Low')
+            table_data['Value'].append(f"${min_price:.2f}")
+
     return pd.DataFrame(table_data)
 
 
