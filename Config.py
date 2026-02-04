@@ -98,6 +98,58 @@ DISCORD_CONFIG = {
 
     # Signal parsing
     'alert_marker': '<a:RedAlert:759583962237763595>',  # Discord alert emoji ID
+
+    # Browser spoofing settings - makes requests appear as regular browser traffic
+    'spoof_browser': True,         # Enable browser spoofing
+    'browser_config': {
+        # User-Agent string (Chrome on Windows)
+        'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+
+        # Standard browser headers
+        'accept': '*/*',
+        'accept_language': 'en-US,en;q=0.9',
+        'accept_encoding': 'gzip, deflate, br',
+        'connection': 'keep-alive',
+        'cache_control': 'no-cache',
+        'pragma': 'no-cache',
+
+        # Security headers (Sec-Fetch-* for modern browsers)
+        'sec_ch_ua': '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
+        'sec_ch_ua_mobile': '?0',
+        'sec_ch_ua_platform': '"Windows"',
+        'sec_fetch_dest': 'empty',
+        'sec_fetch_mode': 'cors',
+        'sec_fetch_site': 'same-origin',
+
+        # Discord-specific headers
+        'x_discord_locale': 'en-US',
+        'x_discord_timezone': 'America/New_York',
+        'x_debug_options': 'bugReporterEnabled',
+
+        # Referer/Origin
+        'origin': 'https://discord.com',
+        'referer': 'https://discord.com/channels/@me',
+    },
+
+    # X-Super-Properties (Discord client fingerprint - base64 encoded)
+    # This identifies the client as a Discord web browser client
+    'x_super_properties': {
+        'os': 'Windows',
+        'browser': 'Chrome',
+        'device': '',
+        'system_locale': 'en-US',
+        'browser_user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'browser_version': '120.0.0.0',
+        'os_version': '10',
+        'referrer': '',
+        'referring_domain': '',
+        'referrer_current': '',
+        'referring_domain_current': '',
+        'release_channel': 'stable',
+        'client_build_number': 254573,
+        'client_event_source': None,
+        'design_id': 0
+    },
 }
 
 

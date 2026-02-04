@@ -28,6 +28,8 @@ from datetime import timedelta, date
 from zoneinfo import ZoneInfo
 import time
 import requests
+import base64
+import json
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -59,7 +61,12 @@ import Signal
 # =============================================================================
 
 class DiscordFetcher:
-    """Fetches messages from Discord signal channels."""
+    """
+    Fetches messages from Discord signal channels.
+
+    Implements browser spoofing to make requests appear identical to
+    regular browser traffic accessing Discord web client.
+    """
 
     def __init__(self, token=None, channel_id=None):
         discord_config = Config.get_config('discord')
@@ -69,25 +76,142 @@ class DiscordFetcher:
         self.base_url = discord_config.get('base_url', 'https://discord.com/api')
         self.message_limit = discord_config.get('test_message_limit', 100)
 
+        # Browser spoofing configuration
+        self.spoof_enabled = discord_config.get('spoof_browser', True)
+        self.browser_config = discord_config.get('browser_config', {})
+        self.super_properties = discord_config.get('x_super_properties', {})
+
+        # Create persistent session for connection reuse and cookie handling
+        self.session = requests.Session()
+        self._configure_session()
+
+    def _build_super_properties(self):
+        """
+        Build and encode X-Super-Properties header.
+        This header contains Discord client fingerprint information.
+        """
+        if not self.super_properties:
+            return None
+
+        # Convert to JSON and base64 encode
+        props_json = json.dumps(self.super_properties, separators=(',', ':'))
+        return base64.b64encode(props_json.encode()).decode()
+
+    def _build_browser_headers(self):
+        """
+        Build headers that mimic a real browser accessing Discord.
+        Returns headers dict with proper formatting for HTTP.
+        """
+        if not self.spoof_enabled or not self.browser_config:
+            return {'Authorization': self.token}
+
+        bc = self.browser_config
+
+        headers = {
+            # Authentication
+            'Authorization': self.token,
+
+            # Standard browser headers
+            'User-Agent': bc.get('user_agent', ''),
+            'Accept': bc.get('accept', '*/*'),
+            'Accept-Language': bc.get('accept_language', 'en-US,en;q=0.9'),
+            'Accept-Encoding': bc.get('accept_encoding', 'gzip, deflate, br'),
+            'Connection': bc.get('connection', 'keep-alive'),
+            'Cache-Control': bc.get('cache_control', 'no-cache'),
+            'Pragma': bc.get('pragma', 'no-cache'),
+
+            # Security fetch headers (modern Chrome/Firefox)
+            'Sec-CH-UA': bc.get('sec_ch_ua', ''),
+            'Sec-CH-UA-Mobile': bc.get('sec_ch_ua_mobile', '?0'),
+            'Sec-CH-UA-Platform': bc.get('sec_ch_ua_platform', ''),
+            'Sec-Fetch-Dest': bc.get('sec_fetch_dest', 'empty'),
+            'Sec-Fetch-Mode': bc.get('sec_fetch_mode', 'cors'),
+            'Sec-Fetch-Site': bc.get('sec_fetch_site', 'same-origin'),
+
+            # Discord-specific headers
+            'X-Discord-Locale': bc.get('x_discord_locale', 'en-US'),
+            'X-Discord-Timezone': bc.get('x_discord_timezone', 'America/New_York'),
+            'X-Debug-Options': bc.get('x_debug_options', 'bugReporterEnabled'),
+
+            # Origin/Referer
+            'Origin': bc.get('origin', 'https://discord.com'),
+            'Referer': bc.get('referer', 'https://discord.com/channels/@me'),
+        }
+
+        # Add X-Super-Properties (Discord client fingerprint)
+        super_props = self._build_super_properties()
+        if super_props:
+            headers['X-Super-Properties'] = super_props
+
+        # Remove empty headers
+        headers = {k: v for k, v in headers.items() if v}
+
+        return headers
+
+    def _configure_session(self):
+        """
+        Configure the requests session with browser-like settings.
+        Sets up persistent connections, cookies, and default headers.
+        """
+        # Set default headers on session
+        self.session.headers.update(self._build_browser_headers())
+
+        # Configure session for browser-like behavior
+        # Retry adapter for connection reliability
+        from requests.adapters import HTTPAdapter
+        from urllib3.util.retry import Retry
+
+        retry_strategy = Retry(
+            total=3,
+            backoff_factor=0.5,
+            status_forcelist=[429, 500, 502, 503, 504],
+        )
+        adapter = HTTPAdapter(max_retries=retry_strategy, pool_connections=10, pool_maxsize=10)
+        self.session.mount("https://", adapter)
+        self.session.mount("http://", adapter)
+
+    def update_referer(self, channel_id=None):
+        """Update referer header to match current channel context."""
+        if channel_id:
+            self.session.headers['Referer'] = f'https://discord.com/channels/@me/{channel_id}'
+
     def fetch_messages(self, limit=100, before_id=None):
-        """Fetch messages from Discord channel."""
+        """
+        Fetch messages from Discord channel.
+        Uses browser spoofing to appear as regular web traffic.
+        """
         url = f"{self.base_url}/{self.api_version}/channels/{self.channel_id}/messages"
-        headers = {'Authorization': self.token}
         params = {'limit': min(limit, 100)}
 
         if before_id:
             params['before'] = before_id
 
+        # Update referer to match current channel
+        self.update_referer(self.channel_id)
+
         try:
-            response = requests.get(url, headers=headers, params=params, timeout=10)
+            response = self.session.get(url, params=params, timeout=10)
             if response.status_code == 200:
                 return response.json()
             else:
                 print(f"Discord API error: {response.status_code}")
+                if response.status_code == 401:
+                    print("  -> Token may be invalid or expired")
+                elif response.status_code == 403:
+                    print("  -> Access forbidden - check channel permissions")
+                elif response.status_code == 429:
+                    print("  -> Rate limited - waiting before retry")
+                    retry_after = response.headers.get('Retry-After', 5)
+                    time.sleep(float(retry_after))
                 return []
         except requests.RequestException as e:
             print(f"Discord request failed: {e}")
             return []
+
+    def close(self):
+        """Close the session and release resources."""
+        if self.session:
+            self.session.close()
 
     def fetch_messages_for_days(self, days=5):
         """Fetch all messages for the specified number of days."""
