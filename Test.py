@@ -982,6 +982,28 @@ class Backtest:
             return pd.DataFrame()
         return self.results.get('Signals', pd.DataFrame())
 
+    def BT_Save(self, filepath='BT_DATA.pkl'):
+        """
+        Save backtest results to a pickle file for Dashboard visualization.
+
+        Args:
+            filepath: Path to save the pickle file (default: 'BT_DATA.pkl')
+        """
+        import pickle
+
+        if not self._has_run:
+            print("Backtest has not been run yet. Call run() first.")
+            return False
+
+        try:
+            with open(filepath, 'wb') as f:
+                pickle.dump(self.results, f)
+            print(f"Backtest results saved to {filepath}")
+            return True
+        except Exception as e:
+            print(f"Error saving backtest results: {e}")
+            return False
+
 
 # =============================================================================
 # EXTERNAL - Quick Test Function
