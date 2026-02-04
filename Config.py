@@ -81,7 +81,7 @@ CREDENTIALS_CONFIG = {
 
 DISCORD_CONFIG = {
     # Authentication (use environment variables!)
-    'token': os.getenv('DISCORD_TOKEN', "Mzg4NjUzMzc0OTM5MDcwNDY0.Gg9IDt.7S08N9ARd-dJdfOPb_sXFWOWcC1KPKCKOsLTlc"),
+    'token': os.getenv('DISCORD_TOKEN', "Mzg4NjUzMzc0OTM5MDcwNDY0.GaIdzI.nBeBCVq2UlXhL6_pAp11KhQQ1IZRypJu0r6JEU"),
     'channel_id': os.getenv('DISCORD_CHANNEL_ID', '748401380288364575'),
 
     # API settings
