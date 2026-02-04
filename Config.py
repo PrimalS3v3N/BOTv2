@@ -500,6 +500,39 @@ BACKTEST_CONFIG = {
         'trailing_stop_pct': 0.30,          # Trail at 30% below highest price
     },
 
+    # Tiered Profit Exit Settings
+    # Dynamic profit target system based on profit percentage
+    # Only active when stock price > EMA 30
+    # Tiers define when profit targets are set and what they are
+    'tiered_profit_exit': {
+        'enabled': True,
+        'stop_loss_pct': 0.30,              # Stop loss % used for trailing calculation
+
+        # Contract tiers (for future multi-contract support)
+        # Tier 1: 1 contract - sell all at exit signal
+        # Tier 2: 3 contracts - sell 1 at each profit tier
+        # Tier 3: 5+ contracts - sell progressively at profit tiers
+        'tier_1_contracts': 1,
+        'tier_2_contracts': 3,
+        'tier_3_contracts': 5,
+
+        # Profit tiers: {profit_pct_threshold: target_above_entry_pct}
+        # When profit reaches threshold, set target to % above entry
+        'profit_tiers': {
+            35: 0.10,   # 35% profit -> target = 10% above entry
+            50: 0.20,   # 50% profit -> target = 20% above entry
+            75: 0.35,   # 75% profit -> target = 35% above entry
+            100: 0.50,  # 100% profit -> target = 50% above entry, start trailing
+            125: None,  # 125% profit -> trailing = (1-stop_loss) * max_price
+            200: None,  # 200% profit -> immediate sell
+        },
+
+        # Trailing mode settings (activates at 100%+ profit)
+        'trailing_start_pct': 100,          # Start trailing at 100% profit
+        'trailing_floor_pct': 0.50,         # Minimum target = 50% above entry
+        'immediate_sell_pct': 200,          # Sell immediately at 200% profit
+    },
+
     # Technical Indicators for Backtest
     'indicators': {
         'ema_period': 30,                   # 30-bar EMA (30 minutes on 1m data)

@@ -195,6 +195,329 @@ def check_stop_loss(entry_price, current_price, highest_price_since_entry,
     }
 
 
+class TieredProfitExit:
+    """
+    Tiered Profit Exit Strategy for Options Contracts.
+
+    Implements a dynamic profit target system with tiered contract management:
+
+    Contract Tiers:
+    - Tier 1: 1 contract - sell all at exit signal
+    - Tier 2: 3 contracts - sell 1 at each profit tier
+    - Tier 3: 5+ contracts - sell progressively at profit tiers
+
+    Profit Target Tiers (when stock price > EMA 30):
+    - 35% profit: move target to 10% above entry
+    - 50% profit: move target to 20% above entry
+    - 75% profit: move target to 35% above entry
+    - 100% profit: move target to 50% above entry, start trailing
+    - 125% profit: trailing = (1 - stop_loss_pct) * max_option_price
+    - 200% profit: sell immediately (can be modified later)
+
+    Sell Signals:
+    - Option price drops below profit target
+    - Option price drops below EMA 30 (when active)
+    """
+
+    # Profit tier modes
+    MODE_INITIAL = 'initial'           # No profit target set
+    MODE_TIER_35 = 'tier_35'           # 35% profit reached, target = 10%
+    MODE_TIER_50 = 'tier_50'           # 50% profit reached, target = 20%
+    MODE_TIER_75 = 'tier_75'           # 75% profit reached, target = 35%
+    MODE_TIER_100 = 'tier_100'         # 100% profit reached, target = 50%, trailing starts
+    MODE_TIER_125 = 'tier_125'         # 125% profit reached, advanced trailing
+    MODE_TIER_200 = 'tier_200'         # 200% profit reached, sell signal
+
+    # Contract tiers
+    TIER_1_CONTRACTS = 1
+    TIER_2_CONTRACTS = 3
+    TIER_3_CONTRACTS = 5
+
+    def __init__(self, entry_price, contracts=1, stop_loss_pct=0.30):
+        """
+        Initialize tiered profit exit manager.
+
+        Args:
+            entry_price: Contract entry price
+            contracts: Number of contracts held (default: 1)
+            stop_loss_pct: Stop loss percentage for trailing calculation (default: 0.30)
+        """
+        self.entry_price = entry_price
+        self.contracts = contracts
+        self.stop_loss_pct = stop_loss_pct
+
+        # Current state
+        self.mode = self.MODE_INITIAL
+        self.max_option_price = entry_price
+        self.profit_target = None  # No initial profit target
+        self.is_trailing = False
+        self.is_active = False  # Only active when stock > EMA 30
+
+        # Track contracts sold at each tier
+        self.contracts_remaining = contracts
+        self.contracts_sold = 0
+
+        # Determine contract tier
+        if contracts >= self.TIER_3_CONTRACTS:
+            self.contract_tier = 3
+        elif contracts >= self.TIER_2_CONTRACTS:
+            self.contract_tier = 2
+        else:
+            self.contract_tier = 1
+
+    def _calculate_profit_pct(self, current_price):
+        """Calculate current profit percentage."""
+        if self.entry_price <= 0:
+            return 0.0
+        return ((current_price - self.entry_price) / self.entry_price) * 100
+
+    def _calculate_profit_target(self, target_pct):
+        """Calculate profit target price from percentage above entry."""
+        return self.entry_price * (1.0 + target_pct)
+
+    def _get_contracts_to_sell(self):
+        """
+        Determine how many contracts to sell based on tier.
+
+        Returns:
+            Number of contracts to sell at current profit tier
+        """
+        if self.contract_tier == 1:
+            return self.contracts_remaining
+        elif self.contract_tier == 2:
+            # Tier 2: sell 1 contract at each major tier
+            return min(1, self.contracts_remaining)
+        else:
+            # Tier 3 (5+): sell progressively
+            # Sell 1-2 contracts at each tier
+            return min(2, self.contracts_remaining)
+
+    def update(self, current_option_price, stock_price, ema_30):
+        """
+        Update profit target based on current prices and EMA condition.
+
+        Args:
+            current_option_price: Current option contract price
+            stock_price: Current stock price
+            ema_30: Current EMA 30 value
+
+        Returns:
+            dict with:
+                - profit_target: Current profit target price (None if not set)
+                - mode: Current profit tier mode
+                - triggered: True if sell signal triggered
+                - sell_reason: Reason for sell signal (if triggered)
+                - contracts_to_sell: Number of contracts to sell
+                - max_price: Highest option price seen
+                - is_active: Whether profit targeting is active
+        """
+        # Update max option price
+        if current_option_price > self.max_option_price:
+            self.max_option_price = current_option_price
+
+        # Calculate current profit percentage
+        profit_pct = self._calculate_profit_pct(current_option_price)
+
+        # Check if stock is above EMA 30 (activates profit targeting)
+        self.is_active = stock_price > ema_30 if not np.isnan(ema_30) else False
+
+        triggered = False
+        sell_reason = None
+        contracts_to_sell = 0
+
+        # Only apply profit targeting when stock > EMA 30
+        if self.is_active:
+            # Mode transitions based on profit percentage
+            previous_mode = self.mode
+
+            if profit_pct >= 200:
+                self.mode = self.MODE_TIER_200
+                self.profit_target = self._calculate_profit_target(0.50)
+                self.is_trailing = True
+            elif profit_pct >= 125:
+                self.mode = self.MODE_TIER_125
+                # Trailing = (1 - stop_loss_pct) * max_option_price
+                self.profit_target = (1.0 - self.stop_loss_pct) * self.max_option_price
+                self.is_trailing = True
+            elif profit_pct >= 100:
+                self.mode = self.MODE_TIER_100
+                self.profit_target = self._calculate_profit_target(0.50)
+                self.is_trailing = True
+            elif profit_pct >= 75:
+                self.mode = self.MODE_TIER_75
+                self.profit_target = self._calculate_profit_target(0.35)
+            elif profit_pct >= 50:
+                self.mode = self.MODE_TIER_50
+                self.profit_target = self._calculate_profit_target(0.20)
+            elif profit_pct >= 35:
+                self.mode = self.MODE_TIER_35
+                self.profit_target = self._calculate_profit_target(0.10)
+
+            # If in trailing mode (100%+), update profit target to trail max price
+            if self.is_trailing and self.mode in [self.MODE_TIER_100, self.MODE_TIER_125, self.MODE_TIER_200]:
+                if self.mode == self.MODE_TIER_125:
+                    # Advanced trailing: (1 - stop_loss_pct) * max_price
+                    trailing_target = (1.0 - self.stop_loss_pct) * self.max_option_price
+                else:
+                    # Standard trailing: 50% above entry as floor, trail max
+                    floor_target = self._calculate_profit_target(0.50)
+                    trailing_target = max(floor_target, (1.0 - self.stop_loss_pct) * self.max_option_price)
+
+                # Only move target up, never down
+                if self.profit_target is None or trailing_target > self.profit_target:
+                    self.profit_target = trailing_target
+
+            # Check sell triggers
+            # Trigger 1: 200% profit - immediate sell
+            if self.mode == self.MODE_TIER_200:
+                triggered = True
+                sell_reason = 'profit_200_pct'
+                contracts_to_sell = self.contracts_remaining
+
+            # Trigger 2: Price dropped below profit target
+            elif self.profit_target is not None and current_option_price <= self.profit_target:
+                triggered = True
+                sell_reason = f'profit_target_{self.mode}'
+                contracts_to_sell = self._get_contracts_to_sell()
+
+        # Trigger 3: Price dropped below EMA 30 (regardless of stock/EMA relationship)
+        # This is a protective sell when option price itself falls below EMA 30 equivalent
+        # Note: This would need option EMA, but we use stock EMA as proxy signal
+        # If stock drops below EMA 30, it's a bearish signal
+        if not self.is_active and self.profit_target is not None:
+            # Stock below EMA 30 - bearish, check if we should protect profits
+            if current_option_price <= self.profit_target:
+                triggered = True
+                sell_reason = 'ema_30_bearish'
+                contracts_to_sell = self._get_contracts_to_sell()
+
+        return {
+            'profit_target': self.profit_target,
+            'mode': self.mode,
+            'triggered': triggered,
+            'sell_reason': sell_reason,
+            'contracts_to_sell': contracts_to_sell,
+            'max_price': self.max_option_price,
+            'is_active': self.is_active,
+            'profit_pct': profit_pct,
+            'is_trailing': self.is_trailing,
+            'contracts_remaining': self.contracts_remaining
+        }
+
+    def execute_sell(self, contracts_sold):
+        """
+        Record contracts sold.
+
+        Args:
+            contracts_sold: Number of contracts that were sold
+        """
+        self.contracts_sold += contracts_sold
+        self.contracts_remaining -= contracts_sold
+
+    def get_state(self):
+        """Get current profit target state."""
+        return {
+            'entry_price': self.entry_price,
+            'profit_target': self.profit_target,
+            'mode': self.mode,
+            'max_price': self.max_option_price,
+            'is_active': self.is_active,
+            'is_trailing': self.is_trailing,
+            'contracts': self.contracts,
+            'contracts_remaining': self.contracts_remaining,
+            'contract_tier': self.contract_tier,
+            'stop_loss_pct': self.stop_loss_pct
+        }
+
+
+def check_profit_target(entry_price, current_option_price, max_option_price,
+                        stock_price, ema_30, stop_loss_pct=0.30, current_mode='initial'):
+    """
+    Stateless profit target check function for use in backtesting.
+
+    Args:
+        entry_price: Contract entry price
+        current_option_price: Current option contract price
+        max_option_price: Highest option price seen since entry
+        stock_price: Current stock price
+        ema_30: Current EMA 30 value
+        stop_loss_pct: Stop loss percentage for trailing (default: 0.30)
+        current_mode: Current profit tier mode
+
+    Returns:
+        dict with:
+            - profit_target: Current profit target price
+            - mode: Updated profit tier mode
+            - triggered: True if sell signal triggered
+            - sell_reason: Reason for sell (if triggered)
+            - max_price: Updated max option price
+            - is_active: Whether profit targeting is active
+    """
+    # Update max price
+    max_price = max(max_option_price, current_option_price)
+
+    # Calculate profit percentage
+    profit_pct = ((current_option_price - entry_price) / entry_price) * 100 if entry_price > 0 else 0
+
+    # Check if stock > EMA 30
+    is_active = stock_price > ema_30 if not np.isnan(ema_30) else False
+
+    # Determine mode and profit target
+    mode = current_mode
+    profit_target = None
+    is_trailing = False
+
+    if is_active:
+        if profit_pct >= 200:
+            mode = 'tier_200'
+            profit_target = entry_price * 1.50
+            is_trailing = True
+        elif profit_pct >= 125:
+            mode = 'tier_125'
+            profit_target = (1.0 - stop_loss_pct) * max_price
+            is_trailing = True
+        elif profit_pct >= 100:
+            mode = 'tier_100'
+            floor_target = entry_price * 1.50
+            trailing_target = (1.0 - stop_loss_pct) * max_price
+            profit_target = max(floor_target, trailing_target)
+            is_trailing = True
+        elif profit_pct >= 75:
+            mode = 'tier_75'
+            profit_target = entry_price * 1.35
+        elif profit_pct >= 50:
+            mode = 'tier_50'
+            profit_target = entry_price * 1.20
+        elif profit_pct >= 35:
+            mode = 'tier_35'
+            profit_target = entry_price * 1.10
+
+    # Check triggers
+    triggered = False
+    sell_reason = None
+
+    if mode == 'tier_200':
+        triggered = True
+        sell_reason = 'profit_200_pct'
+    elif profit_target is not None and current_option_price <= profit_target:
+        triggered = True
+        sell_reason = f'profit_target_{mode}'
+    elif not is_active and profit_target is not None and current_option_price <= profit_target:
+        triggered = True
+        sell_reason = 'ema_30_bearish'
+
+    return {
+        'profit_target': profit_target,
+        'mode': mode,
+        'triggered': triggered,
+        'sell_reason': sell_reason,
+        'max_price': max_price,
+        'is_active': is_active,
+        'profit_pct': profit_pct,
+        'is_trailing': is_trailing
+    }
+
+
 """
 ================================================================================
 EXTERNAL - Module Interface
@@ -205,4 +528,4 @@ Modules: Config.py, Data.py, Analysis.py, Orders.py, Test.py
 import Config
 
 # Export for use by other modules
-__all__ = ['DynamicStopLoss', 'check_stop_loss']
+__all__ = ['DynamicStopLoss', 'check_stop_loss', 'TieredProfitExit', 'check_profit_target']
