@@ -835,13 +835,15 @@ class Backtest:
         stop_loss_pct = dsl_config.get('default_stop_loss_pct', 0.30)
         trailing_trigger_pct = dsl_config.get('trailing_trigger_pct', 0.50)
         trailing_stop_pct = dsl_config.get('trailing_stop_pct', 0.30)
+        breakeven_min_minutes = dsl_config.get('breakeven_min_minutes', 30)
 
         # Initialize dynamic stop loss manager
         dynamic_sl = DynamicStopLoss(
             entry_price=position.entry_price,
             stop_loss_pct=stop_loss_pct,
             trailing_trigger_pct=trailing_trigger_pct,
-            trailing_stop_pct=trailing_stop_pct
+            trailing_stop_pct=trailing_stop_pct,
+            breakeven_min_minutes=breakeven_min_minutes
         )
 
         for i, (timestamp, bar) in enumerate(stock_data.iterrows()):
@@ -878,7 +880,8 @@ class Backtest:
                 stop_triggered = False
 
                 if dsl_enabled:
-                    sl_result = dynamic_sl.update(option_price)
+                    minutes_held = position.get_minutes_held(timestamp)
+                    sl_result = dynamic_sl.update(option_price, minutes_held=minutes_held)
                     stop_loss_price = sl_result['stop_loss']
                     stop_loss_mode = sl_result['mode']
                     stop_triggered = sl_result['triggered']
