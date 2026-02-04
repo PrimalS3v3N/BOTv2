@@ -27,6 +27,7 @@ import datetime as dt
 from datetime import timedelta, date
 from zoneinfo import ZoneInfo
 import time
+import random
 import requests
 import base64
 import json
@@ -80,6 +81,15 @@ class DiscordFetcher:
         self.spoof_enabled = discord_config.get('spoof_browser', True)
         self.browser_config = discord_config.get('browser_config', {})
         self.super_properties = discord_config.get('x_super_properties', {})
+
+        # Rate limiting configuration - human-like timing
+        rate_config = discord_config.get('rate_limit', {})
+        self.min_delay = rate_config.get('min_delay', 2.0)
+        self.max_delay = rate_config.get('max_delay', 5.0)
+        self.batch_size = rate_config.get('batch_size', 50)
+        self.long_pause_chance = rate_config.get('long_pause_chance', 0.15)
+        self.long_pause_min = rate_config.get('long_pause_min', 8.0)
+        self.long_pause_max = rate_config.get('long_pause_max', 15.0)
 
         # Create persistent session for connection reuse and cookie handling
         self.session = requests.Session()
@@ -213,16 +223,39 @@ class DiscordFetcher:
         if self.session:
             self.session.close()
 
+    def _human_delay(self):
+        """
+        Generate human-like delay between requests.
+        Randomized timing with occasional longer pauses to simulate
+        a real user scrolling and reading messages.
+        """
+        # Check if we should take a longer "reading" pause
+        if random.random() < self.long_pause_chance:
+            delay = random.uniform(self.long_pause_min, self.long_pause_max)
+            print(f"    (pausing {delay:.1f}s...)")
+        else:
+            # Normal randomized delay
+            delay = random.uniform(self.min_delay, self.max_delay)
+
+        time.sleep(delay)
+
     def fetch_messages_for_days(self, days=5):
-        """Fetch all messages for the specified number of days."""
+        """
+        Fetch all messages for the specified number of days.
+        Uses human-like timing to avoid detection.
+        """
         cutoff_date = dt.datetime.now(EASTERN) - timedelta(days=days)
         all_messages = []
         before_id = None
+        request_count = 0
 
         print(f"Fetching Discord messages for last {days} days...")
+        print(f"  Using {self.batch_size} msgs/request with {self.min_delay}-{self.max_delay}s delays")
 
         while True:
-            messages = self.fetch_messages(limit=100, before_id=before_id)
+            # Use configured batch size instead of max 100
+            messages = self.fetch_messages(limit=self.batch_size, before_id=before_id)
+            request_count += 1
 
             if not messages:
                 break
@@ -263,7 +296,8 @@ class DiscordFetcher:
             else:
                 break
 
-            time.sleep(0.5)
+            # Human-like delay between requests
+            self._human_delay()
 
         if all_messages:
             df = pd.DataFrame(all_messages)
