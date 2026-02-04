@@ -708,17 +708,29 @@ def main():
     else:
         st.error("Could not create chart")
 
-    # Trade Summary below chart
+    # Trade Summary below chart (two rows)
     st.subheader("Trade Summary")
     summary = get_trade_summary(df)
-    cols = st.columns(7)
-    cols[0].metric("Entry", f"${summary['entry']:.2f}")
-    cols[1].metric("Exit", f"${summary['exit']:.2f}")
-    cols[2].metric("P&L", f"{summary['pnl_pct']:+.1f}%")
-    cols[3].metric("Max Profit", f"{summary['max_profit_pct']:+.1f}%")
-    cols[4].metric("Min Profit", f"{summary['min_profit_pct']:+.1f}%")
-    cols[5].metric("Exit Reason", summary['exit_reason'])
-    cols[6].metric("Duration", f"{summary['duration']:.0f}m")
+
+    # Row 1: Entry | Exit | P&L | TBD | TBD | TBD | TBD
+    row1 = st.columns(7)
+    row1[0].metric("Entry", f"${summary['entry']:.2f}")
+    row1[1].metric("Exit", f"${summary['exit']:.2f}")
+    row1[2].metric("P&L", f"{summary['pnl_pct']:+.1f}%")
+    row1[3].metric("TBD", "1")
+    row1[4].metric("TBD", "1")
+    row1[5].metric("TBD", "1")
+    row1[6].metric("TBD", "1")
+
+    # Row 2: Min Profit | Exit Reason | Max Profit | TBD | TBD | TBD | TBD
+    row2 = st.columns(7)
+    row2[0].metric("Min Profit", f"{summary['min_profit_pct']:+.1f}%")
+    row2[1].metric("Exit Reason", summary['exit_reason'])
+    row2[2].metric("Max Profit", f"{summary['max_profit_pct']:+.1f}%")
+    row2[3].metric("TBD", "1")
+    row2[4].metric("TBD", "1")
+    row2[5].metric("TBD", "1")
+    row2[6].metric("TBD", "1")
 
     # Data table
     st.subheader("Trade Details")
