@@ -561,7 +561,7 @@ class TrackingMatrix:
 
     def add_record(self, timestamp, stock_price, option_price, volume, holding=True,
                    stop_loss=np.nan, stop_loss_mode=None, vwap=np.nan, ema_30=np.nan,
-                   stock_high=np.nan, stock_low=np.nan, ewo=np.nan,
+                   stock_high=np.nan, stock_low=np.nan, ewo=np.nan, ewo_15min_avg=np.nan,
                    profit_target=np.nan, profit_target_mode=None, max_option_price=np.nan,
                    profit_target_active=False):
         """Add a tracking record."""
@@ -593,6 +593,7 @@ class TrackingMatrix:
             'vwap': vwap,
             'ema_30': ema_30,
             'ewo': ewo,
+            'ewo_15min_avg': ewo_15min_avg,
         }
 
         self.records.append(record)
@@ -879,6 +880,7 @@ class Backtest:
             vwap = bar.get('vwap', np.nan)
             ema_30 = bar.get('ema_30', np.nan)
             ewo = bar.get('ewo', np.nan)
+            ewo_15min_avg = bar.get('ewo_15min_avg', np.nan)
 
             current_days_to_expiry = max(0, days_to_expiry - (timestamp.date() - position.entry_time.date()).days)
 
@@ -943,6 +945,7 @@ class Backtest:
                     stock_high=stock_high,
                     stock_low=stock_low,
                     ewo=ewo,
+                    ewo_15min_avg=ewo_15min_avg,
                     profit_target=profit_target_price,
                     profit_target_mode=profit_target_mode,
                     max_option_price=max_option_price,
@@ -980,6 +983,7 @@ class Backtest:
                     stock_high=stock_high,
                     stock_low=stock_low,
                     ewo=ewo,
+                    ewo_15min_avg=ewo_15min_avg,
                     profit_target=np.nan,
                     profit_target_mode=None,
                     max_option_price=np.nan,

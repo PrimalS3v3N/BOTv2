@@ -109,7 +109,7 @@ def EWO(df, column='close', fast_period=5, slow_period=35):
     return ema_fast - ema_slow
 
 
-def add_indicators(df, ema_period=30, ewo_fast=5, ewo_slow=35):
+def add_indicators(df, ema_period=30, ewo_fast=5, ewo_slow=35, ewo_avg_period=15):
     """
     Add all standard indicators to a DataFrame.
 
@@ -118,12 +118,14 @@ def add_indicators(df, ema_period=30, ewo_fast=5, ewo_slow=35):
         ema_period: Period for EMA calculation (default: 30)
         ewo_fast: Fast period for EWO (default: 5)
         ewo_slow: Slow period for EWO (default: 35)
+        ewo_avg_period: Period for EWO rolling average (default: 15 for 15-min avg on 1-min data)
 
     Returns:
         DataFrame with added indicator columns:
         - ema_30: 30-period EMA
         - vwap: Volume Weighted Average Price
         - ewo: Elliott Wave Oscillator
+        - ewo_15min_avg: 15-minute rolling average of EWO
     """
     df = df.copy()
 
@@ -135,6 +137,9 @@ def add_indicators(df, ema_period=30, ewo_fast=5, ewo_slow=35):
 
     # Add EWO
     df['ewo'] = EWO(df, column='close', fast_period=ewo_fast, slow_period=ewo_slow)
+
+    # Add EWO 15-minute rolling average (simple moving average over ewo_avg_period bars)
+    df['ewo_15min_avg'] = df['ewo'].rolling(window=ewo_avg_period, min_periods=1).mean()
 
     return df
 
