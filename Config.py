@@ -99,6 +99,16 @@ DISCORD_CONFIG = {
     # Signal parsing
     'alert_marker': '<a:RedAlert:759583962237763595>',  # Discord alert emoji ID
 
+    # Rate limiting - human-like request timing to avoid detection
+    'rate_limit': {
+        'min_delay': 2.0,           # Minimum seconds between requests
+        'max_delay': 5.0,           # Maximum seconds between requests
+        'batch_size': 50,           # Messages per request (lower = more natural)
+        'long_pause_chance': 0.15,  # 15% chance of longer pause (simulates reading)
+        'long_pause_min': 8.0,      # Long pause minimum seconds
+        'long_pause_max': 15.0,     # Long pause maximum seconds
+    },
+
     # Browser spoofing settings - makes requests appear as regular browser traffic
     'spoof_browser': True,         # Enable browser spoofing
     'browser_config': {
