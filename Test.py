@@ -768,6 +768,9 @@ class Backtest:
         self.results = self._compile_results()
         self._has_run = True
 
+        # Display summary in terminal
+        self.summary()
+
         return self.results
 
     def _process_signal(self, signal):
@@ -955,19 +958,21 @@ class Backtest:
                 # Check for profit target exit first (takes priority over stop loss)
                 if tpe_enabled and profit_triggered and not position.is_closed:
                     exit_price = option_price * (1 - self.slippage_pct)
-                    exit_reason = profit_sell_reason
+                    # Map profit sell reasons to user-friendly format
+                    exit_reason = self._format_exit_reason(profit_sell_reason)
                     position.close(exit_price, timestamp, exit_reason)
 
                 # Check for stop loss exit (only if dynamic stop loss is enabled)
                 elif dsl_enabled and stop_triggered and not position.is_closed:
                     exit_price = option_price * (1 - self.slippage_pct)
-                    exit_reason = f'stop_loss_{stop_loss_mode}'
+                    # Map stop loss mode to user-friendly format
+                    exit_reason = self._format_exit_reason(f'stop_loss_{stop_loss_mode}')
                     position.close(exit_price, timestamp, exit_reason)
 
                 # Exit at market close
                 elif timestamp.time() >= dt.time(15, 55) and not position.is_closed:
                     exit_price = option_price * (1 - self.slippage_pct)
-                    position.close(exit_price, timestamp, 'market_close')
+                    position.close(exit_price, timestamp, 'Market Close')
             else:
                 # Record tracking data for non-holding periods (pre-entry or post-exit)
                 matrix.add_record(
@@ -993,7 +998,53 @@ class Backtest:
         # Close at end of data if still open
         if not position.is_closed:
             exit_price = position.current_price * (1 - self.slippage_pct)
-            position.close(exit_price, stock_data.index[-1], 'market_close')
+            position.close(exit_price, stock_data.index[-1], 'Market Close')
+
+    def _format_exit_reason(self, reason):
+        """
+        Format exit reason to user-friendly display string.
+
+        Mappings:
+        - profit_target_tier_35, profit_200_pct, etc. -> "Profit - XX"
+        - stop_loss_initial -> "SL - Initial"
+        - stop_loss_breakeven -> "SL - Breakeven"
+        - stop_loss_trailing -> "SL - Trailing"
+        - X_EMA -> "EMA Exit"
+        - market_close -> "Market Close"
+        """
+        if reason is None:
+            return 'Unknown'
+
+        # Profit target exits
+        if 'profit_target_tier_35' in reason:
+            return 'Profit - 35'
+        elif 'profit_target_tier_50' in reason:
+            return 'Profit - 50'
+        elif 'profit_target_tier_75' in reason:
+            return 'Profit - 75'
+        elif 'profit_target_tier_100' in reason:
+            return 'Profit - 100'
+        elif 'profit_target_tier_125' in reason:
+            return 'Profit - 125'
+        elif 'profit_target_tier_200' in reason or 'profit_200_pct' in reason:
+            return 'Profit - 200'
+        elif 'X_EMA' in reason or 'ema_30_bearish' in reason:
+            return 'EMA Exit'
+
+        # Stop loss exits
+        elif reason == 'stop_loss_initial':
+            return 'SL - Initial'
+        elif reason == 'stop_loss_breakeven':
+            return 'SL - Breakeven'
+        elif reason == 'stop_loss_trailing':
+            return 'SL - Trailing'
+
+        # Market close
+        elif reason == 'market_close':
+            return 'Market Close'
+
+        # Return original if no mapping found
+        return reason
 
     def _compile_results(self):
         """Compile backtest results into DataFrames."""
@@ -1036,6 +1087,14 @@ class Backtest:
         commission_total = total_trades * self.commission_per_contract * self.default_contracts * 2
         net_pnl = total_pnl - commission_total
 
+        # Calculate capital metrics
+        # Capital per position = entry_price * 100 (option multiplier) * contracts
+        positions_df['position_cost'] = positions_df['entry_price'] * 100 * positions_df['contracts']
+        total_capital_utilized = positions_df['position_cost'].sum()
+
+        # Calculate max capital held at any one time (considering overlapping positions)
+        max_capital_held = self._calculate_max_capital_held(positions_df)
+
         return {
             'total_trades': total_trades,
             'closed_trades': len(closed_trades),
@@ -1050,8 +1109,48 @@ class Backtest:
             'worst_trade': closed_trades['pnl'].min() if len(closed_trades) > 0 else 0,
             'average_minutes_held': closed_trades['minutes_held'].mean() if len(closed_trades) > 0 else 0,
             'profit_factor': abs(winners['pnl'].sum() / losers['pnl'].sum()) if len(losers) > 0 and losers['pnl'].sum() != 0 else float('inf'),
-            'exit_reasons': closed_trades['exit_reason'].value_counts().to_dict() if len(closed_trades) > 0 else {}
+            'exit_reasons': closed_trades['exit_reason'].value_counts().to_dict() if len(closed_trades) > 0 else {},
+            'initial_capital': self.initial_capital,
+            'total_capital_utilized': total_capital_utilized,
+            'max_capital_held': max_capital_held
         }
+
+    def _calculate_max_capital_held(self, positions_df):
+        """
+        Calculate maximum capital held at any one time.
+
+        Tracks overlapping positions to find peak capital usage.
+        """
+        if positions_df.empty:
+            return 0.0
+
+        # Create events list: (+cost at entry, -cost at exit)
+        events = []
+        for _, row in positions_df.iterrows():
+            cost = row['entry_price'] * 100 * row['contracts']
+            entry_time = row['entry_time']
+            exit_time = row['exit_time']
+
+            if pd.notna(entry_time):
+                events.append((entry_time, cost))  # Add capital at entry
+            if pd.notna(exit_time):
+                events.append((exit_time, -cost))  # Release capital at exit
+
+        if not events:
+            return 0.0
+
+        # Sort events by time
+        events.sort(key=lambda x: x[0])
+
+        # Track running capital and find maximum
+        running_capital = 0.0
+        max_capital = 0.0
+
+        for _, amount in events:
+            running_capital += amount
+            max_capital = max(max_capital, running_capital)
+
+        return max_capital
 
     def _empty_results(self):
         """Return empty results structure."""
@@ -1077,6 +1176,11 @@ class Backtest:
         if not summary:
             print("No trades executed")
             return
+
+        print(f"\nCAPITAL:")
+        print(f"  Initial Capital: ${summary.get('initial_capital', 0):,.2f}")
+        print(f"  Capital Utilized: ${summary.get('total_capital_utilized', 0):,.2f}")
+        print(f"  Max Capital Held: ${summary.get('max_capital_held', 0):,.2f}")
 
         print(f"\nTRADE STATISTICS:")
         print(f"  Total Signals: {len(self.signals_df) if self.signals_df is not None else 0}")
