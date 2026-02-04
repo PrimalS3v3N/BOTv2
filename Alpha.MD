@@ -115,6 +115,7 @@ Three-phase stop loss system for options contracts:
 2. **BREAKEVEN Phase**: When price rises above threshold, move stop to entry price
    - Threshold = entry_price / (1 - stop_loss_pct)
    - Example: Entry $1.00, 30% SL → threshold = $1.43
+   - **Requires minimum 30 minutes held** before transitioning to breakeven
 
 3. **TRAILING Phase**: When price reaches 50% above entry, trail at 30% below highest price
    - Only uses price highs AFTER entry (not before)

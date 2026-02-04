@@ -489,11 +489,13 @@ BACKTEST_CONFIG = {
     # Dynamic Stop Loss Settings
     # Phase 1 (INITIAL): Fixed stop at entry * (1 - default_stop_loss_pct)
     # Phase 2 (BREAKEVEN): Move stop to entry when price >= breakeven_threshold
+    #                      Only after breakeven_min_minutes has passed
     # Phase 3 (TRAILING): Trail at trailing_stop_pct below highest price since entry
     'dynamic_stop_loss': {
         'enabled': True,
         'default_stop_loss_pct': 0.30,      # 30% default stop loss from entry
         'breakeven_threshold_pct': None,    # None = auto-calculate as entry/(1-stop_loss_pct)
+        'breakeven_min_minutes': 30,        # Minimum minutes before allowing breakeven transition
         'trailing_trigger_pct': 0.50,       # Start trailing at 50% profit
         'trailing_stop_pct': 0.30,          # Trail at 30% below highest price
     },

@@ -23,6 +23,7 @@ class DynamicStopLoss:
     2. BREAKEVEN: When price rises above breakeven_threshold, move stop to entry price.
        Breakeven threshold = entry_price / (1 - stop_loss_pct)
        Example: Entry $1.00, 30% SL -> threshold = $1.00 / 0.70 = $1.43
+       NOTE: Only transitions to breakeven after minimum hold time (default 30 mins).
 
     3. TRAILING: When price reaches 50% above entry, switch to trailing stop
        at 30% below the highest price since entry.
@@ -34,7 +35,7 @@ class DynamicStopLoss:
     MODE_TRAILING = 'trailing'
 
     def __init__(self, entry_price, stop_loss_pct=None, trailing_trigger_pct=0.50,
-                 trailing_stop_pct=0.30):
+                 trailing_stop_pct=0.30, breakeven_min_minutes=30):
         """
         Initialize dynamic stop loss manager.
 
@@ -43,11 +44,13 @@ class DynamicStopLoss:
             stop_loss_pct: Initial stop loss percentage (default: 0.30 = 30%)
             trailing_trigger_pct: Profit % to trigger trailing mode (default: 0.50 = 50%)
             trailing_stop_pct: Trailing stop % below high (default: 0.30 = 30%)
+            breakeven_min_minutes: Minimum minutes held before allowing breakeven (default: 30)
         """
         self.entry_price = entry_price
         self.stop_loss_pct = stop_loss_pct if stop_loss_pct is not None else 0.30
         self.trailing_trigger_pct = trailing_trigger_pct
         self.trailing_stop_pct = trailing_stop_pct
+        self.breakeven_min_minutes = breakeven_min_minutes
 
         # Current state
         self.mode = self.MODE_INITIAL
@@ -65,12 +68,13 @@ class DynamicStopLoss:
         """Calculate initial stop loss price."""
         return self.entry_price * (1.0 - self.stop_loss_pct)
 
-    def update(self, current_price):
+    def update(self, current_price, minutes_held=0):
         """
-        Update stop loss based on current price.
+        Update stop loss based on current price and time held.
 
         Args:
             current_price: Current contract price
+            minutes_held: Minutes since entry (default: 0)
 
         Returns:
             dict with:
@@ -85,7 +89,8 @@ class DynamicStopLoss:
         # Check mode transitions (only forward, never backward)
         if self.mode == self.MODE_INITIAL:
             # Check if we should move to breakeven
-            if current_price >= self.breakeven_threshold:
+            # Must meet BOTH conditions: price threshold AND minimum time held
+            if current_price >= self.breakeven_threshold and minutes_held >= self.breakeven_min_minutes:
                 self.mode = self.MODE_BREAKEVEN
                 self.stop_loss_price = self.entry_price  # Move stop to breakeven
 
@@ -125,13 +130,15 @@ class DynamicStopLoss:
             'trailing_trigger_pct': self.trailing_trigger_pct,
             'trailing_stop_pct': self.trailing_stop_pct,
             'breakeven_threshold': self.breakeven_threshold,
-            'trailing_trigger': self.trailing_trigger
+            'trailing_trigger': self.trailing_trigger,
+            'breakeven_min_minutes': self.breakeven_min_minutes
         }
 
 
 def check_stop_loss(entry_price, current_price, highest_price_since_entry,
                     stop_loss_pct=0.30, trailing_trigger_pct=0.50,
-                    trailing_stop_pct=0.30, current_mode='initial'):
+                    trailing_stop_pct=0.30, current_mode='initial',
+                    minutes_held=0, breakeven_min_minutes=30):
     """
     Stateless stop loss check function for use in backtesting.
 
@@ -143,6 +150,8 @@ def check_stop_loss(entry_price, current_price, highest_price_since_entry,
         trailing_trigger_pct: Profit % to trigger trailing mode (default: 50%)
         trailing_stop_pct: Trailing stop % below high (default: 30%)
         current_mode: Current stop loss mode ('initial', 'breakeven', 'trailing')
+        minutes_held: Minutes since entry (default: 0)
+        breakeven_min_minutes: Minimum minutes before allowing breakeven (default: 30)
 
     Returns:
         dict with:
@@ -157,7 +166,8 @@ def check_stop_loss(entry_price, current_price, highest_price_since_entry,
 
     # Determine mode
     mode = current_mode
-    if mode == 'initial' and current_price >= breakeven_threshold:
+    # Must meet BOTH conditions: price threshold AND minimum time held
+    if mode == 'initial' and current_price >= breakeven_threshold and minutes_held >= breakeven_min_minutes:
         mode = 'breakeven'
     if mode in ['initial', 'breakeven'] and current_price >= trailing_trigger:
         mode = 'trailing'
