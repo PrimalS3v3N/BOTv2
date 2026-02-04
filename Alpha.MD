@@ -105,6 +105,7 @@ Config.py ───────────────────────�
 
 **Implemented Strategies:**
 - Dynamic Stop Loss (3-phase exit strategy)
+- Tiered Profit Exit (profit-based exit with trailing)
 
 **Dynamic Stop Loss:**
 Three-phase stop loss system for options contracts:
@@ -122,9 +123,35 @@ Three-phase stop loss system for options contracts:
    - Only uses price highs AFTER entry (not before)
    - Stop only moves up, never down
 
+**Tiered Profit Exit:**
+Dynamic profit target system based on profit percentage tiers.
+Only active when stock price is ABOVE EMA 30.
+
+Contract Tiers (framework for multi-contract management):
+- Tier 1: 1 contract - sell all at exit signal
+- Tier 2: 3 contracts - sell 1 at each profit tier
+- Tier 3: 5+ contracts - sell progressively at profit tiers
+
+Profit Target Tiers (when stock > EMA 30):
+| Profit % | Target Set To | Behavior |
+|----------|---------------|----------|
+| 35%+ | 10% above entry | Lock in 10% profit floor |
+| 50%+ | 20% above entry | Lock in 20% profit floor |
+| 75%+ | 35% above entry | Lock in 35% profit floor |
+| 100%+ | 50% above entry | Start trailing, 50% floor |
+| 125%+ | (1-SL%) × max price | Advanced trailing |
+| 200%+ | Immediate sell | Take full profit |
+
+Sell Signals:
+- Option price drops below profit target
+- Stock price drops below EMA 30 (bearish signal)
+- 200% profit reached (immediate sell)
+
 **Classes:**
 - `DynamicStopLoss` - Stateful stop loss manager
 - `check_stop_loss()` - Stateless function for backtesting
+- `TieredProfitExit` - Stateful profit target manager
+- `check_profit_target()` - Stateless function for backtesting
 
 **Rules:**
 - Entry logic goes here
@@ -161,12 +188,15 @@ Three-phase stop loss system for options contracts:
 
 **Exit Strategies:**
 - Dynamic Stop Loss (3-phase: initial → breakeven → trailing)
+- Tiered Profit Exit (profit-based: tier_35 → tier_50 → tier_75 → tier_100 → tier_125 → tier_200)
 - Market close exit (default fallback)
 
 **Tracking Matrix Columns:**
 - timestamp, stock_price, stock_high, stock_low, option_price, volume
 - holding, entry_price, pnl, pnl_pct
 - stop_loss, stop_loss_mode (initial/breakeven/trailing)
+- profit_target, profit_target_mode (initial/tier_35/tier_50/tier_75/tier_100/tier_125/tier_200)
+- max_option_price, profit_target_active
 - vwap, ema_30, ewo
 
 **Rules:**
@@ -192,7 +222,8 @@ Three-phase stop loss system for options contracts:
 - Option price (orange line, right axis)
 - VWAP (green dashed line, left axis)
 - EMA 30 (purple dotted line, left axis)
-- Stop Loss (red dashed line, right axis)
+- Stop Loss (green dashed line with green shaded area below, right axis)
+- Profit Target (blue dotted line with blue shaded area above, right axis)
 - Entry/Exit markers with annotations
 - EWO subplot below main chart (with positive/negative fill)
 

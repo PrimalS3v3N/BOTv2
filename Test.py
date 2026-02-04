@@ -56,7 +56,7 @@ Modules: Config.py, Signal.py, Analysis.py, Strategy.py
 import Config
 import Signal
 import Analysis
-from Strategy import DynamicStopLoss
+from Strategy import DynamicStopLoss, TieredProfitExit
 
 
 # =============================================================================
@@ -561,7 +561,9 @@ class TrackingMatrix:
 
     def add_record(self, timestamp, stock_price, option_price, volume, holding=True,
                    stop_loss=np.nan, stop_loss_mode=None, vwap=np.nan, ema_30=np.nan,
-                   stock_high=np.nan, stock_low=np.nan, ewo=np.nan):
+                   stock_high=np.nan, stock_low=np.nan, ewo=np.nan,
+                   profit_target=np.nan, profit_target_mode=None, max_option_price=np.nan,
+                   profit_target_active=False):
         """Add a tracking record."""
         pnl_pct = self.position.get_pnl_pct(option_price) if holding else np.nan
 
@@ -582,6 +584,11 @@ class TrackingMatrix:
             # Dynamic stop loss tracking
             'stop_loss': stop_loss,
             'stop_loss_mode': stop_loss_mode,
+            # Tiered profit target tracking
+            'profit_target': profit_target,
+            'profit_target_mode': profit_target_mode,
+            'max_option_price': max_option_price,
+            'profit_target_active': profit_target_active,
             # Technical indicators
             'vwap': vwap,
             'ema_30': ema_30,
@@ -841,6 +848,11 @@ class Backtest:
         trailing_stop_pct = dsl_config.get('trailing_stop_pct', 0.30)
         breakeven_min_minutes = dsl_config.get('breakeven_min_minutes', 30)
 
+        # Get tiered profit exit settings from config
+        tpe_config = self.config.get('tiered_profit_exit', {})
+        tpe_enabled = tpe_config.get('enabled', True)
+        tpe_stop_loss_pct = tpe_config.get('stop_loss_pct', 0.30)
+
         # Initialize dynamic stop loss manager
         dynamic_sl = DynamicStopLoss(
             entry_price=position.entry_price,
@@ -848,6 +860,13 @@ class Backtest:
             trailing_trigger_pct=trailing_trigger_pct,
             trailing_stop_pct=trailing_stop_pct,
             breakeven_min_minutes=breakeven_min_minutes
+        )
+
+        # Initialize tiered profit exit manager
+        tiered_profit = TieredProfitExit(
+            entry_price=position.entry_price,
+            contracts=position.contracts,
+            stop_loss_pct=tpe_stop_loss_pct
         )
 
         for i, (timestamp, bar) in enumerate(stock_data.iterrows()):
@@ -893,7 +912,24 @@ class Backtest:
                     stop_loss_mode = sl_result['mode']
                     stop_triggered = sl_result['triggered']
 
-                # Record tracking data with stop loss and indicators
+                # Update tiered profit exit and check if triggered
+                profit_target_price = np.nan
+                profit_target_mode = None
+                profit_triggered = False
+                profit_sell_reason = None
+                max_option_price = position.highest_price
+                profit_target_active = False
+
+                if tpe_enabled:
+                    pt_result = tiered_profit.update(option_price, stock_price, ema_30)
+                    profit_target_price = pt_result['profit_target'] if pt_result['profit_target'] is not None else np.nan
+                    profit_target_mode = pt_result['mode']
+                    profit_triggered = pt_result['triggered']
+                    profit_sell_reason = pt_result['sell_reason']
+                    max_option_price = pt_result['max_price']
+                    profit_target_active = pt_result['is_active']
+
+                # Record tracking data with stop loss, profit target, and indicators
                 matrix.add_record(
                     timestamp=timestamp,
                     stock_price=stock_price,
@@ -906,11 +942,21 @@ class Backtest:
                     ema_30=ema_30,
                     stock_high=stock_high,
                     stock_low=stock_low,
-                    ewo=ewo
+                    ewo=ewo,
+                    profit_target=profit_target_price,
+                    profit_target_mode=profit_target_mode,
+                    max_option_price=max_option_price,
+                    profit_target_active=profit_target_active
                 )
 
+                # Check for profit target exit first (takes priority over stop loss)
+                if tpe_enabled and profit_triggered and not position.is_closed:
+                    exit_price = option_price * (1 - self.slippage_pct)
+                    exit_reason = profit_sell_reason
+                    position.close(exit_price, timestamp, exit_reason)
+
                 # Check for stop loss exit (only if dynamic stop loss is enabled)
-                if dsl_enabled and stop_triggered and not position.is_closed:
+                elif dsl_enabled and stop_triggered and not position.is_closed:
                     exit_price = option_price * (1 - self.slippage_pct)
                     exit_reason = f'stop_loss_{stop_loss_mode}'
                     position.close(exit_price, timestamp, exit_reason)
@@ -933,7 +979,11 @@ class Backtest:
                     ema_30=ema_30,
                     stock_high=stock_high,
                     stock_low=stock_low,
-                    ewo=ewo
+                    ewo=ewo,
+                    profit_target=np.nan,
+                    profit_target_mode=None,
+                    max_option_price=np.nan,
+                    profit_target_active=False
                 )
 
         # Close at end of data if still open
