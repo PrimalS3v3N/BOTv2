@@ -102,8 +102,8 @@ DISCORD_CONFIG = {
     # Browser spoofing settings - makes requests appear as regular browser traffic
     'spoof_browser': True,         # Enable browser spoofing
     'browser_config': {
-        # User-Agent string (Chrome on Windows)
-        'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        # User-Agent string (Edge on Windows)
+        'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36 Edg/144.0.0.0',
 
         # Standard browser headers
         'accept': '*/*',
@@ -114,7 +114,7 @@ DISCORD_CONFIG = {
         'pragma': 'no-cache',
 
         # Security headers (Sec-Fetch-* for modern browsers)
-        'sec_ch_ua': '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
+        'sec_ch_ua': '"Not_A Brand";v="8", "Chromium";v="144", "Microsoft Edge";v="144"',
         'sec_ch_ua_mobile': '?0',
         'sec_ch_ua_platform': '"Windows"',
         'sec_fetch_dest': 'empty',
@@ -135,11 +135,11 @@ DISCORD_CONFIG = {
     # This identifies the client as a Discord web browser client
     'x_super_properties': {
         'os': 'Windows',
-        'browser': 'Chrome',
+        'browser': 'Edge',
         'device': '',
         'system_locale': 'en-US',
-        'browser_user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'browser_version': '120.0.0.0',
+        'browser_user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36 Edg/144.0.0.0',
+        'browser_version': '144.0.0.0',
         'os_version': '10',
         'referrer': '',
         'referring_domain': '',
