@@ -996,8 +996,13 @@ class Backtest:
             return False
 
         try:
+            # Format data for Dashboard.py which expects 'matrices' and 'exit_signals' keys
+            dashboard_data = {
+                'matrices': self.results.get('Tracking_matrices', {}),
+                'exit_signals': {},  # Placeholder for future exit signal tracking
+            }
             with open(filepath, 'wb') as f:
-                pickle.dump(self.results, f)
+                pickle.dump(dashboard_data, f)
             print(f"Backtest results saved to {filepath}")
             return True
         except Exception as e:
