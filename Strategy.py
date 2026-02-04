@@ -398,16 +398,14 @@ class TieredProfitExit:
                 sell_reason = f'profit_target_{self.mode}'
                 contracts_to_sell = self._get_contracts_to_sell()
 
-        # Trigger 3: Price dropped below EMA 30 (regardless of stock/EMA relationship)
-        # This is a protective sell when option price itself falls below EMA 30 equivalent
-        # Note: This would need option EMA, but we use stock EMA as proxy signal
-        # If stock drops below EMA 30, it's a bearish signal
+        # Trigger 3: Stock dropped below EMA 30 - immediate bearish exit
+        # When stock drops below EMA 30, it's a bearish signal - exit immediately
+        # to protect profits rather than waiting for option price to fall further
         if not self.is_active and self.profit_target is not None:
-            # Stock below EMA 30 - bearish, check if we should protect profits
-            if current_option_price <= self.profit_target:
-                triggered = True
-                sell_reason = 'X_EMA'
-                contracts_to_sell = self._get_contracts_to_sell()
+            # Stock below EMA 30 - bearish, exit immediately to protect profits
+            triggered = True
+            sell_reason = 'X_EMA'
+            contracts_to_sell = self._get_contracts_to_sell()
 
         return {
             'profit_target': self.profit_target,
@@ -485,30 +483,40 @@ def check_profit_target(entry_price, current_option_price, max_option_price,
     profit_target = None
     is_trailing = False
 
+    # Only upgrade mode when stock is above EMA (is_active)
     if is_active:
         if profit_pct >= 200:
             mode = 'tier_200'
-            profit_target = entry_price * 1.50
-            is_trailing = True
         elif profit_pct >= 125:
             mode = 'tier_125'
-            profit_target = (1.0 - stop_loss_pct) * max_price
-            is_trailing = True
         elif profit_pct >= 100:
             mode = 'tier_100'
-            floor_target = entry_price * 1.50
-            trailing_target = (1.0 - stop_loss_pct) * max_price
-            profit_target = max(floor_target, trailing_target)
-            is_trailing = True
         elif profit_pct >= 75:
             mode = 'tier_75'
-            profit_target = entry_price * 1.35
         elif profit_pct >= 50:
             mode = 'tier_50'
-            profit_target = entry_price * 1.20
         elif profit_pct >= 35:
             mode = 'tier_35'
-            profit_target = entry_price * 1.10
+
+    # Calculate profit target based on mode (regardless of is_active)
+    # This ensures we have a profit target for EMA exit checks
+    if mode == 'tier_200':
+        profit_target = entry_price * 1.50
+        is_trailing = True
+    elif mode == 'tier_125':
+        profit_target = (1.0 - stop_loss_pct) * max_price
+        is_trailing = True
+    elif mode == 'tier_100':
+        floor_target = entry_price * 1.50
+        trailing_target = (1.0 - stop_loss_pct) * max_price
+        profit_target = max(floor_target, trailing_target)
+        is_trailing = True
+    elif mode == 'tier_75':
+        profit_target = entry_price * 1.35
+    elif mode == 'tier_50':
+        profit_target = entry_price * 1.20
+    elif mode == 'tier_35':
+        profit_target = entry_price * 1.10
 
     # Check triggers
     triggered = False
@@ -517,10 +525,12 @@ def check_profit_target(entry_price, current_option_price, max_option_price,
     if mode == 'tier_200':
         triggered = True
         sell_reason = 'profit_200_pct'
-    elif profit_target is not None and current_option_price <= profit_target:
+    elif is_active and profit_target is not None and current_option_price <= profit_target:
+        # Active: price fell below profit target while stock above EMA
         triggered = True
         sell_reason = f'profit_target_{mode}'
-    elif not is_active and profit_target is not None and current_option_price <= profit_target:
+    elif not is_active and profit_target is not None:
+        # Bearish: stock dropped below EMA - exit immediately to protect profits
         triggered = True
         sell_reason = 'ema_30_bearish'
 
