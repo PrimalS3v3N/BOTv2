@@ -1095,6 +1095,9 @@ class Backtest:
         # Calculate max capital held at any one time (considering overlapping positions)
         max_capital_held = self._calculate_max_capital_held(positions_df)
 
+        # Calculate Capitalized P&L: (Total P&L + Capital Utilized) / Capital Utilized
+        capitalized_pnl = (total_pnl + total_capital_utilized) / total_capital_utilized if total_capital_utilized > 0 else 0
+
         return {
             'total_trades': total_trades,
             'closed_trades': len(closed_trades),
@@ -1112,7 +1115,8 @@ class Backtest:
             'exit_reasons': closed_trades['exit_reason'].value_counts().to_dict() if len(closed_trades) > 0 else {},
             'initial_capital': self.initial_capital,
             'total_capital_utilized': total_capital_utilized,
-            'max_capital_held': max_capital_held
+            'max_capital_held': max_capital_held,
+            'capitalized_pnl': capitalized_pnl
         }
 
     def _calculate_max_capital_held(self, positions_df):
@@ -1181,6 +1185,7 @@ class Backtest:
         print(f"  Initial Capital: ${summary.get('initial_capital', 0):,.2f}")
         print(f"  Capital Utilized: ${summary.get('total_capital_utilized', 0):,.2f}")
         print(f"  Max Capital Held: ${summary.get('max_capital_held', 0):,.2f}")
+        print(f"  Capitalized P&L: {summary.get('capitalized_pnl', 0):.2%}")
 
         print(f"\nTRADE STATISTICS:")
         print(f"  Total Signals: {len(self.signals_df) if self.signals_df is not None else 0}")
@@ -1194,7 +1199,6 @@ class Backtest:
         print(f"  Total P&L: ${summary.get('total_pnl', 0):+,.2f}")
         print(f"  Commissions: ${summary.get('commission_total', 0):,.2f}")
         print(f"  Net P&L: ${summary.get('net_pnl', 0):+,.2f}")
-        print(f"  Average P&L: ${summary.get('average_pnl', 0):+,.2f}")
         print(f"  Best Trade: ${summary.get('best_trade', 0):+,.2f}")
         print(f"  Worst Trade: ${summary.get('worst_trade', 0):+,.2f}")
         print(f"  Profit Factor: {summary.get('profit_factor', 0):.2f}")
