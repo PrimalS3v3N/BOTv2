@@ -582,6 +582,17 @@ class TrackingMatrix:
         if self.records:
             df = pd.DataFrame(self.records)
             df['trade_label'] = self.trade_label
+
+            # Add metadata columns from position
+            df['ticker'] = self.position.ticker
+            df['strike'] = self.position.strike
+            df['option_type'] = self.position.option_type
+            df['expiration'] = self.position.expiration
+            df['contracts'] = self.position.contracts
+            df['entry_time'] = self.position.entry_time
+            df['exit_time'] = self.position.exit_time
+            df['exit_reason'] = self.position.exit_reason
+
             return df
         return pd.DataFrame()
 
