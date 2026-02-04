@@ -77,17 +77,18 @@ Config.py ───────────────────────�
 **Implemented Indicators:**
 - EMA (Exponential Moving Average) - 30-period default
 - VWAP (Volume Weighted Average Price) - resets daily
+- EWO (Elliott Wave Oscillator) - EMA(5) - EMA(35)
 
 **Planned Indicators:**
 - RSI (Relative Strength Index)
 - MACD (Moving Average Convergence Divergence)
 - VPOC (Volume Point of Control)
-- EWO (Elliott Wave Oscillator)
 - SuperTrend
 
 **Functions:**
 - `EMA(df, column='close', period=30)` - Calculate EMA on any column
 - `VWAP(df, price_col='close', volume_col='volume')` - Calculate intraday VWAP
+- `EWO(df, column='close', fast=5, slow=35)` - Calculate Elliott Wave Oscillator
 - `add_indicators(df, ema_period=30)` - Add all standard indicators to DataFrame
 
 **Rules:**
@@ -163,10 +164,10 @@ Three-phase stop loss system for options contracts:
 - Market close exit (default fallback)
 
 **Tracking Matrix Columns:**
-- timestamp, stock_price, option_price, volume
+- timestamp, stock_price, stock_high, stock_low, option_price, volume
 - holding, entry_price, pnl, pnl_pct
 - stop_loss, stop_loss_mode (initial/breakeven/trailing)
-- vwap, ema_30
+- vwap, ema_30, ewo
 
 **Rules:**
 - Exit strategies configurable via Config.py
@@ -187,12 +188,16 @@ Three-phase stop loss system for options contracts:
 - Matrix data table with all tracking columns
 
 **Chart Displays:**
-- Stock price (blue line, left axis)
+- Stock price with error bars showing high/low (blue line, left axis)
 - Option price (orange line, right axis)
 - VWAP (green dashed line, left axis)
 - EMA 30 (purple dotted line, left axis)
 - Stop Loss (red dashed line, right axis)
 - Entry/Exit markers with annotations
+- EWO subplot below main chart (with positive/negative fill)
+
+**Trade Summary Metrics:**
+- Entry, Exit, P&L %, Max Profit %, Min Profit %, Exit Reason, Duration
 
 **Usage:**
 ```bash

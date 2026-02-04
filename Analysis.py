@@ -80,18 +80,50 @@ def VWAP(df, price_col='close', volume_col='volume'):
     return vwap
 
 
-def add_indicators(df, ema_period=30):
+def EWO(df, column='close', fast_period=5, slow_period=35):
+    """
+    Calculate Elliott Wave Oscillator.
+
+    EWO = EMA(fast) - EMA(slow)
+
+    The EWO helps identify wave patterns and momentum:
+    - Positive EWO: Bullish momentum
+    - Negative EWO: Bearish momentum
+    - Zero crossings: Potential trend changes
+
+    Args:
+        df: DataFrame with price data
+        column: Column name to calculate EWO on (default: 'close')
+        fast_period: Fast EMA period (default: 5)
+        slow_period: Slow EMA period (default: 35)
+
+    Returns:
+        Series with EWO values
+    """
+    if column not in df.columns:
+        return pd.Series(index=df.index, dtype=float)
+
+    ema_fast = df[column].ewm(span=fast_period, adjust=False).mean()
+    ema_slow = df[column].ewm(span=slow_period, adjust=False).mean()
+
+    return ema_fast - ema_slow
+
+
+def add_indicators(df, ema_period=30, ewo_fast=5, ewo_slow=35):
     """
     Add all standard indicators to a DataFrame.
 
     Args:
         df: DataFrame with OHLCV data (must have 'close', 'volume' columns)
         ema_period: Period for EMA calculation (default: 30)
+        ewo_fast: Fast period for EWO (default: 5)
+        ewo_slow: Slow period for EWO (default: 35)
 
     Returns:
         DataFrame with added indicator columns:
         - ema_30: 30-period EMA
         - vwap: Volume Weighted Average Price
+        - ewo: Elliott Wave Oscillator
     """
     df = df.copy()
 
@@ -100,6 +132,9 @@ def add_indicators(df, ema_period=30):
 
     # Add VWAP
     df['vwap'] = VWAP(df, price_col='close', volume_col='volume')
+
+    # Add EWO
+    df['ewo'] = EWO(df, column='close', fast_period=ewo_fast, slow_period=ewo_slow)
 
     return df
 
@@ -114,4 +149,4 @@ Modules: Config.py, Data.py, Strategy.py, Test.py
 import Config
 
 # Export functions for use by other modules
-__all__ = ['EMA', 'VWAP', 'add_indicators']
+__all__ = ['EMA', 'VWAP', 'EWO', 'add_indicators']

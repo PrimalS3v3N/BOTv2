@@ -560,13 +560,16 @@ class TrackingMatrix:
         self.records = []
 
     def add_record(self, timestamp, stock_price, option_price, volume, holding=True,
-                   stop_loss=np.nan, stop_loss_mode=None, vwap=np.nan, ema_30=np.nan):
+                   stop_loss=np.nan, stop_loss_mode=None, vwap=np.nan, ema_30=np.nan,
+                   stock_high=np.nan, stock_low=np.nan, ewo=np.nan):
         """Add a tracking record."""
         pnl_pct = self.position.get_pnl_pct(option_price) if holding else np.nan
 
         record = {
             'timestamp': timestamp,
             'stock_price': stock_price,
+            'stock_high': stock_high,
+            'stock_low': stock_low,
             'option_price': option_price,
             'volume': volume,
             'holding': holding,
@@ -582,6 +585,7 @@ class TrackingMatrix:
             # Technical indicators
             'vwap': vwap,
             'ema_30': ema_30,
+            'ewo': ewo,
         }
 
         self.records.append(record)
@@ -848,11 +852,14 @@ class Backtest:
 
         for i, (timestamp, bar) in enumerate(stock_data.iterrows()):
             stock_price = bar['close']
+            stock_high = bar.get('high', stock_price)
+            stock_low = bar.get('low', stock_price)
             volume = bar.get('volume', 0)
 
             # Get indicator values for this bar
             vwap = bar.get('vwap', np.nan)
             ema_30 = bar.get('ema_30', np.nan)
+            ewo = bar.get('ewo', np.nan)
 
             current_days_to_expiry = max(0, days_to_expiry - (timestamp.date() - position.entry_time.date()).days)
 
@@ -896,7 +903,10 @@ class Backtest:
                     stop_loss=stop_loss_price,
                     stop_loss_mode=stop_loss_mode,
                     vwap=vwap,
-                    ema_30=ema_30
+                    ema_30=ema_30,
+                    stock_high=stock_high,
+                    stock_low=stock_low,
+                    ewo=ewo
                 )
 
                 # Check for stop loss exit (only if dynamic stop loss is enabled)
@@ -920,7 +930,10 @@ class Backtest:
                     stop_loss=np.nan,
                     stop_loss_mode=None,
                     vwap=vwap,
-                    ema_30=ema_30
+                    ema_30=ema_30,
+                    stock_high=stock_high,
+                    stock_low=stock_low,
+                    ewo=ewo
                 )
 
         # Close at end of data if still open
