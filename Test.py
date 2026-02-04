@@ -982,18 +982,25 @@ class Backtest:
             return pd.DataFrame()
         return self.results.get('Signals', pd.DataFrame())
 
-    def BT_Save(self, filepath='BT_DATA.pkl'):
+    def BT_Save(self, filepath=None):
         """
         Save backtest results to a pickle file for Dashboard visualization.
 
         Args:
-            filepath: Path to save the pickle file (default: 'BT_DATA.pkl')
+            filepath: Path to save the pickle file. If None, saves to BT_DATA.pkl
+                     in the same directory as Dashboard.py
         """
         import pickle
+        import os
 
         if not self._has_run:
             print("Backtest has not been run yet. Call run() first.")
             return False
+
+        # If no filepath specified, save to same directory as Dashboard.py
+        if filepath is None:
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            filepath = os.path.join(script_dir, 'BT_DATA.pkl')
 
         try:
             # Format data for Dashboard.py which expects 'matrices' and 'exit_signals' keys
@@ -1015,10 +1022,11 @@ class Backtest:
 # =============================================================================
 
 def quick_test(days=1):
-    """Run a quick backtest."""
+    """Run a quick backtest and save results for Dashboard."""
     bt = Backtest(lookback_days=days)
     bt.run()
     bt.summary()
+    bt.BT_Save()  # Save data for Dashboard.py to load
     return bt
 
 
