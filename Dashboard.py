@@ -330,14 +330,13 @@ def create_trade_chart(df, trade_label, show_all_exits=False, market_hours_only=
             row=1, col=1, secondary_y=True
         )
 
-        # Blue shaded area above profit target
-        # Create a trace for the upper bound (use max of option price + buffer)
+        # Blue shaded area above profit target (up to option price)
         if opt_col in df.columns:
-            max_price = df[opt_col].max()
-            upper_bound = max_price * 1.5  # Buffer above max price
-            upper_y = [upper_bound if pd.notna(pt) else None for pt in df['profit_target']]
+            # Use option price as upper bound for each timestamp
+            upper_y = [df[opt_col].iloc[i] if pd.notna(df['profit_target'].iloc[i]) else None
+                       for i in range(len(df))]
 
-            # Fill between profit_target and upper bound
+            # Fill between profit_target and option price
             fig.add_trace(
                 go.Scatter(
                     x=df['time'],

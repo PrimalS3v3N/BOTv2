@@ -219,7 +219,7 @@ class TieredProfitExit:
     - Option price drops below EMA 30 (when active)
     """
 
-    # Profit tier modes
+    # Profit tier modes (ordered from lowest to highest)
     MODE_INITIAL = 'initial'           # No profit target set
     MODE_TIER_35 = 'tier_35'           # 35% profit reached, target = 10%
     MODE_TIER_50 = 'tier_50'           # 50% profit reached, target = 20%
@@ -227,6 +227,10 @@ class TieredProfitExit:
     MODE_TIER_100 = 'tier_100'         # 100% profit reached, target = 50%, trailing starts
     MODE_TIER_125 = 'tier_125'         # 125% profit reached, advanced trailing
     MODE_TIER_200 = 'tier_200'         # 200% profit reached, sell signal
+
+    # Mode hierarchy (higher index = higher tier, cannot go backwards)
+    MODE_HIERARCHY = [MODE_INITIAL, MODE_TIER_35, MODE_TIER_50, MODE_TIER_75,
+                      MODE_TIER_100, MODE_TIER_125, MODE_TIER_200]
 
     # Contract tiers
     TIER_1_CONTRACTS = 1
@@ -327,30 +331,44 @@ class TieredProfitExit:
 
         # Only apply profit targeting when stock > EMA 30
         if self.is_active:
-            # Mode transitions based on profit percentage
-            previous_mode = self.mode
-
+            # Determine potential new mode based on current profit percentage
+            potential_mode = self.MODE_INITIAL
             if profit_pct >= 200:
-                self.mode = self.MODE_TIER_200
+                potential_mode = self.MODE_TIER_200
+            elif profit_pct >= 125:
+                potential_mode = self.MODE_TIER_125
+            elif profit_pct >= 100:
+                potential_mode = self.MODE_TIER_100
+            elif profit_pct >= 75:
+                potential_mode = self.MODE_TIER_75
+            elif profit_pct >= 50:
+                potential_mode = self.MODE_TIER_50
+            elif profit_pct >= 35:
+                potential_mode = self.MODE_TIER_35
+
+            # Only upgrade mode, never downgrade (tier cannot go backwards)
+            current_tier_idx = self.MODE_HIERARCHY.index(self.mode)
+            potential_tier_idx = self.MODE_HIERARCHY.index(potential_mode)
+
+            if potential_tier_idx > current_tier_idx:
+                self.mode = potential_mode
+
+            # Update profit target based on current mode (use highest tier reached)
+            if self.mode == self.MODE_TIER_200:
                 self.profit_target = self._calculate_profit_target(0.50)
                 self.is_trailing = True
-            elif profit_pct >= 125:
-                self.mode = self.MODE_TIER_125
+            elif self.mode == self.MODE_TIER_125:
                 # Trailing = (1 - stop_loss_pct) * max_option_price
                 self.profit_target = (1.0 - self.stop_loss_pct) * self.max_option_price
                 self.is_trailing = True
-            elif profit_pct >= 100:
-                self.mode = self.MODE_TIER_100
+            elif self.mode == self.MODE_TIER_100:
                 self.profit_target = self._calculate_profit_target(0.50)
                 self.is_trailing = True
-            elif profit_pct >= 75:
-                self.mode = self.MODE_TIER_75
+            elif self.mode == self.MODE_TIER_75:
                 self.profit_target = self._calculate_profit_target(0.35)
-            elif profit_pct >= 50:
-                self.mode = self.MODE_TIER_50
+            elif self.mode == self.MODE_TIER_50:
                 self.profit_target = self._calculate_profit_target(0.20)
-            elif profit_pct >= 35:
-                self.mode = self.MODE_TIER_35
+            elif self.mode == self.MODE_TIER_35:
                 self.profit_target = self._calculate_profit_target(0.10)
 
             # If in trailing mode (100%+), update profit target to trail max price
@@ -388,7 +406,7 @@ class TieredProfitExit:
             # Stock below EMA 30 - bearish, check if we should protect profits
             if current_option_price <= self.profit_target:
                 triggered = True
-                sell_reason = 'ema_30_bearish'
+                sell_reason = 'X_EMA'
                 contracts_to_sell = self._get_contracts_to_sell()
 
         return {
