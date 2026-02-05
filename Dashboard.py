@@ -46,6 +46,8 @@ COLORS = {
     # Profit target tracking
     'profit_target_line': '#2979FF',  # Blue
     'profit_target_fill': 'rgba(41, 121, 255, 0.2)',  # Blue shaded area
+    # Trading range
+    'trading_range': '#FF1744',   # Red
 }
 
 EXIT_SYMBOLS = {
@@ -264,6 +266,19 @@ def create_trade_chart(df, trade_label, show_all_exits=False, market_hours_only=
                 name='EMA 30',
                 line=dict(color=COLORS['ema_30'], width=1.5, dash='dot'),
                 hovertemplate='EMA 30: $%{y:.2f}<extra></extra>'
+            ),
+            row=1, col=1, secondary_y=False
+        )
+
+    # Actual Trading Range (left y-axis, same as stock price)
+    if 'actual_trading_range' in df.columns and df['actual_trading_range'].notna().any():
+        fig.add_trace(
+            go.Scatter(
+                x=df['time'],
+                y=df['actual_trading_range'],
+                name='Trading Range',
+                line=dict(color=COLORS['trading_range'], width=2),
+                hovertemplate='Trading Range: $%{y:.2f}<extra></extra>'
             ),
             row=1, col=1, secondary_y=False
         )
@@ -829,7 +844,7 @@ def main():
     # Define columns to display in matrix
     matrix_cols = [
         'timestamp', 'holding', 'stock_price', 'stock_high', 'stock_low',
-        'option_price', 'pnl_pct', 'max_option_price',
+        'actual_trading_range', 'option_price', 'pnl_pct', 'max_option_price',
         'stop_loss', 'stop_loss_mode', 'sl_cushion',
         'profit_target', 'profit_target_mode', 'profit_target_active',
         'vwap', 'ema_20', 'ema_30', 'ewo', 'ewo_15min_avg', 'rsi',
@@ -862,7 +877,7 @@ def main():
             matrix_df = matrix_df[df['holding'] == True]
 
         # Format numeric columns
-        for col in ['stock_price', 'stock_high', 'stock_low', 'option_price', 'stop_loss', 'profit_target', 'max_option_price', 'vwap', 'ema_20', 'ema_30']:
+        for col in ['stock_price', 'stock_high', 'stock_low', 'actual_trading_range', 'option_price', 'stop_loss', 'profit_target', 'max_option_price', 'vwap', 'ema_20', 'ema_30']:
             if col in matrix_df.columns:
                 matrix_df[col] = matrix_df[col].apply(lambda x: f"${x:.2f}" if pd.notna(x) else "")
 
