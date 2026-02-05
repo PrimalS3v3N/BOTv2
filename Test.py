@@ -596,7 +596,7 @@ class TrackingMatrix:
         pnl_pct = self.position.get_pnl_pct(option_price) if holding else np.nan
 
         # Calculate Average True Range via Analysis module
-        atr = Analysis.ATR(stock_high, stock_low)
+        atr = Analysis.ATR(self)
 
         record = {
             'timestamp': timestamp,
