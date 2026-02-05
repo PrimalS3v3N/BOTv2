@@ -894,17 +894,15 @@ class Backtest:
         test_config = self.config.get('test_peak_exit', {})
         test_enabled = test_config.get('enabled', False)
 
-        # Initialize TEST peak exit manager
+        # Initialize TEST peak exit manager (profit trailing stop)
         test_peak_exit = None
         if test_enabled:
             test_peak_exit = TestPeakExit(
                 entry_price=position.entry_price,
-                ewo_overbought_threshold=test_config.get('ewo_overbought_threshold', 0.5),
-                ewo_spread_threshold=test_config.get('ewo_spread_threshold', 0.1),
-                min_profit_pct=test_config.get('min_profit_pct', 0.35),
-                confirmation_bars=test_config.get('confirmation_bars', 2),
-                velocity_lookback=test_config.get('velocity_lookback', 3),
-                overbought_memory=test_config.get('overbought_memory', 3)
+                min_profit_pct=test_config.get('min_profit_pct', 0.50),
+                pullback_pct=test_config.get('pullback_pct', 0.15),
+                rsi_overbought=test_config.get('rsi_overbought', 70),
+                rsi_pullback_pct=test_config.get('rsi_pullback_pct', 0.10)
             )
 
         for i, (timestamp, bar) in enumerate(stock_data.iterrows()):
@@ -979,10 +977,9 @@ class Backtest:
                 test_mode = None
 
                 if test_enabled and test_peak_exit is not None:
-                    # Use ewo and ewo_15min_avg as fast and slow indicators
-                    ewo_fast = ewo if not np.isnan(ewo) else 0.0
-                    ewo_slow = ewo_15min_avg if not np.isnan(ewo_15min_avg) else 0.0
-                    test_result = test_peak_exit.update(option_price, ewo_fast, ewo_slow)
+                    # Pass RSI for profit trailing stop
+                    rsi_value = rsi if not np.isnan(rsi) else None
+                    test_result = test_peak_exit.update(option_price, rsi=rsi_value)
                     test_triggered = test_result['triggered']
                     test_sell_reason = test_result['sell_reason']
                     test_mode = test_result['mode']

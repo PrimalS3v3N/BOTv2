@@ -177,14 +177,24 @@ def create_trade_chart(df, trade_label, show_all_exits=False, market_hours_only=
     # Check if RSI data is available
     has_rsi = 'rsi' in df.columns and df['rsi'].notna().any()
 
-    # Create subplots: main chart with secondary y-axis, and EWO/RSI subplot below
-    if has_ewo:
+    # Create subplots: main chart, EWO subplot, and RSI subplot
+    if has_ewo and has_rsi:
+        # 3 rows: main chart, EWO, RSI
+        fig = make_subplots(
+            rows=3, cols=1,
+            shared_xaxes=True,
+            vertical_spacing=0.05,
+            row_heights=[0.60, 0.20, 0.20],
+            specs=[[{"secondary_y": True}], [{"secondary_y": False}], [{"secondary_y": False}]]
+        )
+    elif has_ewo:
+        # 2 rows: main chart, EWO
         fig = make_subplots(
             rows=2, cols=1,
             shared_xaxes=True,
             vertical_spacing=0.08,
             row_heights=[0.75, 0.25],
-            specs=[[{"secondary_y": True}], [{"secondary_y": True}]]  # Secondary y for RSI on row 2
+            specs=[[{"secondary_y": True}], [{"secondary_y": False}]]
         )
     else:
         fig = make_subplots(specs=[[{"secondary_y": True}]])
@@ -515,36 +525,59 @@ def create_trade_chart(df, trade_label, show_all_exits=False, market_hours_only=
             row=2, col=1
         )
 
-        # RSI on secondary y-axis (right side) - white color
-        if has_rsi:
-            # RSI line
-            fig.add_trace(
-                go.Scatter(
-                    x=df['time'],
-                    y=df['rsi'],
-                    name='RSI',
-                    line=dict(color='white', width=1.5),
-                    hovertemplate='RSI: %{y:.1f}<extra></extra>'
-                ),
-                row=2, col=1, secondary_y=True
-            )
+    # RSI subplot (row 3) - separate graph below EWO
+    if has_rsi:
+        # RSI line in white
+        fig.add_trace(
+            go.Scatter(
+                x=df['time'],
+                y=df['rsi'],
+                name='RSI',
+                line=dict(color='white', width=1.5),
+                hovertemplate='RSI: %{y:.1f}<extra></extra>'
+            ),
+            row=3, col=1
+        )
 
-            # RSI overbought line (70)
-            fig.add_hline(
-                y=70, line_dash="dot", line_color="rgba(255, 82, 82, 0.7)",
-                line_width=1, row=2, col=1, secondary_y=True,
-                annotation_text="OB", annotation_position="right"
-            )
+        # RSI overbought line (70)
+        fig.add_hline(
+            y=70, line_dash="dot", line_color="rgba(255, 82, 82, 0.7)",
+            line_width=1, row=3, col=1,
+            annotation_text="OB", annotation_position="right"
+        )
 
-            # RSI oversold line (30)
-            fig.add_hline(
-                y=30, line_dash="dot", line_color="rgba(105, 240, 174, 0.7)",
-                line_width=1, row=2, col=1, secondary_y=True,
-                annotation_text="OS", annotation_position="right"
-            )
+        # RSI oversold line (30)
+        fig.add_hline(
+            y=30, line_dash="dot", line_color="rgba(105, 240, 174, 0.7)",
+            line_width=1, row=3, col=1,
+            annotation_text="OS", annotation_position="right"
+        )
+
+        # RSI neutral line (50)
+        fig.add_hline(y=50, line_dash="dash", line_color="gray", line_width=1, row=3, col=1)
+
+        # Color fill for overbought/oversold zones
+        fig.add_trace(
+            go.Scatter(
+                x=df['time'],
+                y=df['rsi'].clip(lower=70),
+                fill='tonexty',
+                fillcolor='rgba(255, 82, 82, 0.2)',
+                line=dict(width=0),
+                showlegend=False,
+                hoverinfo='skip'
+            ),
+            row=3, col=1
+        )
 
     # Layout
-    chart_height = 650 if has_ewo else 500
+    if has_ewo and has_rsi:
+        chart_height = 800
+    elif has_ewo:
+        chart_height = 650
+    else:
+        chart_height = 500
+
     fig.update_layout(
         title=trade_label,
         template='plotly_dark',
@@ -561,10 +594,11 @@ def create_trade_chart(df, trade_label, show_all_exits=False, market_hours_only=
 
     if has_ewo:
         fig.update_xaxes(title_text="Time", tickformat='%H:%M', row=2, col=1)
-        fig.update_yaxes(title_text="EWO", secondary_y=False, row=2, col=1)
-        if has_rsi:
-            fig.update_yaxes(title_text="RSI", secondary_y=True, row=2, col=1,
-                           range=[0, 100], tickvals=[30, 50, 70])
+        fig.update_yaxes(title_text="EWO", row=2, col=1)
+
+    if has_rsi:
+        fig.update_xaxes(title_text="Time", tickformat='%H:%M', row=3, col=1)
+        fig.update_yaxes(title_text="RSI", row=3, col=1, range=[0, 100], tickvals=[0, 30, 50, 70, 100])
 
     return fig
 
