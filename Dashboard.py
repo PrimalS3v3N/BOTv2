@@ -27,7 +27,6 @@ COLORS = {
     'entry': '#00C853',
     'exit': '#FF1744',
     'stop_loss': '#D50000',
-    'profit_target': '#00E676',
     'trailing_stop': '#FFAB00',
     'time_stop': '#7C4DFF',
     'rsi': '#E91E63',
@@ -44,16 +43,12 @@ COLORS = {
     'sl_c1': '#FFD54F',           # Amber (conditional trailing)
     'sl_c2': '#FF8A65',           # Deep Orange (EMA/VWAP bearish)
     'sl_ema': '#FF8A65',          # Same as sl_c2
-    # Profit target tracking
-    'profit_target_line': '#2979FF',  # Blue
-    'profit_target_fill': 'rgba(41, 121, 255, 0.2)',  # Blue shaded area
     # Trading range
     'trading_range': '#FF1744',   # Red
 }
 
 EXIT_SYMBOLS = {
     'stop_loss': 'x',
-    'profit_target': 'star',
     'trailing_stop': 'triangle-down',
     'time_stop': 'square',
     'rsi': 'diamond',
@@ -304,61 +299,6 @@ def create_trade_chart(df, trade_label, show_all_exits=False, market_hours_only=
             ),
             row=1, col=1, secondary_y=True
         )
-
-    # Profit Target line with blue shaded area (right y-axis, tracks tiered profit target)
-    if 'profit_target' in df.columns and df['profit_target'].notna().any():
-        # Create hover text with profit_target_mode if available
-        if 'profit_target_mode' in df.columns:
-            hover_text = df.apply(
-                lambda r: f"Profit Target: ${r['profit_target']:.2f}<br>Mode: {r['profit_target_mode']}"
-                if pd.notna(r['profit_target']) else "", axis=1
-            )
-        else:
-            hover_text = df['profit_target'].apply(lambda x: f"Profit Target: ${x:.2f}" if pd.notna(x) else "")
-
-        # Profit Target line
-        fig.add_trace(
-            go.Scatter(
-                x=df['time'],
-                y=df['profit_target'],
-                name='Profit Target',
-                line=dict(color=COLORS['profit_target_line'], width=1.5, dash='dot'),
-                hovertemplate='%{text}<extra></extra>',
-                text=hover_text
-            ),
-            row=1, col=1, secondary_y=True
-        )
-
-        # Blue shaded area above profit target (up to option price)
-        if opt_col in df.columns:
-            # Use option price as upper bound for each timestamp
-            upper_y = [df[opt_col].iloc[i] if pd.notna(df['profit_target'].iloc[i]) else None
-                       for i in range(len(df))]
-
-            # Fill between profit_target and option price
-            fig.add_trace(
-                go.Scatter(
-                    x=df['time'],
-                    y=upper_y,
-                    fill=None,
-                    line=dict(width=0),
-                    showlegend=False,
-                    hoverinfo='skip'
-                ),
-                row=1, col=1, secondary_y=True
-            )
-            fig.add_trace(
-                go.Scatter(
-                    x=df['time'],
-                    y=df['profit_target'],
-                    fill='tonexty',
-                    fillcolor=COLORS['profit_target_fill'],
-                    line=dict(width=0),
-                    showlegend=False,
-                    hoverinfo='skip'
-                ),
-                row=1, col=1, secondary_y=True
-            )
 
     # SL_C1 markers: Conditional trailing active (profit target + VWAP hold)
     if 'SL_C1' in df.columns and opt_col in df.columns:
@@ -849,7 +789,7 @@ def main():
             matrix_df = matrix_df[df['holding'] == True]
 
         # Format numeric columns
-        for col in ['stock_price', 'stock_high', 'stock_low', 'true_price', 'option_price', 'stop_loss', 'profit_target', 'max_option_price', 'vwap', 'ema_20', 'ema_30']:
+        for col in ['stock_price', 'stock_high', 'stock_low', 'true_price', 'option_price', 'stop_loss', 'vwap', 'ema_20', 'ema_30']:
             if col in matrix_df.columns:
                 matrix_df[col] = matrix_df[col].apply(lambda x: f"${x:.2f}" if pd.notna(x) else "")
 
