@@ -262,7 +262,7 @@ def create_trade_chart(df, trade_label, show_all_exits=False, market_hours_only=
             row=1, col=1, secondary_y=True
         )
 
-    # Stop Loss line with green shaded area (right y-axis, tracks dynamic stop loss price)
+    # Stop Loss line with green shaded area (right y-axis, tracks stop loss price)
     if 'stop_loss' in df.columns and df['stop_loss'].notna().any():
         # Create hover text with stop_loss_mode if available
         if 'stop_loss_mode' in df.columns:

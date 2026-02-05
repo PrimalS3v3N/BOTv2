@@ -34,15 +34,15 @@ Config.py ───────────────────────�
 | Section | Description |
 |---------|-------------|
 | DISCORD_CONFIG | Discord bot token, channel ID, API settings |
-| RISK_CONFIG | Position sizing, instrument defaults, dynamic stop loss |
+| RISK_CONFIG | Position sizing, instrument defaults, stop loss |
 | EXIT_CONFIG | Exit strategy toggles (flags only) |
 | DATA_CONFIG | Data fetching parameters |
-| BACKTEST_CONFIG | Backtesting parameters, dynamic stop loss settings |
+| BACKTEST_CONFIG | Backtesting parameters, stop loss settings |
 
-**Dynamic Stop Loss Configuration:**
-All stop loss settings are consolidated into a `dynamic_stop_loss` nested structure:
+**Stop Loss Configuration:**
+All stop loss settings are consolidated into a `stop_loss` nested structure:
 ```python
-'dynamic_stop_loss': {
+'stop_loss': {
     'enabled': True,
     'stop_loss_pct': 0.35,              # Max loss from entry
     'stop_loss_warning_pct': 0.15,      # Warning threshold
@@ -53,7 +53,7 @@ All stop loss settings are consolidated into a `dynamic_stop_loss` nested struct
     'trailing_trigger_pct': 0.50,       # Start trailing at profit
 }
 ```
-This structure exists in both `RISK_CONFIG.option_defaults` (live trading) and `BACKTEST_CONFIG` (backtesting).
+This structure exists in both `RISK_CONFIG.option_defaults` (live trading) and `BACKTEST_CONFIG` (backtesting) as `stop_loss`.
 
 ---
 
@@ -131,11 +131,11 @@ This structure exists in both `RISK_CONFIG.option_defaults` (live trading) and `
 **Status:** Active
 
 **Implemented Strategies:**
-- Dynamic Stop Loss (3-phase exit strategy)
+- StopLoss (3-phase exit strategy)
 - TestPeakExit (profit trailing stop with RSI detection)
 
-**Dynamic Stop Loss:**
-Three-phase stop loss system for options contracts (configured via `dynamic_stop_loss` dict):
+**StopLoss:**
+Three-phase stop loss system for options contracts (configured via `stop_loss` dict):
 
 1. **INITIAL Phase**: Fixed stop loss at `entry_price × (1 - stop_loss_pct)`
    - Default: 35% below entry (`stop_loss_pct: 0.35`)
@@ -151,7 +151,7 @@ Three-phase stop loss system for options contracts (configured via `dynamic_stop
    - Stop only moves up, never down
 
 **Classes:**
-- `DynamicStopLoss` - Stateful stop loss manager
+- `StopLoss` - Stateful stop loss manager
 - `check_stop_loss()` - Stateless function for backtesting
 - `TestPeakExit` - Stateful profit trailing stop manager
 - `check_test_peak_exit()` - Stateless function for backtesting
@@ -189,11 +189,11 @@ Three-phase stop loss system for options contracts (configured via `dynamic_stop
 - Get historical stock data (yfinance)
 - Track positions through market hours
 - Generate results: Signals, Positions, Tracking matrices
-- Dynamic stop loss with 3-phase strategy
+- Stop loss with 3-phase strategy
 - Technical indicators (EMA_30, VWAP) in tracking data
 
 **Exit Strategies:**
-- Dynamic Stop Loss (3-phase: initial → breakeven → trailing)
+- StopLoss (3-phase: initial → breakeven → trailing)
 - Market close exit (default fallback)
 
 **Tracking Matrix Columns:**
@@ -334,7 +334,7 @@ These rules are mandatory. All code changes must respect module boundaries.
 | Dashboard.py | Active (full visualization) |
 | Data.py | Placeholder |
 | Analysis.py | Active (EMA, VWAP, EWO, ATR, RSI, Black-Scholes) |
-| Strategy.py | Active (Dynamic Stop Loss, TestPeakExit) |
+| Strategy.py | Active (StopLoss, TestPeakExit) |
 | Orders.py | Placeholder |
 
 ---

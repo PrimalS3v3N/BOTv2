@@ -154,8 +154,8 @@ BACKTEST_CONFIG = {
     'slippage_pct': 0.001,                         # Slippage per fill (0.1%)
     'commission_per_contract': 0.65,               # Per-contract commission
 
-    # Dynamic Stop Loss - three phases: initial -> breakeven -> trailing
-    'dynamic_stop_loss': {
+    # Stop Loss - three phases: initial -> breakeven -> trailing
+    'stop_loss': {
         'enabled': True,
         'stop_loss_pct': 0.25,                     # Max loss from entry (25%)
         'stop_loss_warning_pct': 0.15,             # Warning threshold (15%)
@@ -337,7 +337,7 @@ DATAFRAME_COLUMNS = {
 #         'use_profit_target': True,
 #         'use_technical_stop': True,
 #         'use_expiration_stop': True,
-#         'dynamic_stop_loss': {
+#         'stop_loss': {
 #             'enabled': True,
 #             'stop_loss_pct': 0.35,
 #             'stop_loss_warning_pct': 0.15,
