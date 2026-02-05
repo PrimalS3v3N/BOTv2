@@ -167,25 +167,6 @@ BACKTEST_CONFIG = {
         'trailing_trigger_pct': 0.50,              # Start trailing at profit (50%)
     },
 
-    # Tiered Profit Exit - dynamic targets based on profit %, only active when stock > EMA 30
-    'tiered_profit_exit': {
-        'enabled': True,
-        'tier_1_contracts': 1,                     # Tier 1: sell all at exit
-        'tier_2_contracts': 3,                     # Tier 2: sell 1 per tier
-        'tier_3_contracts': 5,                     # Tier 3: sell progressively
-        'profit_tiers': {
-            35: 0.10,                              # 35% profit -> target 10% above entry
-            50: 0.20,                              # 50% profit -> target 20% above entry
-            75: 0.35,                              # 75% profit -> target 35% above entry
-            100: 0.50,                             # 100% profit -> target 50%, start trailing
-            125: None,                             # 125% profit -> trailing = (1-SL%) * max
-            200: None,                             # 200% profit -> immediate sell
-        },
-        'trailing_start_pct': 100,                 # Start trailing at 100% profit
-        'trailing_floor_pct': 0.50,                # Min target = 50% above entry
-        'immediate_sell_pct': 200,                 # Sell immediately at 200%
-    },
-
     # Technical indicators for backtest
     'indicators': {
         'ema_period': 25,                          # EMA period (bars)
@@ -276,7 +257,6 @@ DATAFRAME_COLUMNS = {
         'option_price', 'volume', 'holding', 'entry_price',
         'pnl', 'pnl_pct', 'highest_price', 'lowest_price', 'minutes_held',
         'stop_loss', 'stop_loss_mode',
-        'profit_target', 'profit_target_mode', 'max_option_price', 'profit_target_active',
         'vwap', 'ema_30', 'ewo', 'ewo_15min_avg', 'rsi',
     ],
 
@@ -289,9 +269,8 @@ DATAFRAME_COLUMNS = {
     # Dashboard matrix display columns (Dashboard.py)
     'dashboard_matrix': [
         'timestamp', 'holding', 'stock_price', 'stock_high', 'stock_low',
-        'true_price', 'option_price', 'pnl_pct', 'max_option_price',
+        'true_price', 'option_price', 'pnl_pct',
         'stop_loss', 'stop_loss_mode', 'sl_cushion',
-        'profit_target', 'profit_target_mode', 'profit_target_active',
         'vwap', 'ema_20', 'ema_30', 'ewo', 'ewo_15min_avg', 'rsi',
         'SL_C1', 'SL_C2',
     ],
