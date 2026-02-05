@@ -663,46 +663,40 @@ class TrackingMatrix:
 
 
 # =============================================================================
-# INTERNAL - Option Price Estimation
+# INTERNAL - Option Price Estimation (Wrapper)
 # =============================================================================
+# This is a convenience wrapper around Analysis.estimate_option_price_bs()
+# Kept here for backwards compatibility and simpler interface within Test.py
 
 def estimate_option_price(stock_price, strike, option_type, days_to_expiry,
                           entry_price=None, entry_stock_price=None, volatility=0.3):
     """
-    Estimate option price based on stock price movement.
-    Simple delta-based model for backtesting.
+    Estimate option price using Black-Scholes model.
+
+    Wrapper around Analysis.estimate_option_price_bs() for use within Test.py.
+    The actual Black-Scholes implementation is centralized in Analysis.py.
+
+    Args:
+        stock_price: Current stock price
+        strike: Option strike price
+        option_type: 'CALL' or 'PUT'
+        days_to_expiry: Days until expiration
+        entry_price: Original entry price (optional)
+        entry_stock_price: Stock price at entry (optional)
+        volatility: Implied volatility (default 0.3 = 30%)
+
+    Returns:
+        float: Estimated option price
     """
-    # Calculate intrinsic value
-    if option_type == 'CALL':
-        intrinsic = max(0, stock_price - strike)
-    else:
-        intrinsic = max(0, strike - stock_price)
-
-    # Time value estimation
-    time_factor = max(0, days_to_expiry) / 365
-    time_value = stock_price * volatility * np.sqrt(time_factor) * 0.4
-
-    theoretical_price = intrinsic + time_value
-
-    # If we have entry data, use delta approximation
-    if entry_price and entry_stock_price and entry_price > 0:
-        # Estimate delta based on moneyness
-        moneyness = stock_price / strike
-        if option_type == 'CALL':
-            delta = 0.5 + 0.4 * (moneyness - 1) if moneyness > 0.95 else 0.3
-        else:
-            delta = -0.5 + 0.4 * (1 - moneyness) if moneyness < 1.05 else -0.3
-
-        delta = max(-0.9, min(0.9, delta))
-
-        # Calculate price change based on stock movement
-        stock_change = stock_price - entry_stock_price
-        price_change = abs(delta) * stock_change
-        estimated = entry_price + price_change
-
-        return max(0.01, estimated)
-
-    return max(0.01, theoretical_price)
+    return Analysis.estimate_option_price_bs(
+        stock_price=stock_price,
+        strike=strike,
+        option_type=option_type,
+        days_to_expiry=days_to_expiry,
+        entry_price=entry_price,
+        entry_stock_price=entry_stock_price,
+        volatility=volatility
+    )
 
 
 # =============================================================================
@@ -1368,5 +1362,138 @@ def quick_test(days=1):
     return bt
 
 
+def test_options_pricing():
+    """
+    Test the Black-Scholes options pricing for both CALL and PUT options.
+
+    This function demonstrates and validates the pricing model with
+    various scenarios for both calls and puts.
+    """
+    print("\n" + "=" * 60)
+    print("OPTIONS PRICING TEST - Black-Scholes Model")
+    print("=" * 60)
+
+    # Test parameters
+    stock_price = 100.0
+    strike = 100.0  # ATM option
+    days_to_expiry = 30
+    volatility = 0.30
+    risk_free_rate = 0.05
+
+    # Convert days to years for Black-Scholes
+    T = days_to_expiry / 365
+
+    print(f"\nTest Parameters:")
+    print(f"  Stock Price: ${stock_price:.2f}")
+    print(f"  Strike: ${strike:.2f}")
+    print(f"  Days to Expiry: {days_to_expiry}")
+    print(f"  Volatility: {volatility * 100:.0f}%")
+    print(f"  Risk-Free Rate: {risk_free_rate * 100:.1f}%")
+
+    # Test 1: ATM Call vs Put pricing
+    print("\n" + "-" * 40)
+    print("Test 1: ATM Options (Stock = Strike)")
+    print("-" * 40)
+
+    call_price = Analysis.black_scholes_call(stock_price, strike, T, risk_free_rate, volatility)
+    put_price = Analysis.black_scholes_put(stock_price, strike, T, risk_free_rate, volatility)
+
+    print(f"  CALL Price: ${call_price:.4f}")
+    print(f"  PUT Price:  ${put_price:.4f}")
+
+    # Verify put-call parity: C - P = S - K*e^(-rT)
+    parity_lhs = call_price - put_price
+    parity_rhs = stock_price - strike * np.exp(-risk_free_rate * T)
+    print(f"\n  Put-Call Parity Check:")
+    print(f"    C - P = ${parity_lhs:.4f}")
+    print(f"    S - Ke^(-rT) = ${parity_rhs:.4f}")
+    print(f"    Parity holds: {abs(parity_lhs - parity_rhs) < 0.01}")
+
+    # Test 2: ITM and OTM options
+    print("\n" + "-" * 40)
+    print("Test 2: ITM vs OTM Options")
+    print("-" * 40)
+
+    itm_call_strike = 95  # ITM call (stock > strike)
+    otm_call_strike = 105  # OTM call (stock < strike)
+
+    itm_call = Analysis.black_scholes_call(stock_price, itm_call_strike, T, risk_free_rate, volatility)
+    otm_call = Analysis.black_scholes_call(stock_price, otm_call_strike, T, risk_free_rate, volatility)
+
+    itm_put = Analysis.black_scholes_put(stock_price, otm_call_strike, T, risk_free_rate, volatility)  # ITM put (stock < strike)
+    otm_put = Analysis.black_scholes_put(stock_price, itm_call_strike, T, risk_free_rate, volatility)  # OTM put (stock > strike)
+
+    print(f"  ITM CALL (K=95):  ${itm_call:.4f}")
+    print(f"  OTM CALL (K=105): ${otm_call:.4f}")
+    print(f"  ITM PUT (K=105):  ${itm_put:.4f}")
+    print(f"  OTM PUT (K=95):   ${otm_put:.4f}")
+
+    # Test 3: Greeks for puts
+    print("\n" + "-" * 40)
+    print("Test 3: Greeks Comparison (CALL vs PUT)")
+    print("-" * 40)
+
+    call_greeks = Analysis.calculate_greeks(stock_price, strike, T, risk_free_rate, volatility, 'CALL')
+    put_greeks = Analysis.calculate_greeks(stock_price, strike, T, risk_free_rate, volatility, 'PUT')
+
+    print(f"\n  CALL Greeks:")
+    print(f"    Delta: {call_greeks['delta']:.4f}")
+    print(f"    Gamma: {call_greeks['gamma']:.4f}")
+    print(f"    Theta: ${call_greeks['theta']:.4f}/day")
+    print(f"    Vega:  ${call_greeks['vega']:.4f}/1% vol")
+    print(f"    Rho:   ${call_greeks['rho']:.4f}/1% rate")
+
+    print(f"\n  PUT Greeks:")
+    print(f"    Delta: {put_greeks['delta']:.4f}")
+    print(f"    Gamma: {put_greeks['gamma']:.4f}")
+    print(f"    Theta: ${put_greeks['theta']:.4f}/day")
+    print(f"    Vega:  ${put_greeks['vega']:.4f}/1% vol")
+    print(f"    Rho:   ${put_greeks['rho']:.4f}/1% rate")
+
+    # Verify delta relationship: Delta_call - Delta_put = 1
+    delta_diff = call_greeks['delta'] - put_greeks['delta']
+    print(f"\n  Delta relationship (Call - Put should = 1): {delta_diff:.4f}")
+
+    # Test 4: Price movement simulation for PUTS
+    print("\n" + "-" * 40)
+    print("Test 4: PUT Price Movement Simulation")
+    print("-" * 40)
+
+    entry_stock = 100.0
+    entry_put_price = Analysis.black_scholes_put(entry_stock, strike, T, risk_free_rate, volatility)
+    print(f"  Entry: Stock=${entry_stock:.2f}, PUT=${entry_put_price:.4f}")
+
+    # Simulate stock drop (good for puts)
+    for stock_move in [-10, -5, 0, 5, 10]:
+        new_stock = entry_stock + stock_move
+        new_put = estimate_option_price(new_stock, strike, 'PUT', days_to_expiry,
+                                        entry_put_price, entry_stock, volatility)
+        pnl = (new_put - entry_put_price) / entry_put_price * 100
+        direction = "↑" if pnl > 0 else "↓" if pnl < 0 else "→"
+        print(f"  Stock ${new_stock:>6.2f} ({stock_move:+.0f}): PUT=${new_put:.4f} ({direction} {pnl:+.1f}%)")
+
+    # Test 5: Expiration scenarios
+    print("\n" + "-" * 40)
+    print("Test 5: At Expiration (T=0)")
+    print("-" * 40)
+
+    for test_stock in [90, 95, 100, 105, 110]:
+        call_exp = Analysis.black_scholes_call(test_stock, strike, 0, risk_free_rate, volatility)
+        put_exp = Analysis.black_scholes_put(test_stock, strike, 0, risk_free_rate, volatility)
+        print(f"  Stock=${test_stock}: CALL=${call_exp:.2f}, PUT=${put_exp:.2f}")
+
+    print("\n" + "=" * 60)
+    print("OPTIONS PRICING TEST COMPLETE")
+    print("=" * 60 + "\n")
+
+    return True
+
+
 if __name__ == '__main__':
-    bt = quick_test(days=1)
+    import sys
+
+    # Check for test flag
+    if len(sys.argv) > 1 and sys.argv[1] == '--test-pricing':
+        test_options_pricing()
+    else:
+        bt = quick_test(days=1)

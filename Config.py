@@ -324,10 +324,12 @@ ANALYSIS_CONFIG = {
     'ema_fast_period': 12,
     'ema_slow_period': 26,
 
-    # RSI
+    # RSI - Default thresholds for stock analysis
+    # NOTE: Options backtesting uses higher thresholds (80/20) defined in
+    # BACKTEST_CONFIG['indicator_settings'] for better options-specific signals
     'rsi_period': 14,
-    'rsi_overbought': 70,              # Stock default (80 for options)
-    'rsi_oversold': 30,                # Stock default (20 for options)
+    'rsi_overbought': 70,              # Stock default (use 80 for options)
+    'rsi_oversold': 30,                # Stock default (use 20 for options)
 
     # MACD
     'macd_fast': 12,
@@ -353,10 +355,9 @@ ANALYSIS_CONFIG = {
     'ewo_fast': 5,
     'ewo_slow': 35,
 
-    # Relative Strength Index (RSI)
-    'rsi_period': 14,                     # RSI calculation period
-    'rsi_overbought': 70,                 # RSI overbought threshold (>70 = overbought)
-    'rsi_oversold': 30,                   # RSI oversold threshold (<30 = oversold)
+    # NOTE: RSI settings defined above at lines 327-330
+    # For options backtesting, use BACKTEST_CONFIG['indicator_settings'] which has
+    # higher thresholds (80/20) appropriate for options trading
 
     # Volume Analysis
     'vwap_lookback': 30,
@@ -621,11 +622,12 @@ BACKTEST_CONFIG = {
         'use_supertrend': False
     },
 
-    # Indicator settings for backtest
+    # Indicator settings for backtest (OPTIONS-SPECIFIC THRESHOLDS)
+    # These override ANALYSIS_CONFIG defaults for options backtesting
     'indicator_settings': {
         'rsi_period': 14,
-        'rsi_overbought': 80,          # Higher threshold for options
-        'rsi_oversold': 20,            # Lower threshold for options
+        'rsi_overbought': 80,          # Higher than stock default (70) for options
+        'rsi_oversold': 20,            # Lower than stock default (30) for options
         'macd_fast': 12,
         'macd_slow': 26,
         'macd_signal': 9,
