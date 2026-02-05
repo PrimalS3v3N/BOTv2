@@ -533,6 +533,41 @@ BACKTEST_CONFIG = {
         'immediate_sell_pct': 200,          # Sell immediately at 200% profit
     },
 
+    # TEST Exit Strategy - Peak Detection
+    # Experimental momentum-based peak detection using EWO signals
+    # Aims to capture price peaks by detecting EWO momentum reversals
+    'test_peak_exit': {
+        'enabled': False,                   # Disabled by default (experimental)
+
+        # EWO Overbought Thresholds
+        # EWO fast must exceed this value to be considered overbought
+        'ewo_overbought_threshold': 0.5,
+
+        # EWO Spread Threshold
+        # EWO spread (fast - slow) must exceed this for extended condition
+        'ewo_spread_threshold': 0.1,
+
+        # Minimum Profit Requirement
+        # Only consider exit when profit exceeds this percentage (0.35 = 35%)
+        'min_profit_pct': 0.35,
+
+        # Confirmation Settings
+        # Number of consecutive declining EWO bars needed to confirm peak
+        'confirmation_bars': 2,
+
+        # Velocity Calculation
+        # Number of bars to use for EWO velocity (rate of change) calculation
+        'velocity_lookback': 3,
+
+        # Price Confirmation
+        # Price must drop this % below peak to trigger exit (0.005 = 0.5%)
+        'price_drop_threshold': 0.005,
+
+        # EWO Reset Threshold
+        # If EWO exceeds peak by this %, reset detection (0.02 = 2%)
+        'ewo_reset_threshold': 0.02,
+    },
+
     # Technical Indicators for Backtest
     'indicators': {
         'ema_period': 30,                   # 30-bar EMA (30 minutes on 1m data)
@@ -548,6 +583,8 @@ BACKTEST_CONFIG = {
         # Profit taking (Priority 2-3)
         'use_profit_target': True,
         'use_trailing_stop': False,
+        # Experimental exits
+        'use_test_peak_exit': False,    # TEST: EWO-based peak detection (experimental)
         # Time-based exits (Priority 4-8)
         'use_time_stop': False,
         'use_expiration_stop': False,

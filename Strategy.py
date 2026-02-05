@@ -546,6 +546,342 @@ def check_profit_target(entry_price, current_option_price, max_option_price,
     }
 
 
+class TestPeakExit:
+    """
+    TEST Exit Strategy - Peak Detection for Options Contracts.
+
+    Implements momentum-based peak detection using EWO (Elliott Wave Oscillator) signals:
+
+    Detection Logic:
+    1. EWO Overbought: EWO fast exceeds threshold (default: 0.5)
+    2. EWO Extended: EWO spread (fast - slow) exceeds threshold (default: 0.1)
+    3. EWO Velocity Reversal: EWO fast starts declining (negative velocity)
+    4. Confirmation: Multiple consecutive declining EWO readings
+
+    The strategy aims to identify price peaks in real-time by detecting
+    when momentum is reversing from overbought conditions.
+
+    Modes:
+    - WATCHING: Monitoring for peak conditions
+    - PEAK_DETECTED: Initial peak signal detected
+    - CONFIRMING: Waiting for confirmation
+    - TRIGGERED: Exit signal confirmed
+
+    Design Philosophy:
+    - Only uses data available at the current moment (no lookahead)
+    - Requires multiple confirmations to reduce false signals
+    - Only triggers when position is profitable (minimum profit threshold)
+    """
+
+    # Exit modes (cannot go backward)
+    MODE_WATCHING = 'watching'
+    MODE_PEAK_DETECTED = 'peak_detected'
+    MODE_CONFIRMING = 'confirming'
+    MODE_TRIGGERED = 'triggered'
+
+    MODE_HIERARCHY = [MODE_WATCHING, MODE_PEAK_DETECTED, MODE_CONFIRMING, MODE_TRIGGERED]
+
+    def __init__(self, entry_price,
+                 ewo_overbought_threshold=0.5,
+                 ewo_spread_threshold=0.1,
+                 min_profit_pct=0.35,
+                 confirmation_bars=2,
+                 velocity_lookback=3):
+        """
+        Initialize TEST peak detection exit manager.
+
+        Args:
+            entry_price: Contract entry price
+            ewo_overbought_threshold: EWO fast value considered overbought (default: 0.5)
+            ewo_spread_threshold: Minimum EWO spread (fast - slow) for extended condition (default: 0.1)
+            min_profit_pct: Minimum profit % before considering exit (default: 0.35 = 35%)
+            confirmation_bars: Number of declining bars needed to confirm (default: 2)
+            velocity_lookback: Number of bars for velocity calculation (default: 3)
+        """
+        self.entry_price = entry_price
+        self.ewo_overbought_threshold = ewo_overbought_threshold
+        self.ewo_spread_threshold = ewo_spread_threshold
+        self.min_profit_pct = min_profit_pct
+        self.confirmation_bars = confirmation_bars
+        self.velocity_lookback = velocity_lookback
+
+        # Current state
+        self.mode = self.MODE_WATCHING
+        self.max_option_price = entry_price
+        self.max_ewo_fast = 0.0
+
+        # EWO history for velocity calculation
+        self.ewo_history = []
+        self.declining_count = 0
+        self.peak_ewo_value = 0.0
+        self.peak_price = entry_price
+
+    def _calculate_profit_pct(self, current_price):
+        """Calculate current profit percentage."""
+        if self.entry_price <= 0:
+            return 0.0
+        return (current_price - self.entry_price) / self.entry_price
+
+    def _calculate_ewo_velocity(self):
+        """
+        Calculate EWO velocity (rate of change).
+
+        Returns:
+            float: Average change in EWO over lookback period, or None if insufficient data
+        """
+        if len(self.ewo_history) < 2:
+            return None
+
+        lookback = min(self.velocity_lookback, len(self.ewo_history) - 1)
+        recent = self.ewo_history[-lookback:]
+
+        # Calculate average velocity
+        velocities = [recent[i] - recent[i - 1] for i in range(1, len(recent))]
+        return sum(velocities) / len(velocities) if velocities else None
+
+    def _is_overbought(self, ewo_fast, ewo_slow):
+        """Check if EWO indicates overbought conditions."""
+        ewo_spread = ewo_fast - ewo_slow
+
+        return (ewo_fast >= self.ewo_overbought_threshold and
+                ewo_spread >= self.ewo_spread_threshold)
+
+    def update(self, current_option_price, ewo_fast, ewo_slow):
+        """
+        Update peak detection based on current prices and EWO values.
+
+        Args:
+            current_option_price: Current option contract price
+            ewo_fast: Current EWO fast value
+            ewo_slow: Current EWO slow value (EWO average)
+
+        Returns:
+            dict with:
+                - triggered: True if exit signal triggered
+                - sell_reason: Reason for exit (if triggered)
+                - mode: Current detection mode
+                - max_price: Highest option price seen
+                - ewo_velocity: Current EWO velocity
+                - ewo_spread: Current EWO spread
+                - declining_count: Number of consecutive declining bars
+        """
+        # Update max prices
+        if current_option_price > self.max_option_price:
+            self.max_option_price = current_option_price
+
+        if ewo_fast > self.max_ewo_fast:
+            self.max_ewo_fast = ewo_fast
+
+        # Add to EWO history
+        self.ewo_history.append(ewo_fast)
+        if len(self.ewo_history) > 20:  # Keep last 20 values
+            self.ewo_history.pop(0)
+
+        # Calculate metrics
+        profit_pct = self._calculate_profit_pct(current_option_price)
+        ewo_spread = ewo_fast - ewo_slow
+        ewo_velocity = self._calculate_ewo_velocity()
+
+        triggered = False
+        sell_reason = None
+
+        # Check if EWO is declining
+        if len(self.ewo_history) >= 2:
+            if self.ewo_history[-1] < self.ewo_history[-2]:
+                self.declining_count += 1
+            else:
+                self.declining_count = 0
+
+        # State machine for peak detection
+        if self.mode == self.MODE_WATCHING:
+            # Check for initial peak conditions
+            if (profit_pct >= self.min_profit_pct and
+                    self._is_overbought(ewo_fast, ewo_slow) and
+                    ewo_velocity is not None and ewo_velocity < 0):
+                # Peak detected - EWO overbought and starting to decline
+                self.mode = self.MODE_PEAK_DETECTED
+                self.peak_ewo_value = self.max_ewo_fast
+                self.peak_price = self.max_option_price
+
+        elif self.mode == self.MODE_PEAK_DETECTED:
+            # Wait for confirmation
+            if self.declining_count >= self.confirmation_bars:
+                self.mode = self.MODE_CONFIRMING
+
+            # Reset if EWO makes new high (not a real peak)
+            if ewo_fast > self.peak_ewo_value * 1.02:  # 2% buffer
+                self.mode = self.MODE_WATCHING
+                self.declining_count = 0
+
+        elif self.mode == self.MODE_CONFIRMING:
+            # Confirmed peak - check for exit signal
+            # Exit when price starts following EWO down
+            if current_option_price < self.peak_price * 0.995:  # 0.5% below peak
+                self.mode = self.MODE_TRIGGERED
+                triggered = True
+                sell_reason = 'test_peak_momentum_reversal'
+
+            # Reset if EWO makes new high
+            if ewo_fast > self.peak_ewo_value * 1.02:
+                self.mode = self.MODE_WATCHING
+                self.declining_count = 0
+
+        elif self.mode == self.MODE_TRIGGERED:
+            # Already triggered
+            triggered = True
+            sell_reason = 'test_peak_momentum_reversal'
+
+        return {
+            'triggered': triggered,
+            'sell_reason': sell_reason,
+            'mode': self.mode,
+            'max_price': self.max_option_price,
+            'ewo_velocity': ewo_velocity,
+            'ewo_spread': ewo_spread,
+            'declining_count': self.declining_count,
+            'peak_ewo_value': self.peak_ewo_value,
+            'peak_price': self.peak_price,
+            'profit_pct': profit_pct,
+            'is_overbought': self._is_overbought(ewo_fast, ewo_slow)
+        }
+
+    def get_state(self):
+        """Get current peak detection state."""
+        return {
+            'entry_price': self.entry_price,
+            'mode': self.mode,
+            'max_option_price': self.max_option_price,
+            'max_ewo_fast': self.max_ewo_fast,
+            'peak_ewo_value': self.peak_ewo_value,
+            'peak_price': self.peak_price,
+            'declining_count': self.declining_count,
+            'ewo_overbought_threshold': self.ewo_overbought_threshold,
+            'ewo_spread_threshold': self.ewo_spread_threshold,
+            'min_profit_pct': self.min_profit_pct,
+            'confirmation_bars': self.confirmation_bars
+        }
+
+
+def check_test_peak_exit(entry_price, current_option_price, ewo_fast, ewo_slow,
+                         ewo_history, max_option_price, max_ewo_fast,
+                         current_mode='watching', declining_count=0,
+                         peak_ewo_value=0.0, peak_price=None,
+                         ewo_overbought_threshold=0.5, ewo_spread_threshold=0.1,
+                         min_profit_pct=0.35, confirmation_bars=2,
+                         velocity_lookback=3):
+    """
+    Stateless TEST peak exit check function for use in backtesting.
+
+    Args:
+        entry_price: Contract entry price
+        current_option_price: Current option contract price
+        ewo_fast: Current EWO fast value
+        ewo_slow: Current EWO slow value
+        ewo_history: List of recent EWO fast values (for velocity calculation)
+        max_option_price: Highest option price seen since entry
+        max_ewo_fast: Highest EWO fast value seen
+        current_mode: Current detection mode
+        declining_count: Current count of declining EWO bars
+        peak_ewo_value: EWO value at detected peak
+        peak_price: Option price at detected peak
+        ewo_overbought_threshold: EWO value considered overbought
+        ewo_spread_threshold: Minimum EWO spread for extended condition
+        min_profit_pct: Minimum profit before considering exit
+        confirmation_bars: Number of declining bars for confirmation
+        velocity_lookback: Number of bars for velocity calculation
+
+    Returns:
+        dict with:
+            - triggered: True if exit signal triggered
+            - sell_reason: Reason for exit (if triggered)
+            - mode: Updated detection mode
+            - max_price: Updated max option price
+            - max_ewo_fast: Updated max EWO fast
+            - ewo_velocity: Current EWO velocity
+            - ewo_spread: Current EWO spread
+            - declining_count: Updated declining count
+            - peak_ewo_value: Updated peak EWO value
+            - peak_price: Updated peak price
+    """
+    # Update max values
+    max_price = max(max_option_price, current_option_price)
+    max_ewo = max(max_ewo_fast, ewo_fast)
+    peak_p = peak_price if peak_price is not None else entry_price
+
+    # Calculate metrics
+    profit_pct = ((current_option_price - entry_price) / entry_price) if entry_price > 0 else 0
+    ewo_spread = ewo_fast - ewo_slow
+
+    # Calculate velocity from history
+    ewo_velocity = None
+    if len(ewo_history) >= 2:
+        lookback = min(velocity_lookback, len(ewo_history) - 1)
+        recent = ewo_history[-lookback:]
+        velocities = [recent[i] - recent[i - 1] for i in range(1, len(recent))]
+        ewo_velocity = sum(velocities) / len(velocities) if velocities else None
+
+    # Check if declining
+    new_declining_count = declining_count
+    if len(ewo_history) >= 2:
+        if ewo_history[-1] < ewo_history[-2]:
+            new_declining_count += 1
+        else:
+            new_declining_count = 0
+
+    # Check overbought condition
+    is_overbought = (ewo_fast >= ewo_overbought_threshold and
+                     ewo_spread >= ewo_spread_threshold)
+
+    triggered = False
+    sell_reason = None
+    mode = current_mode
+    new_peak_ewo = peak_ewo_value
+    new_peak_price = peak_p
+
+    # State machine
+    if mode == 'watching':
+        if (profit_pct >= min_profit_pct and is_overbought and
+                ewo_velocity is not None and ewo_velocity < 0):
+            mode = 'peak_detected'
+            new_peak_ewo = max_ewo
+            new_peak_price = max_price
+
+    elif mode == 'peak_detected':
+        if new_declining_count >= confirmation_bars:
+            mode = 'confirming'
+        if ewo_fast > new_peak_ewo * 1.02:
+            mode = 'watching'
+            new_declining_count = 0
+
+    elif mode == 'confirming':
+        if current_option_price < new_peak_price * 0.995:
+            mode = 'triggered'
+            triggered = True
+            sell_reason = 'test_peak_momentum_reversal'
+        if ewo_fast > new_peak_ewo * 1.02:
+            mode = 'watching'
+            new_declining_count = 0
+
+    elif mode == 'triggered':
+        triggered = True
+        sell_reason = 'test_peak_momentum_reversal'
+
+    return {
+        'triggered': triggered,
+        'sell_reason': sell_reason,
+        'mode': mode,
+        'max_price': max_price,
+        'max_ewo_fast': max_ewo,
+        'ewo_velocity': ewo_velocity,
+        'ewo_spread': ewo_spread,
+        'declining_count': new_declining_count,
+        'peak_ewo_value': new_peak_ewo,
+        'peak_price': new_peak_price,
+        'profit_pct': profit_pct,
+        'is_overbought': is_overbought
+    }
+
+
 """
 ================================================================================
 EXTERNAL - Module Interface
@@ -556,4 +892,5 @@ Modules: Config.py, Data.py, Analysis.py, Orders.py, Test.py
 import Config
 
 # Export for use by other modules
-__all__ = ['DynamicStopLoss', 'check_stop_loss', 'TieredProfitExit', 'check_profit_target']
+__all__ = ['DynamicStopLoss', 'check_stop_loss', 'TieredProfitExit', 'check_profit_target',
+           'TestPeakExit', 'check_test_peak_exit']

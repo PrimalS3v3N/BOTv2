@@ -56,7 +56,7 @@ Modules: Config.py, Signal.py, Analysis.py, Strategy.py
 import Config
 import Signal
 import Analysis
-from Strategy import DynamicStopLoss, TieredProfitExit
+from Strategy import DynamicStopLoss, TieredProfitExit, TestPeakExit
 
 
 # =============================================================================
@@ -873,6 +873,22 @@ class Backtest:
             stop_loss_pct=tpe_stop_loss_pct
         )
 
+        # Get TEST peak exit settings from config
+        test_config = self.config.get('test_peak_exit', {})
+        test_enabled = test_config.get('enabled', False)
+
+        # Initialize TEST peak exit manager
+        test_peak_exit = None
+        if test_enabled:
+            test_peak_exit = TestPeakExit(
+                entry_price=position.entry_price,
+                ewo_overbought_threshold=test_config.get('ewo_overbought_threshold', 0.5),
+                ewo_spread_threshold=test_config.get('ewo_spread_threshold', 0.1),
+                min_profit_pct=test_config.get('min_profit_pct', 0.35),
+                confirmation_bars=test_config.get('confirmation_bars', 2),
+                velocity_lookback=test_config.get('velocity_lookback', 3)
+            )
+
         for i, (timestamp, bar) in enumerate(stock_data.iterrows()):
             stock_price = bar['close']
             stock_high = bar.get('high', stock_price)
@@ -934,6 +950,20 @@ class Backtest:
                     max_option_price = pt_result['max_price']
                     profit_target_active = pt_result['is_active']
 
+                # Update TEST peak exit and check if triggered
+                test_triggered = False
+                test_sell_reason = None
+                test_mode = None
+
+                if test_enabled and test_peak_exit is not None:
+                    # Use ewo and ewo_15min_avg as fast and slow indicators
+                    ewo_fast = ewo if not np.isnan(ewo) else 0.0
+                    ewo_slow = ewo_15min_avg if not np.isnan(ewo_15min_avg) else 0.0
+                    test_result = test_peak_exit.update(option_price, ewo_fast, ewo_slow)
+                    test_triggered = test_result['triggered']
+                    test_sell_reason = test_result['sell_reason']
+                    test_mode = test_result['mode']
+
                 # Record tracking data with stop loss, profit target, and indicators
                 matrix.add_record(
                     timestamp=timestamp,
@@ -955,8 +985,14 @@ class Backtest:
                     profit_target_active=profit_target_active
                 )
 
-                # Check for profit target exit first (takes priority over stop loss)
-                if tpe_enabled and profit_triggered and not position.is_closed:
+                # Check for TEST peak exit first (highest priority when enabled)
+                if test_enabled and test_triggered and not position.is_closed:
+                    exit_price = option_price * (1 - self.slippage_pct)
+                    exit_reason = self._format_exit_reason(test_sell_reason)
+                    position.close(exit_price, timestamp, exit_reason)
+
+                # Check for profit target exit (takes priority over stop loss)
+                elif tpe_enabled and profit_triggered and not position.is_closed:
                     exit_price = option_price * (1 - self.slippage_pct)
                     # Map profit sell reasons to user-friendly format
                     exit_reason = self._format_exit_reason(profit_sell_reason)
@@ -1030,6 +1066,10 @@ class Backtest:
             return 'Profit - 200'
         elif 'X_EMA' in reason or 'ema_30_bearish' in reason:
             return 'EMA Exit'
+
+        # TEST peak exit
+        elif 'test_peak' in reason:
+            return 'TEST - Peak'
 
         # Stop loss exits
         elif reason == 'stop_loss_initial':
