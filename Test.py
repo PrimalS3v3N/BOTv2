@@ -316,10 +316,13 @@ class DiscordFetcher:
         if all_messages:
             df = pd.DataFrame(all_messages)
             df = df.sort_values('timestamp').reset_index(drop=True)
+            # Reorder columns per Config source of truth
+            col_order = Config.DATAFRAME_COLUMNS['discord_messages']
+            df = df[[c for c in col_order if c in df.columns]]
             print(f"  Fetched {len(df)} messages")
             return df
         else:
-            return pd.DataFrame(columns=['id', 'timestamp', 'content', 'author', 'author_id'])
+            return pd.DataFrame(columns=Config.DATAFRAME_COLUMNS['discord_messages'])
 
 
 # =============================================================================
@@ -390,12 +393,12 @@ class SignalParser:
         if signals:
             df = pd.DataFrame(signals)
             df = df.sort_values('signal_time').reset_index(drop=True)
+            # Reorder columns per Config source of truth
+            col_order = Config.DATAFRAME_COLUMNS['signals']
+            df = df[[c for c in col_order if c in df.columns]]
             return df
         else:
-            return pd.DataFrame(columns=[
-                'ticker', 'strike', 'option_type', 'expiration',
-                'cost', 'signal_time', 'message_id', 'raw_message'
-            ])
+            return pd.DataFrame(columns=Config.DATAFRAME_COLUMNS['signals'])
 
 
 # =============================================================================
@@ -646,6 +649,10 @@ class TrackingMatrix:
             df['entry_time'] = self.position.entry_time
             df['exit_time'] = self.position.exit_time
             df['exit_reason'] = self.position.exit_reason
+
+            # Reorder columns per Config source of truth
+            col_order = Config.DATAFRAME_COLUMNS['tracking_matrix'] + Config.DATAFRAME_COLUMNS['tracking_matrix_metadata']
+            df = df[[c for c in col_order if c in df.columns]]
 
             return df
         return pd.DataFrame()
@@ -1095,6 +1102,9 @@ class Backtest:
         if self.positions:
             positions_data = [p.to_dict() for p in self.positions]
             positions_df = pd.DataFrame(positions_data)
+            # Reorder columns per Config source of truth
+            col_order = Config.DATAFRAME_COLUMNS['positions']
+            positions_df = positions_df[[c for c in col_order if c in positions_df.columns]]
         else:
             positions_df = pd.DataFrame()
 
