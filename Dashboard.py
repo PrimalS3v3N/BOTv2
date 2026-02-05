@@ -202,37 +202,7 @@ def create_trade_chart(df, trade_label, show_all_exits=False, market_hours_only=
     else:
         fig = make_subplots(specs=[[{"secondary_y": True}]])
 
-    # Calculate error bar values (distance from close to high/low)
-    error_y_plus = None
-    error_y_minus = None
-    if 'stock_high' in df.columns and 'stock_low' in df.columns:
-        error_y_plus = df['stock_high'] - df['stock_price']
-        error_y_minus = df['stock_price'] - df['stock_low']
-
-    # Stock price with error bars (left y-axis)
-    stock_trace = go.Scatter(
-        x=df['time'],
-        y=df['stock_price'],
-        name='Stock',
-        line=dict(color=COLORS['stock'], width=2),
-        hovertemplate='Stock: $%{y:.2f}<extra></extra>'
-    )
-
-    # Add error bars if high/low data available
-    if error_y_plus is not None and error_y_minus is not None:
-        stock_trace.error_y = dict(
-            type='data',
-            symmetric=False,
-            array=error_y_plus,
-            arrayminus=error_y_minus,
-            color=COLORS['stock'],
-            thickness=1,
-            width=0
-        )
-
-    fig.add_trace(stock_trace, row=1, col=1, secondary_y=False)
-
-    # VWAP (left y-axis, same as stock price)
+    # VWAP (left y-axis)
     if 'vwap' in df.columns and df['vwap'].notna().any():
         fig.add_trace(
             go.Scatter(
@@ -245,53 +215,53 @@ def create_trade_chart(df, trade_label, show_all_exits=False, market_hours_only=
             row=1, col=1, secondary_y=False
         )
 
-    # EMA_20 (left y-axis, same as stock price)
-    if 'ema_20' in df.columns and df['ema_20'].notna().any():
-        fig.add_trace(
-            go.Scatter(
-                x=df['time'],
-                y=df['ema_20'],
-                name='EMA 20',
-                line=dict(color=COLORS['ema_20'], width=1.5, dash='dot'),
-                hovertemplate='EMA 20: $%{y:.2f}<extra></extra>'
-            ),
-            row=1, col=1, secondary_y=False
-        )
-
-    # EMA_30 (left y-axis, same as stock price)
+    # EMA (left y-axis) - orange
     if 'ema_30' in df.columns and df['ema_30'].notna().any():
         fig.add_trace(
             go.Scatter(
                 x=df['time'],
                 y=df['ema_30'],
-                name='EMA 30',
-                line=dict(color=COLORS['ema_30'], width=1.5, dash='dot'),
-                hovertemplate='EMA 30: $%{y:.2f}<extra></extra>'
+                name='EMA',
+                line=dict(color='#FF9800', width=1.5, dash='dot'),
+                hovertemplate='EMA: $%{y:.2f}<extra></extra>'
             ),
             row=1, col=1, secondary_y=False
         )
 
-    # True Price (left y-axis, same as stock price)
+    # True Price (left y-axis) - white with high/low error bars
     if 'true_price' in df.columns and df['true_price'].notna().any():
-        fig.add_trace(
-            go.Scatter(
-                x=df['time'],
-                y=df['true_price'],
-                name='True Price',
-                line=dict(color=COLORS['trading_range'], width=2),
-                hovertemplate='True Price: $%{y:.2f}<extra></extra>'
-            ),
-            row=1, col=1, secondary_y=False
+        true_price_trace = go.Scatter(
+            x=df['time'],
+            y=df['true_price'],
+            name='True Price',
+            line=dict(color='white', width=2),
+            hovertemplate='True Price: $%{y:.2f}<extra></extra>'
         )
 
-    # Option price (right y-axis)
+        # Add error bars showing high/low range relative to true price
+        if 'stock_high' in df.columns and 'stock_low' in df.columns:
+            tp_error_plus = df['stock_high'] - df['true_price']
+            tp_error_minus = df['true_price'] - df['stock_low']
+            true_price_trace.error_y = dict(
+                type='data',
+                symmetric=False,
+                array=tp_error_plus,
+                arrayminus=tp_error_minus,
+                color='rgba(255, 255, 255, 0.4)',
+                thickness=1,
+                width=0
+            )
+
+        fig.add_trace(true_price_trace, row=1, col=1, secondary_y=False)
+
+    # Option price (right y-axis) - green
     if opt_col in df.columns:
         fig.add_trace(
             go.Scatter(
                 x=df['time'],
                 y=df[opt_col],
                 name='Option',
-                line=dict(color=COLORS['option'], width=2),
+                line=dict(color='#00C853', width=2),
                 hovertemplate='Option: $%{y:.2f}<extra></extra>'
             ),
             row=1, col=1, secondary_y=True
@@ -599,13 +569,21 @@ def create_trade_chart(df, trade_label, show_all_exits=False, market_hours_only=
         template='plotly_dark',
         height=chart_height,
         hovermode='x unified',
-        legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1),
-        margin=dict(l=60, r=60, t=60, b=40)
+        legend=dict(
+            orientation='v',
+            yanchor='top',
+            y=1,
+            xanchor='right',
+            x=-0.02,
+            bgcolor='rgba(0,0,0,0)',
+            font=dict(size=11),
+        ),
+        margin=dict(l=160, r=60, t=60, b=40)
     )
 
     # Update axes
     fig.update_xaxes(title_text="Time", tickformat='%H:%M', row=1, col=1)
-    fig.update_yaxes(title_text="Stock ($)", secondary_y=False, tickformat='$.2f', row=1, col=1)
+    fig.update_yaxes(title_text="Price ($)", secondary_y=False, tickformat='$.2f', row=1, col=1)
     fig.update_yaxes(title_text="Option ($)", secondary_y=True, tickformat='$.2f', row=1, col=1)
 
     if has_ewo:
