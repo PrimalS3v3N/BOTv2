@@ -331,26 +331,6 @@ ANALYSIS_CONFIG = {
     'rsi_overbought': 70,              # Stock default (use 80 for options)
     'rsi_oversold': 30,                # Stock default (use 20 for options)
 
-    # MACD
-    'macd_fast': 12,
-    'macd_slow': 26,
-    'macd_signal': 9,
-
-    # Bollinger Bands
-    'bb_period': 20,
-    'bb_std_dev': 2,
-
-    # ATR
-    'atr_period': 14,
-
-    # Stochastic
-    'stoch_period': 14,
-    'stoch_k_smooth': 3,
-
-    # SuperTrend
-    'supertrend_period': 10,
-    'supertrend_multiplier': 3.0,
-
     # Elliott Wave Oscillator
     'ewo_fast': 5,
     'ewo_slow': 35,
@@ -358,12 +338,6 @@ ANALYSIS_CONFIG = {
     # NOTE: RSI settings defined above at lines 327-330
     # For options backtesting, use BACKTEST_CONFIG['indicator_settings'] which has
     # higher thresholds (80/20) appropriate for options trading
-
-    # Volume Analysis
-    'vwap_lookback': 30,
-    'vpoc_bins': 10,
-    'vwap_threshold_pct': 0.02,        # 2% threshold for VWAP exits
-    'vpoc_threshold_pct': 0.03,        # 3% threshold for VPOC exits
 
     # Support/Resistance
     'support_resistance_lookback': 20,
@@ -520,7 +494,7 @@ BACKTEST_CONFIG = {
     # Phase 3 (TRAILING): Trail at trailing_stop_pct below highest price since entry
     'dynamic_stop_loss': {
         'enabled': True,
-        'stop_loss_pct': 0.35,              # 35% max loss from entry
+        'stop_loss_pct': 0.25,              # 35% max loss from entry
         'stop_loss_warning_pct': 0.15,      # 15% warning threshold before stop
         'profit_target_pct': 1.00,          # 100% profit target
         'trailing_stop_pct': 0.20,          # 20% trailing below highest price
@@ -590,7 +564,7 @@ BACKTEST_CONFIG = {
 
     # Technical Indicators for Backtest
     'indicators': {
-        'ema_period': 30,                   # 30-bar EMA (30 minutes on 1m data)
+        'ema_period': 25,                   # 30-bar EMA (30 minutes on 1m data)
         'vwap_enabled': True,               # Calculate VWAP
         'rsi_period': 14,                   # RSI calculation period
         'rsi_overbought': 70,               # RSI overbought threshold
