@@ -109,22 +109,13 @@ def EWO(df, column='close', fast_period=5, slow_period=35):
     return ema_fast - ema_slow
 
 
-def ATR(stock_high, stock_low):
-    """
-    Calculate Average True Range for a single bar.
-
-    Simplified ATR = High - Low for a single candle.
-
-    Args:
-        stock_high: High price for the bar
-        stock_low: Low price for the bar
-
-    Returns:
-        float: ATR value, or np.nan if inputs are invalid
-    """
-    if np.isnan(stock_high) or np.isnan(stock_low):
-        return np.nan
-    return stock_high - stock_low
+def ATR(df):
+    # Calculate typical price (high + low + close) / 3 if available, else use close
+    if 'high' in df.columns and 'low' in df.columns:
+        typical_price = (df['high'] + df['low'] + df[price_col]) / 3
+    else:
+        typical_price = df[price_col]
+    return typical_price
 
 
 def RSI(df, column='close', period=14):
