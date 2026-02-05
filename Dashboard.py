@@ -557,6 +557,7 @@ def get_trade_summary(df):
     min_price = 0
     max_profit_pct = 0
     min_profit_pct = 0
+    profit_min = 0  # P&L at the worst stop loss point (min price during holding)
     if 'holding' in df.columns and opt_col in df.columns:
         holding_df = df[df['holding'] == True]
         if not holding_df.empty and holding_df[opt_col].notna().any():
@@ -566,6 +567,9 @@ def get_trade_summary(df):
             if entry_price > 0:
                 max_profit_pct = (max_price / entry_price - 1) * 100
                 min_profit_pct = (min_price / entry_price - 1) * 100
+                # Calculate Profit[min] - P&L in dollars at the worst stop loss point
+                contracts = int(df['contracts'].iloc[0]) if 'contracts' in df.columns else 1
+                profit_min = (min_price - entry_price) * contracts * 100
 
     return {
         'entry': entry_price,
@@ -576,7 +580,8 @@ def get_trade_summary(df):
         'max_price': max_price,
         'min_price': min_price,
         'max_profit_pct': max_profit_pct,
-        'min_profit_pct': min_profit_pct
+        'min_profit_pct': min_profit_pct,
+        'profit_min': profit_min
     }
 
 
@@ -725,12 +730,12 @@ def main():
     st.subheader("Trade Summary")
     summary = get_trade_summary(df)
 
-    # Row 1: Entry | Exit | P&L | TBD | TBD | TBD | TBD
+    # Row 1: Entry | Exit | P&L | Profit[min] TBD | TBD | TBD | TBD
     row1 = st.columns(7)
     row1[0].metric("Entry", f"${summary['entry']:.2f}")
     row1[1].metric("Exit", f"${summary['exit']:.2f}")
     row1[2].metric("P&L", f"{summary['pnl_pct']:+.1f}%")
-    row1[3].metric("TBD", "1")
+    row1[3].metric("Profit[min] TBD", f"${summary['profit_min']:+.2f}")
     row1[4].metric("TBD", "1")
     row1[5].metric("TBD", "1")
     row1[6].metric("TBD", "1")
