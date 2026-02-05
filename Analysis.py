@@ -109,6 +109,24 @@ def EWO(df, column='close', fast_period=5, slow_period=35):
     return ema_fast - ema_slow
 
 
+def ATR(stock_high, stock_low):
+    """
+    Calculate Average True Range for a single bar.
+
+    Simplified ATR = High - Low for a single candle.
+
+    Args:
+        stock_high: High price for the bar
+        stock_low: Low price for the bar
+
+    Returns:
+        float: ATR value, or np.nan if inputs are invalid
+    """
+    if np.isnan(stock_high) or np.isnan(stock_low):
+        return np.nan
+    return stock_high - stock_low
+
+
 def RSI(df, column='close', period=14):
     """
     Calculate Relative Strength Index.
@@ -409,6 +427,6 @@ def estimate_option_price_bs(stock_price, strike, option_type, days_to_expiry,
 
 
 # Export functions for use by other modules
-__all__ = ['EMA', 'VWAP', 'EWO', 'RSI', 'add_indicators',
+__all__ = ['EMA', 'VWAP', 'EWO', 'ATR', 'RSI', 'add_indicators',
            'black_scholes_call', 'black_scholes_put', 'black_scholes_price',
            'calculate_greeks', 'estimate_option_price_bs']
