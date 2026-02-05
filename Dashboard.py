@@ -14,6 +14,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import os
 import pickle
+import Config
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_PATH = os.path.join(SCRIPT_DIR, 'BT_DATA.pkl')
@@ -841,15 +842,8 @@ def main():
     # Matrix Data section
     st.subheader("Matrix Data")
 
-    # Define columns to display in matrix
-    matrix_cols = [
-        'timestamp', 'holding', 'stock_price', 'stock_high', 'stock_low',
-        'true_price', 'option_price', 'pnl_pct', 'max_option_price',
-        'stop_loss', 'stop_loss_mode', 'sl_cushion',
-        'profit_target', 'profit_target_mode', 'profit_target_active',
-        'vwap', 'ema_20', 'ema_30', 'ewo', 'ewo_15min_avg', 'rsi',
-        'SL_C1', 'SL_C2'
-    ]
+    # Column order from Config (source of truth)
+    matrix_cols = Config.DATAFRAME_COLUMNS['dashboard_matrix']
 
     # Filter to columns that exist in the dataframe
     available_cols = [col for col in matrix_cols if col in df.columns]
