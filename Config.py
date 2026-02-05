@@ -241,23 +241,23 @@ RISK_CONFIG = {
         'use_expiration_stop': False,
     },
 
-    # Option-specific defaults (50% stop, 100% target)
+    # Option-specific defaults (35% stop, 100% target)
     'option_defaults': {
-        'stop_loss_pct': 0.50,
-        'stop_loss_warning_pct': 0.15, # 15% warning before stop
         'profit_target_pct': 1.00,
-        'trailing_stop_pct': 0.20,
-        'time_stop_minutes': 60,       # Close after 1 hour
-        'use_trailing_stop': True,
         'use_profit_target': True,
-        'use_time_stop': True,
         'use_technical_stop': True,
         'use_expiration_stop': True,
-        # Dynamic stop loss settings
-        'use_dynamic_stop_loss': True,
-        'breakeven_threshold': 0.35,   # Move stop to breakeven at +35% profit
-        'trailing_threshold': 0.55,    # Start trailing at +55% profit
-        'dynamic_trailing_pct': 0.35,  # Trail at 35% below highest price
+        # Dynamic stop loss configuration (unified settings)
+        'dynamic_stop_loss': {
+            'enabled': True,
+            'stop_loss_pct': 0.35,              # 35% max loss from entry
+            'stop_loss_warning_pct': 0.15,      # 15% warning threshold before stop
+            'trailing_stop_pct': 0.20,          # 20% trailing below highest price
+            'time_stop_minutes': 60,            # 1 hour time stop
+            'breakeven_threshold_pct': None,    # None = auto-calculate
+            'breakeven_min_minutes': 30,        # Min minutes before breakeven transition
+            'trailing_trigger_pct': 0.50,       # Start trailing at 50% profit
+        },
     },
 
     # ATR-based stop calculation
@@ -390,6 +390,7 @@ ENTRY_CONFIG = {
 
 EXIT_CONFIG = {
     # Exit strategy toggles
+    # Note: Stop loss settings are managed via dynamic_stop_loss in RISK_CONFIG/BACKTEST_CONFIG
     'use_stop_loss': True,
     'use_profit_target': True,
     'use_trailing_stop': True,
@@ -405,10 +406,6 @@ EXIT_CONFIG = {
     'use_vwap_exit': True,
     'use_vpoc_exit': True,
     'use_supertrend_exit': True,
-
-    # Default values (overridden by instrument type in RISK_CONFIG)
-    'trailing_stop_pct': 0.05,
-    'time_stop_minutes': None
 }
 
 
@@ -484,25 +481,22 @@ BACKTEST_CONFIG = {
     # Instrument type (determines risk defaults)
     'instrument_type': 'option',
 
-    # Option-specific backtest settings (override RISK_CONFIG)
-    'stop_loss_pct': 0.35,             # 35% max loss
-    'stop_loss_warning_pct': 0.15,     # 15% warning threshold
-    'profit_target_pct': 1.00,         # 100% target
-    'trailing_stop_pct': 0.20,         # 20% trailing
-    'time_stop_minutes': 60,           # 1 hour time stop
-
     # Dynamic Stop Loss Settings
-    # Phase 1 (INITIAL): Fixed stop at entry * (1 - default_stop_loss_pct)
+    # Unified stop loss configuration with three phases:
+    # Phase 1 (INITIAL): Fixed stop at entry * (1 - stop_loss_pct)
     # Phase 2 (BREAKEVEN): Move stop to entry when price >= breakeven_threshold
     #                      Only after breakeven_min_minutes has passed
     # Phase 3 (TRAILING): Trail at trailing_stop_pct below highest price since entry
     'dynamic_stop_loss': {
         'enabled': True,
-        'default_stop_loss_pct': 0.30,      # 30% default stop loss from entry
+        'stop_loss_pct': 0.35,              # 35% max loss from entry
+        'stop_loss_warning_pct': 0.15,      # 15% warning threshold before stop
+        'profit_target_pct': 1.00,          # 100% profit target
+        'trailing_stop_pct': 0.20,          # 20% trailing below highest price
+        'time_stop_minutes': 60,            # 1 hour time stop
         'breakeven_threshold_pct': None,    # None = auto-calculate as entry/(1-stop_loss_pct)
         'breakeven_min_minutes': 30,        # Minimum minutes before allowing breakeven transition
         'trailing_trigger_pct': 0.50,       # Start trailing at 50% profit
-        'trailing_stop_pct': 0.30,          # Trail at 30% below highest price
     },
 
     # Tiered Profit Exit Settings
@@ -511,7 +505,7 @@ BACKTEST_CONFIG = {
     # Tiers define when profit targets are set and what they are
     'tiered_profit_exit': {
         'enabled': True,
-        'stop_loss_pct': 0.30,              # Stop loss % used for trailing calculation
+        # Note: Uses dynamic_stop_loss.stop_loss_pct for trailing calculation
 
         # Contract tiers (for future multi-contract support)
         # Tier 1: 1 contract - sell all at exit signal
