@@ -183,20 +183,26 @@ def add_indicators(df, ema_period=30, ewo_fast=5, ewo_slow=35, ewo_avg_period=15
     """
     df = df.copy()
 
-    # Add EMA
-    df['ema_30'] = EMA(df, column='close', period=ema_period)
+    # Calculate true_price = (high + low + close) / 3 for use by all indicators
+    if 'high' in df.columns and 'low' in df.columns:
+        df['true_price'] = (df['high'] + df['low'] + df['close']) / 3
+    else:
+        df['true_price'] = df['close']
 
-    # Add VWAP
-    df['vwap'] = VWAP(df, price_col='close', volume_col='volume')
+    # Add EMA (based on true_price)
+    df['ema_30'] = EMA(df, column='true_price', period=ema_period)
 
-    # Add EWO
-    df['ewo'] = EWO(df, column='close', fast_period=ewo_fast, slow_period=ewo_slow)
+    # Add VWAP (based on true_price)
+    df['vwap'] = VWAP(df, price_col='true_price', volume_col='volume')
+
+    # Add EWO (based on true_price)
+    df['ewo'] = EWO(df, column='true_price', fast_period=ewo_fast, slow_period=ewo_slow)
 
     # Add EWO 15-minute rolling average (simple moving average over ewo_avg_period bars)
     df['ewo_15min_avg'] = df['ewo'].rolling(window=ewo_avg_period, min_periods=1).mean()
 
-    # Add RSI
-    df['rsi'] = RSI(df, column='close', period=rsi_period)
+    # Add RSI (based on true_price)
+    df['rsi'] = RSI(df, column='true_price', period=rsi_period)
 
     return df
 
