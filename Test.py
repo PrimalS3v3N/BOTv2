@@ -59,7 +59,7 @@ Modules: Config.py, Signal.py, Analysis.py, Strategy.py
 import Config
 import Signal
 import Analysis
-from Strategy import DynamicStopLoss
+from Strategy import StopLoss
 
 
 # =============================================================================
@@ -615,7 +615,7 @@ class TrackingMatrix:
             'highest_price': self.position.highest_price if holding else np.nan,
             'lowest_price': self.position.lowest_price if holding else np.nan,
             'minutes_held': self.position.get_minutes_held(timestamp) if holding else np.nan,
-            # Dynamic stop loss tracking
+            # Stop loss tracking
             'stop_loss': stop_loss,
             'stop_loss_mode': stop_loss_mode,
             # Technical indicators
@@ -841,21 +841,21 @@ class Backtest:
         # Add technical indicators to stock data
         stock_data = Analysis.add_indicators(stock_data, ema_period=ema_period)
 
-        # Get dynamic stop loss settings from config
-        dsl_config = self.config.get('dynamic_stop_loss', {})
-        dsl_enabled = dsl_config.get('enabled', True)
-        stop_loss_pct = dsl_config.get('stop_loss_pct', 0.30)
-        trailing_trigger_pct = dsl_config.get('trailing_trigger_pct', 0.50)
-        trailing_stop_pct = dsl_config.get('trailing_stop_pct', 0.30)
-        breakeven_min_minutes = dsl_config.get('breakeven_min_minutes', 30)
+        # Get stop loss settings from config
+        SL_config = self.config.get('stop_loss', {})
+        SL_enabled = SL_config.get('enabled', True)
+        SL_pct = SL_config.get('stop_loss_pct', 0.30)
+        SL_trailing_trigger_pct = SL_config.get('trailing_trigger_pct', 0.50)
+        SL_trailing_stop_pct = SL_config.get('trailing_stop_pct', 0.30)
+        SL_breakeven_min_minutes = SL_config.get('breakeven_min_minutes', 30)
 
-        # Initialize dynamic stop loss manager
-        dynamic_sl = DynamicStopLoss(
+        # Initialize stop loss manager
+        SL_manager = StopLoss(
             entry_price=position.entry_price,
-            stop_loss_pct=stop_loss_pct,
-            trailing_trigger_pct=trailing_trigger_pct,
-            trailing_stop_pct=trailing_stop_pct,
-            breakeven_min_minutes=breakeven_min_minutes
+            stop_loss_pct=SL_pct,
+            trailing_trigger_pct=SL_trailing_trigger_pct,
+            trailing_stop_pct=SL_trailing_stop_pct,
+            breakeven_min_minutes=SL_breakeven_min_minutes
         )
 
         for i, (timestamp, bar) in enumerate(stock_data.iterrows()):
@@ -895,17 +895,17 @@ class Backtest:
             if holding:
                 position.update(timestamp, option_price, stock_price)
 
-                # Update dynamic stop loss and check if triggered
-                stop_loss_price = np.nan
-                stop_loss_mode = None
-                stop_triggered = False
+                # Update stop loss and check if triggered
+                SL_price = np.nan
+                SL_mode = None
+                SL_triggered = False
 
-                if dsl_enabled:
+                if SL_enabled:
                     minutes_held = position.get_minutes_held(timestamp)
-                    sl_result = dynamic_sl.update(option_price, minutes_held=minutes_held)
-                    stop_loss_price = sl_result['stop_loss']
-                    stop_loss_mode = sl_result['mode']
-                    stop_triggered = sl_result['triggered']
+                    SL_result = SL_manager.update(option_price, minutes_held=minutes_held)
+                    SL_price = SL_result['stop_loss']
+                    SL_mode = SL_result['mode']
+                    SL_triggered = SL_result['triggered']
 
                 # Record tracking data with stop loss and indicators
                 matrix.add_record(
@@ -914,8 +914,8 @@ class Backtest:
                     option_price=option_price,
                     volume=volume,
                     holding=True,
-                    stop_loss=stop_loss_price,
-                    stop_loss_mode=stop_loss_mode,
+                    stop_loss=SL_price,
+                    stop_loss_mode=SL_mode,
                     vwap=vwap,
                     ema_30=ema_30,
                     stock_high=stock_high,
@@ -925,11 +925,11 @@ class Backtest:
                     rsi=rsi
                 )
 
-                # Check for stop loss exit (only if dynamic stop loss is enabled)
-                if dsl_enabled and stop_triggered and not position.is_closed:
+                # Check for stop loss exit (only if stop loss is enabled)
+                if SL_enabled and SL_triggered and not position.is_closed:
                     exit_price = option_price * (1 - self.slippage_pct)
                     # Map stop loss mode to user-friendly format
-                    exit_reason = self._format_exit_reason(f'stop_loss_{stop_loss_mode}')
+                    exit_reason = self._format_exit_reason(f'stop_loss_{SL_mode}')
                     position.close(exit_price, timestamp, exit_reason)
 
                 # Exit at market close

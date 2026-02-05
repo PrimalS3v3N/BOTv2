@@ -12,9 +12,9 @@ INTERNAL - Strategy Decision Logic
 import numpy as np
 
 
-class DynamicStopLoss:
+class StopLoss:
     """
-    Dynamic Stop Loss Manager for Options Contracts.
+    Stop Loss Manager for Options Contracts.
 
     Implements a three-phase stop loss strategy:
     1. INITIAL: Fixed stop loss at (entry_price - stop_loss_pct * entry_price)
@@ -37,7 +37,7 @@ class DynamicStopLoss:
     def __init__(self, entry_price, stop_loss_pct=None, trailing_trigger_pct=0.50,
                  trailing_stop_pct=0.30, breakeven_min_minutes=30):
         """
-        Initialize dynamic stop loss manager.
+        Initialize stop loss manager.
 
         Args:
             entry_price: Contract entry price
@@ -205,4 +205,4 @@ Modules: Config.py, Data.py, Analysis.py, Orders.py, Test.py
 import Config
 
 # Export for use by other modules
-__all__ = ['DynamicStopLoss', 'check_stop_loss']
+__all__ = ['StopLoss', 'check_stop_loss']
