@@ -563,7 +563,7 @@ class TrackingMatrix:
                    stop_loss=np.nan, stop_loss_mode=None, vwap=np.nan, ema_30=np.nan,
                    stock_high=np.nan, stock_low=np.nan, ewo=np.nan, ewo_15min_avg=np.nan,
                    profit_target=np.nan, profit_target_mode=None, max_option_price=np.nan,
-                   profit_target_active=False):
+                   profit_target_active=False, rsi=np.nan):
         """Add a tracking record."""
         pnl_pct = self.position.get_pnl_pct(option_price) if holding else np.nan
 
@@ -594,6 +594,7 @@ class TrackingMatrix:
             'ema_30': ema_30,
             'ewo': ewo,
             'ewo_15min_avg': ewo_15min_avg,
+            'rsi': rsi,
         }
 
         self.records.append(record)
@@ -901,6 +902,7 @@ class Backtest:
             ema_30 = bar.get('ema_30', np.nan)
             ewo = bar.get('ewo', np.nan)
             ewo_15min_avg = bar.get('ewo_15min_avg', np.nan)
+            rsi = bar.get('rsi', np.nan)
 
             current_days_to_expiry = max(0, days_to_expiry - (timestamp.date() - position.entry_time.date()).days)
 
@@ -983,7 +985,8 @@ class Backtest:
                     profit_target=profit_target_price,
                     profit_target_mode=profit_target_mode,
                     max_option_price=max_option_price,
-                    profit_target_active=profit_target_active
+                    profit_target_active=profit_target_active,
+                    rsi=rsi
                 )
 
                 # Check for TEST peak exit first (highest priority when enabled)
@@ -1029,7 +1032,8 @@ class Backtest:
                     profit_target=np.nan,
                     profit_target_mode=None,
                     max_option_price=np.nan,
-                    profit_target_active=False
+                    profit_target_active=False,
+                    rsi=rsi
                 )
 
         # Close at end of data if still open

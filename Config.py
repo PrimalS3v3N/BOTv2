@@ -542,7 +542,7 @@ BACKTEST_CONFIG = {
     # Experimental momentum-based peak detection using EWO signals
     # Aims to capture price peaks by detecting EWO momentum reversals
     'test_peak_exit': {
-        'enabled': False,                   # Disabled by default (experimental)
+        'enabled': True,                    # Enable TEST peak detection
 
         # EWO Overbought Thresholds
         # EWO fast must exceed this value to be considered overbought
