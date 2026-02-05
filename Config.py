@@ -538,44 +538,29 @@ BACKTEST_CONFIG = {
         'immediate_sell_pct': 200,          # Sell immediately at 200% profit
     },
 
-    # TEST Exit Strategy - Peak Detection
-    # Experimental momentum-based peak detection using EWO signals
-    # Aims to capture price peaks by detecting EWO momentum reversals
+    # TEST Exit Strategy - Profit Trailing Stop
+    # Captures profits by trailing the maximum profit percentage
+    # Exits when profit drops from peak by a threshold amount
     'test_peak_exit': {
-        'enabled': True,                    # Enable TEST peak detection
+        'enabled': True,                    # Enable TEST profit trailing
 
-        # EWO Overbought Thresholds
-        # EWO fast must exceed this value to be considered overbought
-        'ewo_overbought_threshold': 0.5,
+        # Minimum Profit to Activate
+        # Only start trailing after this profit is reached (0.50 = 50%)
+        'min_profit_pct': 0.50,
 
-        # EWO Spread Threshold
-        # EWO spread (fast - slow) must exceed this for extended condition
-        'ewo_spread_threshold': 0.1,
+        # Pullback Threshold
+        # Exit when profit drops this much from peak (0.15 = 15%)
+        # Example: Peak at 126%, exit when drops to 111% (126 - 15 = 111)
+        'pullback_pct': 0.15,
 
-        # Minimum Profit Requirement
-        # Only consider exit when profit exceeds this percentage (0.35 = 35%)
-        'min_profit_pct': 0.35,
+        # RSI Overbought Level
+        # RSI value considered overbought (default: 70)
+        'rsi_overbought': 70,
 
-        # Confirmation Settings
-        # Number of consecutive declining EWO bars needed to confirm peak
-        'confirmation_bars': 2,
-
-        # Velocity Calculation
-        # Number of bars to use for EWO velocity (rate of change) calculation
-        'velocity_lookback': 3,
-
-        # Price Confirmation
-        # Price must drop this % below peak to trigger exit (0.005 = 0.5%)
-        'price_drop_threshold': 0.005,
-
-        # EWO Reset Threshold
-        # If EWO exceeds peak by this %, reset detection (0.02 = 2%)
-        'ewo_reset_threshold': 0.02,
-
-        # Overbought Memory
-        # Number of bars to remember overbought state after EWO drops below threshold
-        # This allows peak detection when EWO has just fallen below threshold
-        'overbought_memory': 3,
+        # RSI Pullback Threshold
+        # Use tighter pullback when RSI was overbought (0.10 = 10%)
+        # This allows faster exits when momentum is exhausted
+        'rsi_pullback_pct': 0.10,
     },
 
     # Technical Indicators for Backtest
