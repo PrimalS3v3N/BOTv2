@@ -663,16 +663,18 @@ class TrackingMatrix:
 
 
 # =============================================================================
-# INTERNAL - Option Price Estimation
+# INTERNAL - Option Price Estimation (Wrapper)
 # =============================================================================
+# This is a convenience wrapper around Analysis.estimate_option_price_bs()
+# Kept here for backwards compatibility and simpler interface within Test.py
 
 def estimate_option_price(stock_price, strike, option_type, days_to_expiry,
                           entry_price=None, entry_stock_price=None, volatility=0.3):
     """
     Estimate option price using Black-Scholes model.
 
-    Uses the Black-Scholes pricing from Analysis.py for accurate
-    CALL and PUT option pricing with proper Greeks calculations.
+    Wrapper around Analysis.estimate_option_price_bs() for use within Test.py.
+    The actual Black-Scholes implementation is centralized in Analysis.py.
 
     Args:
         stock_price: Current stock price
