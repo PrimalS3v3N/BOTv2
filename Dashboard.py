@@ -144,7 +144,7 @@ def find_entry_exit(df):
     return entry_row, exit_row, opt_col
 
 
-def create_trade_chart(df, trade_label, show_all_exits=False, market_hours_only=False):
+def create_trade_chart(df, trade_label, show_all_exits=False, market_hours_only=False, show_ewo=True, show_rsi=True):
     """Create dual-axis chart with stock/option prices, error bars, and EWO subplot."""
     df = df.copy()
     df['time'] = df['timestamp'].apply(parse_time)
@@ -169,11 +169,11 @@ def create_trade_chart(df, trade_label, show_all_exits=False, market_hours_only=
 
     entry_row, exit_row, opt_col = find_entry_exit(df)
 
-    # Check if EWO data is available for subplot
-    has_ewo = 'ewo' in df.columns and df['ewo'].notna().any()
+    # Check if EWO data is available for subplot (and toggle is on)
+    has_ewo = show_ewo and 'ewo' in df.columns and df['ewo'].notna().any()
 
-    # Check if RSI data is available
-    has_rsi = 'rsi' in df.columns and df['rsi'].notna().any()
+    # Check if RSI data is available (and toggle is on)
+    has_rsi = show_rsi and 'rsi' in df.columns and df['rsi'].notna().any()
 
     # Create subplots: main chart, EWO subplot, and RSI subplot
     if has_ewo and has_rsi:
@@ -711,8 +711,38 @@ def main():
         )
 
         st.markdown("---")
-        market_hours_only = st.toggle("Market Hours (9:00-4:00)", value=True, help="ON: Full market hours view | OFF: Holding period only")
+        market_hours_only = st.toggle("Market Hours", value=True, help="ON: Full market hours view | OFF: Holding period only")
         show_all_exits = st.toggle("Show All Exit Signals", value=False)
+
+        st.markdown("---")
+
+        # Calculate Total Profit and Potential Profit across all trades
+        total_profit_dollars = 0.0
+        total_investment = 0.0
+        potential_profit_dollars = 0.0
+        for _, tdf in matrices.items():
+            s = get_trade_summary(tdf)
+            entry_p = s['entry']
+            exit_p = s['exit']
+            max_p = s['max_price']
+            contracts = int(tdf['contracts'].iloc[0]) if 'contracts' in tdf.columns else 1
+            if entry_p > 0:
+                inv = entry_p * contracts * 100
+                total_investment += inv
+                total_profit_dollars += (exit_p - entry_p) * contracts * 100
+                potential_profit_dollars += (max_p - entry_p) * contracts * 100
+
+        total_profit_pct = (total_profit_dollars / total_investment * 100) if total_investment > 0 else 0
+        potential_profit_pct = (potential_profit_dollars / total_investment * 100) if total_investment > 0 else 0
+
+        st.markdown(f"**Total Profit:** ${total_profit_dollars:,.2f} ({total_profit_pct:+.1f}%)")
+        st.markdown(f"**Potential Profit:** ${potential_profit_dollars:,.2f} ({potential_profit_pct:+.1f}%)")
+
+        st.markdown("---")
+
+        # EWO and RSI graph toggles
+        show_ewo = st.toggle("Show EWO Graph", value=True)
+        show_rsi = st.toggle("Show RSI Graph", value=True)
 
         st.markdown("---")
         st.caption(f"{len(matrices)} trades loaded")
@@ -722,7 +752,7 @@ def main():
     df = matrices[pos_id]
 
     # Chart first (no summary above)
-    fig = create_trade_chart(df, trade_label, show_all_exits, market_hours_only)
+    fig = create_trade_chart(df, trade_label, show_all_exits, market_hours_only, show_ewo, show_rsi)
     if fig:
         st.plotly_chart(fig, use_container_width=True)
     else:
