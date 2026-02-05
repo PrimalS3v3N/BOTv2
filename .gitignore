@@ -23,3 +23,6 @@ Thumbs.db
 # Trading state files
 paper_trading_state.json
 *.pickle
+
+# Local settings with credentials
+Setting.xlsx

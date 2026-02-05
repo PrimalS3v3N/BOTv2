@@ -48,6 +48,36 @@ except ImportError:
     pass
 
 
+def _load_discord_token_from_excel():
+    """
+    Load Discord token from Setting.xlsx file (Row 1, Column B).
+    This keeps sensitive credentials local and out of version control.
+
+    Returns:
+        str: Discord token or empty string if not found
+    """
+    try:
+        import pandas as pd
+        # Look for Setting.xlsx in the same directory as Config.py
+        config_dir = os.path.dirname(os.path.abspath(__file__))
+        excel_path = os.path.join(config_dir, 'Setting.xlsx')
+
+        if os.path.exists(excel_path):
+            df = pd.read_excel(excel_path, header=None)
+            # Row 1 = index 0, Column B = index 1
+            token = df.iloc[0, 1]
+            if pd.notna(token):
+                return str(token).strip()
+    except Exception as e:
+        print(f"Warning: Could not load Discord token from Setting.xlsx: {e}")
+
+    return ''
+
+
+# Load Discord token from Excel file
+_DISCORD_TOKEN_FROM_EXCEL = _load_discord_token_from_excel()
+
+
 # =============================================================================
 # TRADING MODE CONFIGURATION
 # =============================================================================
@@ -80,8 +110,8 @@ CREDENTIALS_CONFIG = {
 # Used by: Discord.py, Signal.py, Test.py
 
 DISCORD_CONFIG = {
-    # Authentication (use environment variables!)
-    'token': os.getenv('DISCORD_TOKEN', "Mzg4NjUzMzc0OTM5MDcwNDY0.GaIdzI.nBeBCVq2UlXhL6_pAp11KhQQ1IZRypJu0r6JEU"),
+    # Authentication - loads from Setting.xlsx (Row 1, Col B) or environment variable
+    'token': _DISCORD_TOKEN_FROM_EXCEL or os.getenv('DISCORD_TOKEN', ''),
     'channel_id': os.getenv('DISCORD_CHANNEL_ID', '748401380288364575'),
 
     # API settings
