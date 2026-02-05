@@ -248,13 +248,22 @@ class DiscordFetcher:
         """
         Fetch all messages for the specified number of days.
         Uses human-like timing to avoid detection.
+
+        Args:
+            days: Number of calendar days to look back.
+                  days=1 means today only (from midnight)
+                  days=2 means today and yesterday
         """
-        cutoff_date = dt.datetime.now(EASTERN) - timedelta(days=days)
+        # Calculate cutoff as midnight of (days-1) days ago
+        # days=1 -> midnight today, days=2 -> midnight yesterday
+        now = dt.datetime.now(EASTERN)
+        cutoff_date = now.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=days - 1)
         all_messages = []
         before_id = None
         request_count = 0
 
-        print(f"Fetching Discord messages for last {days} days...")
+        print(f"Fetching Discord messages for last {days} day(s)...")
+        print(f"  Cutoff: {cutoff_date.strftime('%Y-%m-%d %H:%M')}")
         print(f"  Using {self.batch_size} msgs/request with {self.min_delay}-{self.max_delay}s delays")
 
         while True:
