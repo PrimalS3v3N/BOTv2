@@ -186,15 +186,6 @@ BACKTEST_CONFIG = {
         'immediate_sell_pct': 200,                 # Sell immediately at 200%
     },
 
-    # TEST Peak Exit - profit trailing stop with RSI confirmation
-    'test_peak_exit': {
-        'enabled': True,
-        'min_profit_pct': 0.50,                    # Activate at 50% profit
-        'pullback_pct': 0.15,                      # Exit on 15% pullback from peak
-        'rsi_overbought': 70,                      # RSI overbought level
-        'rsi_pullback_pct': 0.10,                  # Tighter pullback when RSI overbought (10%)
-    },
-
     # Technical indicators for backtest
     'indicators': {
         'ema_period': 25,                          # EMA period (bars)
@@ -216,7 +207,7 @@ BACKTEST_CONFIG = {
     #     'use_sl_ema': False,
     #     'use_profit_target': True,
     #     'use_trailing_stop': False,
-    #     'use_test_peak_exit': False,
+    #     'use_peak_exit': False,
     #     'use_time_stop': False,
     #     'use_expiration_stop': False,
     #     'use_discord_signal': False,
@@ -281,7 +272,7 @@ DATAFRAME_COLUMNS = {
 
     # Per-bar tracking data from TrackingMatrix (Test.py)
     'tracking_matrix': [
-        'timestamp', 'stock_price', 'stock_high', 'stock_low', 'atr',
+        'timestamp', 'stock_price', 'stock_high', 'stock_low', 'true_price', 'atr',
         'option_price', 'volume', 'holding', 'entry_price',
         'pnl', 'pnl_pct', 'highest_price', 'lowest_price', 'minutes_held',
         'stop_loss', 'stop_loss_mode',
