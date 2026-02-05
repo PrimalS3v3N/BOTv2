@@ -34,8 +34,26 @@ Config.py ───────────────────────�
 | Section | Description |
 |---------|-------------|
 | DISCORD_CONFIG | Discord bot token, channel ID, API settings |
+| RISK_CONFIG | Position sizing, instrument defaults, dynamic stop loss |
+| EXIT_CONFIG | Exit strategy toggles (flags only) |
 | DATA_CONFIG | Data fetching parameters |
-| BACKTEST_CONFIG | Backtesting parameters |
+| BACKTEST_CONFIG | Backtesting parameters, dynamic stop loss settings |
+
+**Dynamic Stop Loss Configuration:**
+All stop loss settings are consolidated into a `dynamic_stop_loss` nested structure:
+```python
+'dynamic_stop_loss': {
+    'enabled': True,
+    'stop_loss_pct': 0.35,              # Max loss from entry
+    'stop_loss_warning_pct': 0.15,      # Warning threshold
+    'trailing_stop_pct': 0.20,          # Trailing below highest
+    'time_stop_minutes': 60,            # Time stop
+    'breakeven_threshold_pct': None,    # Auto-calculate
+    'breakeven_min_minutes': 30,        # Min hold before breakeven
+    'trailing_trigger_pct': 0.50,       # Start trailing at profit
+}
+```
+This structure exists in both `RISK_CONFIG.option_defaults` (live trading) and `BACKTEST_CONFIG` (backtesting).
 
 ---
 
@@ -108,24 +126,25 @@ Config.py ───────────────────────�
 - Tiered Profit Exit (profit-based exit with trailing)
 
 **Dynamic Stop Loss:**
-Three-phase stop loss system for options contracts:
+Three-phase stop loss system for options contracts (configured via `dynamic_stop_loss` dict):
 
-1. **INITIAL Phase**: Fixed stop loss at entry price - (stop_loss_pct × entry price)
-   - Default: 30% below entry if no stop loss specified in signal
-   - Example: Entry $1.00 → Stop at $0.70
+1. **INITIAL Phase**: Fixed stop loss at `entry_price × (1 - stop_loss_pct)`
+   - Default: 35% below entry (`stop_loss_pct: 0.35`)
+   - Example: Entry $1.00 → Stop at $0.65
 
 2. **BREAKEVEN Phase**: When price rises above threshold, move stop to entry price
-   - Threshold = entry_price / (1 - stop_loss_pct)
-   - Example: Entry $1.00, 30% SL → threshold = $1.43
-   - **Requires minimum 30 minutes held** before transitioning to breakeven
+   - Threshold = `entry_price / (1 - stop_loss_pct)` (auto-calculated if `breakeven_threshold_pct: None`)
+   - Example: Entry $1.00, 35% SL → threshold = $1.54
+   - **Requires minimum `breakeven_min_minutes` (30)** before transitioning
 
-3. **TRAILING Phase**: When price reaches 50% above entry, trail at 30% below highest price
+3. **TRAILING Phase**: When profit reaches `trailing_trigger_pct` (50%), trail at `trailing_stop_pct` (20%) below highest price
    - Only uses price highs AFTER entry (not before)
    - Stop only moves up, never down
 
 **Tiered Profit Exit:**
 Dynamic profit target system based on profit percentage tiers.
 Only active when stock price is ABOVE EMA 30.
+Uses `dynamic_stop_loss.stop_loss_pct` for trailing calculations (single source of truth).
 
 Contract Tiers (framework for multi-contract management):
 - Tier 1: 1 contract - sell all at exit signal

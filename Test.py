@@ -864,7 +864,7 @@ class Backtest:
         # Get dynamic stop loss settings from config
         dsl_config = self.config.get('dynamic_stop_loss', {})
         dsl_enabled = dsl_config.get('enabled', True)
-        stop_loss_pct = dsl_config.get('default_stop_loss_pct', 0.30)
+        stop_loss_pct = dsl_config.get('stop_loss_pct', 0.30)
         trailing_trigger_pct = dsl_config.get('trailing_trigger_pct', 0.50)
         trailing_stop_pct = dsl_config.get('trailing_stop_pct', 0.30)
         breakeven_min_minutes = dsl_config.get('breakeven_min_minutes', 30)
@@ -872,7 +872,8 @@ class Backtest:
         # Get tiered profit exit settings from config
         tpe_config = self.config.get('tiered_profit_exit', {})
         tpe_enabled = tpe_config.get('enabled', True)
-        tpe_stop_loss_pct = tpe_config.get('stop_loss_pct', 0.30)
+        # Use stop_loss_pct from dynamic_stop_loss for consistency
+        tpe_stop_loss_pct = stop_loss_pct
 
         # Initialize dynamic stop loss manager
         dynamic_sl = DynamicStopLoss(
