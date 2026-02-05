@@ -487,13 +487,23 @@ class Position:
         self.exit_reason = None
         self.is_closed = False
 
+        # Max profit tracking (entry to end of market day)
+        self.max_price_to_eod = entry_price  # Track max price from entry to end of day
+        self.max_stop_loss_price = entry_price  # Track lowest price during holding (worst stop loss point)
+
     def update(self, timestamp, price, stock_price=None):
-        """Update position with new price data."""
+        """Update position with new price data during holding period."""
         self.current_price = price
         self.highest_price = max(self.highest_price, price)
         self.lowest_price = min(self.lowest_price, price)
         self.last_update = timestamp
         self.last_stock_price = stock_price
+        # Track lowest price during holding (worst stop loss point)
+        self.max_stop_loss_price = min(self.max_stop_loss_price, price)
+
+    def update_eod_price(self, price):
+        """Update max price tracking from entry to end of market day (called even after exit)."""
+        self.max_price_to_eod = max(self.max_price_to_eod, price)
 
     def close(self, exit_price, exit_time, exit_reason):
         """Close the position."""
@@ -527,6 +537,9 @@ class Position:
 
     def to_dict(self):
         """Convert position to dictionary."""
+        # Calculate Profit[min] - P&L at the worst stop loss point (lowest price during holding)
+        profit_min = self.get_pnl(self.max_stop_loss_price) if self.max_stop_loss_price else None
+
         return {
             'ticker': self.ticker,
             'strike': self.strike,
@@ -544,6 +557,9 @@ class Position:
             'pnl': self.get_pnl(self.exit_price) if self.exit_price else None,
             'pnl_pct': self.get_pnl_pct(self.exit_price) if self.exit_price else None,
             'minutes_held': self.get_minutes_held(self.exit_time) if self.exit_time else None,
+            'max_price_to_eod': self.max_price_to_eod,
+            'max_stop_loss_price': self.max_stop_loss_price,
+            'profit_min': profit_min,
         }
 
 
@@ -902,6 +918,10 @@ class Backtest:
             is_post_exit = position.is_closed
             holding = not is_pre_entry and not is_post_exit
 
+            # Track max price from entry to end of market day (even after exit)
+            if not is_pre_entry:
+                position.update_eod_price(option_price)
+
             if holding:
                 position.update(timestamp, option_price, stock_price)
 
@@ -1098,6 +1118,9 @@ class Backtest:
         # Calculate Capitalized P&L: (Total P&L + Capital Utilized) / Capital Utilized
         capitalized_pnl = (total_pnl + total_capital_utilized) / total_capital_utilized if total_capital_utilized > 0 else 0
 
+        # Calculate Profit[min] - sum of P&L at worst stop loss point for all trades
+        total_profit_min = closed_trades['profit_min'].sum() if 'profit_min' in closed_trades.columns else 0
+
         return {
             'total_trades': total_trades,
             'closed_trades': len(closed_trades),
@@ -1116,7 +1139,8 @@ class Backtest:
             'initial_capital': self.initial_capital,
             'total_capital_utilized': total_capital_utilized,
             'max_capital_held': max_capital_held,
-            'capitalized_pnl': capitalized_pnl
+            'capitalized_pnl': capitalized_pnl,
+            'profit_min': total_profit_min
         }
 
     def _calculate_max_capital_held(self, positions_df):
@@ -1205,6 +1229,9 @@ class Backtest:
 
         print(f"\nTIMING:")
         print(f"  Avg Hold Time: {summary.get('average_minutes_held', 0):.1f} minutes")
+
+        print(f"\nSTATISTICS:")
+        print(f"  Profit[min]: ${summary.get('profit_min', 0):+,.2f}")
 
         print(f"\nEXIT REASONS:")
         for reason, count in summary.get('exit_reasons', {}).items():
