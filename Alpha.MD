@@ -96,9 +96,11 @@ This structure exists in both `RISK_CONFIG.option_defaults` (live trading) and `
 - EMA (Exponential Moving Average) - 30-period default
 - VWAP (Volume Weighted Average Price) - resets daily
 - EWO (Elliott Wave Oscillator) - EMA(5) - EMA(35)
+- ATR (Average True Range) - single bar high-low range
+- RSI (Relative Strength Index) - 14-period default
+- Black-Scholes Options Pricing (calls, puts, Greeks)
 
 **Planned Indicators:**
-- RSI (Relative Strength Index)
 - MACD (Moving Average Convergence Divergence)
 - VPOC (Volume Point of Control)
 - SuperTrend
@@ -107,12 +109,19 @@ This structure exists in both `RISK_CONFIG.option_defaults` (live trading) and `
 - `EMA(df, column='close', period=30)` - Calculate EMA on any column
 - `VWAP(df, price_col='close', volume_col='volume')` - Calculate intraday VWAP
 - `EWO(df, column='close', fast=5, slow=35)` - Calculate Elliott Wave Oscillator
+- `ATR(stock_high, stock_low)` - Calculate Average True Range for a single bar
+- `RSI(df, column='close', period=14)` - Calculate Relative Strength Index
 - `add_indicators(df, ema_period=30)` - Add all standard indicators to DataFrame
+- `black_scholes_price(S, K, T, r, sigma, option_type)` - Option pricing
+- `calculate_greeks(S, K, T, r, sigma, option_type)` - Delta, Gamma, Theta, Vega, Rho
+- `estimate_option_price_bs(...)` - Black-Scholes with delta adjustment
 
 **Rules:**
+- **ALL math and calculations go here** - no exceptions
 - Pure calculation functions only
 - No trading logic here
-- Accept DataFrames, return DataFrames with new columns
+- No configuration values here (pull from Config.py)
+- Accept DataFrames/values, return DataFrames/values with results
 
 ---
 
@@ -124,6 +133,7 @@ This structure exists in both `RISK_CONFIG.option_defaults` (live trading) and `
 **Implemented Strategies:**
 - Dynamic Stop Loss (3-phase exit strategy)
 - Tiered Profit Exit (profit-based exit with trailing)
+- TestPeakExit (profit trailing stop with RSI detection)
 
 **Dynamic Stop Loss:**
 Three-phase stop loss system for options contracts (configured via `dynamic_stop_loss` dict):
@@ -171,11 +181,16 @@ Sell Signals:
 - `check_stop_loss()` - Stateless function for backtesting
 - `TieredProfitExit` - Stateful profit target manager
 - `check_profit_target()` - Stateless function for backtesting
+- `TestPeakExit` - Stateful profit trailing stop manager
+- `check_test_peak_exit()` - Stateless function for backtesting
 
 **Rules:**
+- **ALL trading logic and decision-making goes here** - no exceptions
 - Entry logic goes here
 - Exit logic goes here
 - Accept analysis data, return buy/sell decisions
+- No math or indicator calculations here (use Analysis.py)
+- No configuration values here (pull from Config.py)
 - Keep strategies modular and testable
 
 ---
@@ -302,25 +317,63 @@ import Config
 
 ---
 
+## Module Boundary Rules (ENFORCED)
+
+These rules are mandatory. All code changes must respect module boundaries.
+
+### Config.py owns ALL settings
+- Every tunable parameter, threshold, toggle, and default value lives in Config.py
+- Other modules read settings via `Config.get_config()` - they never define their own
+- If you need a new setting, add it to the appropriate Config section first
+
+### Analysis.py owns ALL math
+- Every calculation, formula, indicator, and pricing model lives in Analysis.py
+- This includes: technical indicators (EMA, VWAP, EWO, ATR, RSI), options pricing (Black-Scholes, Greeks), and any future math
+- Other modules call `Analysis.<function>()` - they never compute inline
+- If you need a new calculation, add a function to Analysis.py first
+
+### Strategy.py owns ALL trading logic
+- Every entry condition, exit condition, stop loss rule, and profit target lives in Strategy.py
+- Strategy reads from Analysis for indicator values and from Config for thresholds
+- Other modules call `Strategy.<function>()` for decisions - they never inline trading logic
+- If you need a new strategy or decision rule, add it to Strategy.py first
+
+### Test.py is orchestration only
+- Test.py wires together Config, Analysis, Strategy, Signal, and Data
+- It fetches data, calls Analysis for calculations, calls Strategy for decisions, and records results
+- It must NOT contain math formulas, trading logic, or hardcoded settings
+- Wrapper functions around Analysis/Strategy calls are not allowed - call the source module directly
+
+### What goes where - quick reference
+| Type | Belongs in | NOT in |
+|------|-----------|--------|
+| Thresholds, periods, percentages | Config.py | Analysis, Strategy, Test |
+| Indicators, formulas, pricing | Analysis.py | Strategy, Test, Dashboard |
+| Entry/exit rules, stop loss logic | Strategy.py | Test, Analysis |
+| Data fetching, backtesting loop | Test.py | Analysis, Strategy |
+| Visualization, charts | Dashboard.py | everywhere else |
+| Signal parsing | Signal.py | everywhere else |
+
+---
+
 ## Current Status
 
 | Module | Status |
 |--------|--------|
 | Config.py | Active |
 | Signal.py | Active |
-| Test.py | Active (dynamic stop loss + indicators) |
-| Dashboard.py | Active (EMA_30, VWAP, Stop Loss display) |
+| Test.py | Active (backtesting framework) |
+| Dashboard.py | Active (full visualization) |
 | Data.py | Placeholder |
-| Analysis.py | Active (EMA, VWAP) |
-| Strategy.py | Active (Dynamic Stop Loss) |
+| Analysis.py | Active (EMA, VWAP, EWO, ATR, RSI, Black-Scholes) |
+| Strategy.py | Active (Dynamic Stop Loss, Tiered Profit, TestPeakExit) |
 | Orders.py | Placeholder |
 
 ---
 
 ## Next Steps
 
-1. Add more exit strategies (profit targets, time stops)
-2. Build out Data.py for data sourcing
-3. Add more technical indicators in Analysis.py (RSI, MACD, VPOC)
-4. Expand Strategy.py with entry conditions
-5. Build Orders.py for live trading
+1. Build out Data.py for data sourcing
+2. Add more technical indicators in Analysis.py (MACD, VPOC, SuperTrend)
+3. Expand Strategy.py with entry conditions
+4. Build Orders.py for live trading

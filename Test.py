@@ -595,8 +595,8 @@ class TrackingMatrix:
         """Add a tracking record."""
         pnl_pct = self.position.get_pnl_pct(option_price) if holding else np.nan
 
-        # Calculate Average True Range (high - low)
-        atr = stock_high - stock_low if not (np.isnan(stock_high) or np.isnan(stock_low)) else np.nan
+        # Calculate Average True Range via Analysis module
+        atr = Analysis.ATR(stock_high, stock_low)
 
         record = {
             'timestamp': timestamp,
@@ -664,43 +664,6 @@ class TrackingMatrix:
             'max_pnl_pct': df['pnl_pct'].max() if len(df) > 0 else 0,
             'min_pnl_pct': df['pnl_pct'].min() if len(df) > 0 else 0,
         }
-
-
-# =============================================================================
-# INTERNAL - Option Price Estimation (Wrapper)
-# =============================================================================
-# This is a convenience wrapper around Analysis.estimate_option_price_bs()
-# Kept here for backwards compatibility and simpler interface within Test.py
-
-def estimate_option_price(stock_price, strike, option_type, days_to_expiry,
-                          entry_price=None, entry_stock_price=None, volatility=0.3):
-    """
-    Estimate option price using Black-Scholes model.
-
-    Wrapper around Analysis.estimate_option_price_bs() for use within Test.py.
-    The actual Black-Scholes implementation is centralized in Analysis.py.
-
-    Args:
-        stock_price: Current stock price
-        strike: Option strike price
-        option_type: 'CALL' or 'PUT'
-        days_to_expiry: Days until expiration
-        entry_price: Original entry price (optional)
-        entry_stock_price: Stock price at entry (optional)
-        volatility: Implied volatility (default 0.3 = 30%)
-
-    Returns:
-        float: Estimated option price
-    """
-    return Analysis.estimate_option_price_bs(
-        stock_price=stock_price,
-        strike=strike,
-        option_type=option_type,
-        days_to_expiry=days_to_expiry,
-        entry_price=entry_price,
-        entry_stock_price=entry_stock_price,
-        volatility=volatility
-    )
 
 
 # =============================================================================
@@ -841,7 +804,7 @@ class Backtest:
         if signal.get('cost'):
             entry_option_price = signal.get('cost')
         else:
-            entry_option_price = estimate_option_price(
+            entry_option_price = Analysis.estimate_option_price_bs(
                 stock_price=entry_stock_price,
                 strike=signal['strike'],
                 option_type=signal['option_type'],
@@ -938,7 +901,7 @@ class Backtest:
             current_days_to_expiry = max(0, days_to_expiry - (timestamp.date() - position.entry_time.date()).days)
 
             # Estimate option price
-            option_price = estimate_option_price(
+            option_price = Analysis.estimate_option_price_bs(
                 stock_price=stock_price,
                 strike=position.strike,
                 option_type=position.option_type,
@@ -1470,7 +1433,7 @@ def test_options_pricing():
     # Simulate stock drop (good for puts)
     for stock_move in [-10, -5, 0, 5, 10]:
         new_stock = entry_stock + stock_move
-        new_put = estimate_option_price(new_stock, strike, 'PUT', days_to_expiry,
+        new_put = Analysis.estimate_option_price_bs(new_stock, strike, 'PUT', days_to_expiry,
                                         entry_put_price, entry_stock, volatility)
         pnl = (new_put - entry_put_price) / entry_put_price * 100
         direction = "↑" if pnl > 0 else "↓" if pnl < 0 else "→"
