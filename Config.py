@@ -298,7 +298,7 @@ DATAFRAME_COLUMNS = {
     # Dashboard matrix display columns (Dashboard.py)
     'dashboard_matrix': [
         'timestamp', 'holding', 'stock_price', 'stock_high', 'stock_low',
-        'atr', 'option_price', 'pnl_pct', 'max_option_price',
+        'true_price', 'option_price', 'pnl_pct', 'max_option_price',
         'stop_loss', 'stop_loss_mode', 'sl_cushion',
         'profit_target', 'profit_target_mode', 'profit_target_active',
         'vwap', 'ema_20', 'ema_30', 'ewo', 'ewo_15min_avg', 'rsi',

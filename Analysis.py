@@ -109,13 +109,11 @@ def EWO(df, column='close', fast_period=5, slow_period=35):
     return ema_fast - ema_slow
 
 
-def ATR(df):
-    # Calculate typical price (high + low + close) / 3 if available, else use close
-    if 'high' in df.columns and 'low' in df.columns:
-        typical_price = (df['high'] + df['low'] + df[price_col]) / 3
-    else:
-        typical_price = df[price_col]
-    return typical_price
+def true_price(stock_price, stock_high, stock_low):
+    """Calculate True Price as the average of high, low, and stock price at each interval."""
+    if pd.notna(stock_high) and pd.notna(stock_low):
+        return (stock_high + stock_low + stock_price) / 3
+    return stock_price
 
 
 def RSI(df, column='close', period=14):
@@ -418,6 +416,6 @@ def estimate_option_price_bs(stock_price, strike, option_type, days_to_expiry,
 
 
 # Export functions for use by other modules
-__all__ = ['EMA', 'VWAP', 'EWO', 'ATR', 'RSI', 'add_indicators',
+__all__ = ['EMA', 'VWAP', 'EWO', 'true_price', 'RSI', 'add_indicators',
            'black_scholes_call', 'black_scholes_put', 'black_scholes_price',
            'calculate_greeks', 'estimate_option_price_bs']

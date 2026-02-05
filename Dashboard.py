@@ -271,15 +271,15 @@ def create_trade_chart(df, trade_label, show_all_exits=False, market_hours_only=
             row=1, col=1, secondary_y=False
         )
 
-    # Average True Range (left y-axis, same as stock price)
-    if 'atr' in df.columns and df['atr'].notna().any():
+    # True Price (left y-axis, same as stock price)
+    if 'true_price' in df.columns and df['true_price'].notna().any():
         fig.add_trace(
             go.Scatter(
                 x=df['time'],
-                y=df['atr'],
-                name='ATR',
+                y=df['true_price'],
+                name='True Price',
                 line=dict(color=COLORS['trading_range'], width=2),
-                hovertemplate='ATR: $%{y:.2f}<extra></extra>'
+                hovertemplate='True Price: $%{y:.2f}<extra></extra>'
             ),
             row=1, col=1, secondary_y=False
         )
@@ -871,7 +871,7 @@ def main():
             matrix_df = matrix_df[df['holding'] == True]
 
         # Format numeric columns
-        for col in ['stock_price', 'stock_high', 'stock_low', 'atr', 'option_price', 'stop_loss', 'profit_target', 'max_option_price', 'vwap', 'ema_20', 'ema_30']:
+        for col in ['stock_price', 'stock_high', 'stock_low', 'true_price', 'option_price', 'stop_loss', 'profit_target', 'max_option_price', 'vwap', 'ema_20', 'ema_30']:
             if col in matrix_df.columns:
                 matrix_df[col] = matrix_df[col].apply(lambda x: f"${x:.2f}" if pd.notna(x) else "")
 
