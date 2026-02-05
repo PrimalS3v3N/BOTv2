@@ -595,8 +595,8 @@ class TrackingMatrix:
         """Add a tracking record."""
         pnl_pct = self.position.get_pnl_pct(option_price) if holding else np.nan
 
-        # Calculate Average True Range (high - low)
-        atr = stock_high - stock_low if not (np.isnan(stock_high) or np.isnan(stock_low)) else np.nan
+        # Calculate Average True Range (stock_price + high + low) / 3
+        atr = (stock_price + stock_high + stock_low) / 3 if not (np.isnan(stock_high) or np.isnan(stock_low)) else np.nan
 
         record = {
             'timestamp': timestamp,
