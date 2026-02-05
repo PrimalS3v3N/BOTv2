@@ -566,6 +566,11 @@ BACKTEST_CONFIG = {
         # EWO Reset Threshold
         # If EWO exceeds peak by this %, reset detection (0.02 = 2%)
         'ewo_reset_threshold': 0.02,
+
+        # Overbought Memory
+        # Number of bars to remember overbought state after EWO drops below threshold
+        # This allows peak detection when EWO has just fallen below threshold
+        'overbought_memory': 3,
     },
 
     # Technical Indicators for Backtest
