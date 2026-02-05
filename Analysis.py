@@ -109,7 +109,52 @@ def EWO(df, column='close', fast_period=5, slow_period=35):
     return ema_fast - ema_slow
 
 
-def add_indicators(df, ema_period=30, ewo_fast=5, ewo_slow=35, ewo_avg_period=15):
+def RSI(df, column='close', period=14):
+    """
+    Calculate Relative Strength Index.
+
+    RSI = 100 - (100 / (1 + RS))
+    where RS = Average Gain / Average Loss over period
+
+    RSI interpretation:
+    - RSI > 70: Overbought (potential sell signal)
+    - RSI < 30: Oversold (potential buy signal)
+    - RSI = 50: Neutral momentum
+
+    Args:
+        df: DataFrame with price data
+        column: Column name to calculate RSI on (default: 'close')
+        period: RSI lookback period (default: 14)
+
+    Returns:
+        Series with RSI values (0-100 scale)
+    """
+    if column not in df.columns:
+        return pd.Series(index=df.index, dtype=float)
+
+    # Calculate price changes
+    delta = df[column].diff()
+
+    # Separate gains and losses
+    gains = delta.where(delta > 0, 0.0)
+    losses = (-delta).where(delta < 0, 0.0)
+
+    # Calculate exponential moving average of gains and losses
+    avg_gains = gains.ewm(span=period, adjust=False).mean()
+    avg_losses = losses.ewm(span=period, adjust=False).mean()
+
+    # Calculate RS and RSI
+    rs = avg_gains / avg_losses
+    rsi = 100 - (100 / (1 + rs))
+
+    # Handle division by zero (when avg_losses is 0)
+    rsi = rsi.replace([np.inf, -np.inf], 100)
+    rsi = rsi.fillna(50)  # Neutral when no data
+
+    return rsi
+
+
+def add_indicators(df, ema_period=30, ewo_fast=5, ewo_slow=35, ewo_avg_period=15, rsi_period=14):
     """
     Add all standard indicators to a DataFrame.
 
@@ -119,6 +164,7 @@ def add_indicators(df, ema_period=30, ewo_fast=5, ewo_slow=35, ewo_avg_period=15
         ewo_fast: Fast period for EWO (default: 5)
         ewo_slow: Slow period for EWO (default: 35)
         ewo_avg_period: Period for EWO rolling average (default: 15 for 15-min avg on 1-min data)
+        rsi_period: Period for RSI calculation (default: 14)
 
     Returns:
         DataFrame with added indicator columns:
@@ -126,6 +172,7 @@ def add_indicators(df, ema_period=30, ewo_fast=5, ewo_slow=35, ewo_avg_period=15
         - vwap: Volume Weighted Average Price
         - ewo: Elliott Wave Oscillator
         - ewo_15min_avg: 15-minute rolling average of EWO
+        - rsi: Relative Strength Index (0-100 scale)
     """
     df = df.copy()
 
@@ -141,6 +188,9 @@ def add_indicators(df, ema_period=30, ewo_fast=5, ewo_slow=35, ewo_avg_period=15
     # Add EWO 15-minute rolling average (simple moving average over ewo_avg_period bars)
     df['ewo_15min_avg'] = df['ewo'].rolling(window=ewo_avg_period, min_periods=1).mean()
 
+    # Add RSI
+    df['rsi'] = RSI(df, column='close', period=rsi_period)
+
     return df
 
 
@@ -154,4 +204,4 @@ Modules: Config.py, Data.py, Strategy.py, Test.py
 import Config
 
 # Export functions for use by other modules
-__all__ = ['EMA', 'VWAP', 'EWO', 'add_indicators']
+__all__ = ['EMA', 'VWAP', 'EWO', 'RSI', 'add_indicators']

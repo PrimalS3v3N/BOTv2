@@ -323,6 +323,11 @@ ANALYSIS_CONFIG = {
     'ewo_fast': 5,
     'ewo_slow': 35,
 
+    # Relative Strength Index (RSI)
+    'rsi_period': 14,                     # RSI calculation period
+    'rsi_overbought': 70,                 # RSI overbought threshold (>70 = overbought)
+    'rsi_oversold': 30,                   # RSI oversold threshold (<30 = oversold)
+
     # Volume Analysis
     'vwap_lookback': 30,
     'vpoc_bins': 10,
@@ -537,7 +542,7 @@ BACKTEST_CONFIG = {
     # Experimental momentum-based peak detection using EWO signals
     # Aims to capture price peaks by detecting EWO momentum reversals
     'test_peak_exit': {
-        'enabled': False,                   # Disabled by default (experimental)
+        'enabled': True,                    # Enable TEST peak detection
 
         # EWO Overbought Thresholds
         # EWO fast must exceed this value to be considered overbought
@@ -577,6 +582,9 @@ BACKTEST_CONFIG = {
     'indicators': {
         'ema_period': 30,                   # 30-bar EMA (30 minutes on 1m data)
         'vwap_enabled': True,               # Calculate VWAP
+        'rsi_period': 14,                   # RSI calculation period
+        'rsi_overbought': 70,               # RSI overbought threshold
+        'rsi_oversold': 30,                 # RSI oversold threshold
     },
 
     # Exit strategy toggles for backtest
