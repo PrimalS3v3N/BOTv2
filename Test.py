@@ -595,15 +595,15 @@ class TrackingMatrix:
         """Add a tracking record."""
         pnl_pct = self.position.get_pnl_pct(option_price) if holding else np.nan
 
-        # Calculate Average True Range via Analysis module
-        atr = Analysis.ATR(self)
+        # Calculate True Price via Analysis module
+        tp = Analysis.true_price(stock_price, stock_high, stock_low)
 
         record = {
             'timestamp': timestamp,
             'stock_price': stock_price,
             'stock_high': stock_high,
             'stock_low': stock_low,
-            'atr': atr,
+            'true_price': tp,
             'option_price': option_price,
             'volume': volume,
             'holding': holding,
