@@ -202,6 +202,213 @@ Modules: Config.py, Data.py, Strategy.py, Test.py
 """
 
 import Config
+from scipy.stats import norm
+import math
+
+
+# =============================================================================
+# INTERNAL - Black-Scholes Options Pricing
+# =============================================================================
+
+def black_scholes_call(S, K, T, r, sigma):
+    """
+    Calculate Black-Scholes price for a CALL option.
+
+    Args:
+        S: Current stock price
+        K: Strike price
+        T: Time to expiration in years
+        r: Risk-free interest rate (annualized)
+        sigma: Volatility (annualized)
+
+    Returns:
+        float: Call option price
+    """
+    if T <= 0:
+        return max(0, S - K)  # At expiration, intrinsic value only
+
+    d1 = (math.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * math.sqrt(T))
+    d2 = d1 - sigma * math.sqrt(T)
+
+    call_price = S * norm.cdf(d1) - K * math.exp(-r * T) * norm.cdf(d2)
+    return max(0.01, call_price)
+
+
+def black_scholes_put(S, K, T, r, sigma):
+    """
+    Calculate Black-Scholes price for a PUT option.
+
+    Args:
+        S: Current stock price
+        K: Strike price
+        T: Time to expiration in years
+        r: Risk-free interest rate (annualized)
+        sigma: Volatility (annualized)
+
+    Returns:
+        float: Put option price
+    """
+    if T <= 0:
+        return max(0, K - S)  # At expiration, intrinsic value only
+
+    d1 = (math.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * math.sqrt(T))
+    d2 = d1 - sigma * math.sqrt(T)
+
+    put_price = K * math.exp(-r * T) * norm.cdf(-d2) - S * norm.cdf(-d1)
+    return max(0.01, put_price)
+
+
+def black_scholes_price(S, K, T, r, sigma, option_type='CALL'):
+    """
+    Calculate Black-Scholes price for an option.
+
+    Args:
+        S: Current stock price
+        K: Strike price
+        T: Time to expiration in years
+        r: Risk-free interest rate (annualized)
+        sigma: Volatility (annualized)
+        option_type: 'CALL' or 'PUT'
+
+    Returns:
+        float: Option price
+    """
+    if option_type.upper() in ['CALL', 'CALLS', 'C']:
+        return black_scholes_call(S, K, T, r, sigma)
+    else:
+        return black_scholes_put(S, K, T, r, sigma)
+
+
+def calculate_greeks(S, K, T, r, sigma, option_type='CALL'):
+    """
+    Calculate option Greeks using Black-Scholes model.
+
+    Args:
+        S: Current stock price
+        K: Strike price
+        T: Time to expiration in years
+        r: Risk-free interest rate (annualized)
+        sigma: Volatility (annualized)
+        option_type: 'CALL' or 'PUT'
+
+    Returns:
+        dict: Dictionary containing Delta, Gamma, Theta, Vega, Rho
+    """
+    is_call = option_type.upper() in ['CALL', 'CALLS', 'C']
+
+    if T <= 0:
+        # At expiration, delta is 1 or -1 if ITM, else 0
+        if is_call:
+            delta = 1.0 if S > K else 0.0
+        else:
+            delta = -1.0 if S < K else 0.0
+        return {
+            'delta': delta,
+            'gamma': 0.0,
+            'theta': 0.0,
+            'vega': 0.0,
+            'rho': 0.0
+        }
+
+    d1 = (math.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * math.sqrt(T))
+    d2 = d1 - sigma * math.sqrt(T)
+
+    # Delta
+    if is_call:
+        delta = norm.cdf(d1)
+    else:
+        delta = norm.cdf(d1) - 1  # Negative for puts
+
+    # Gamma (same for calls and puts)
+    gamma = norm.pdf(d1) / (S * sigma * math.sqrt(T))
+
+    # Theta (per day, divide by 365)
+    if is_call:
+        theta = (-(S * norm.pdf(d1) * sigma) / (2 * math.sqrt(T))
+                 - r * K * math.exp(-r * T) * norm.cdf(d2)) / 365
+    else:
+        theta = (-(S * norm.pdf(d1) * sigma) / (2 * math.sqrt(T))
+                 + r * K * math.exp(-r * T) * norm.cdf(-d2)) / 365
+
+    # Vega (per 1% change in volatility)
+    vega = S * math.sqrt(T) * norm.pdf(d1) / 100
+
+    # Rho (per 1% change in interest rate)
+    if is_call:
+        rho = K * T * math.exp(-r * T) * norm.cdf(d2) / 100
+    else:
+        rho = -K * T * math.exp(-r * T) * norm.cdf(-d2) / 100
+
+    return {
+        'delta': delta,
+        'gamma': gamma,
+        'theta': theta,
+        'vega': vega,
+        'rho': rho
+    }
+
+
+def estimate_option_price_bs(stock_price, strike, option_type, days_to_expiry,
+                              entry_price=None, entry_stock_price=None,
+                              volatility=None, risk_free_rate=None):
+    """
+    Estimate option price using Black-Scholes model with delta adjustment.
+
+    This function combines Black-Scholes theoretical pricing with practical
+    delta-based adjustments for more realistic backtesting.
+
+    Args:
+        stock_price: Current stock price
+        strike: Option strike price
+        option_type: 'CALL' or 'PUT'
+        days_to_expiry: Days until expiration
+        entry_price: Original entry price (optional, for delta adjustment)
+        entry_stock_price: Stock price at entry (optional, for delta adjustment)
+        volatility: Implied volatility (default from config)
+        risk_free_rate: Risk-free rate (default from config)
+
+    Returns:
+        float: Estimated option price
+    """
+    # Get defaults from config
+    options_config = Config.get_config('analysis').get('options', {})
+    if volatility is None:
+        volatility = options_config.get('default_volatility', 0.30)
+    if risk_free_rate is None:
+        risk_free_rate = options_config.get('risk_free_rate', 0.05)
+    min_price = options_config.get('min_option_price', 0.01)
+
+    # Convert days to years
+    T = max(0, days_to_expiry) / 365
+
+    # Calculate theoretical Black-Scholes price
+    theoretical_price = black_scholes_price(stock_price, strike, T, risk_free_rate, volatility, option_type)
+
+    # If we have entry data, use delta-based adjustment for more realistic simulation
+    if entry_price and entry_stock_price and entry_price > 0:
+        # Calculate current greeks
+        greeks = calculate_greeks(stock_price, strike, T, risk_free_rate, volatility, option_type)
+        delta = greeks['delta']
+
+        # Calculate price change based on stock movement
+        stock_change = stock_price - entry_stock_price
+        price_change = abs(delta) * stock_change
+
+        # For puts, price moves inversely to stock
+        if option_type.upper() in ['PUT', 'PUTS', 'P']:
+            price_change = -price_change
+
+        estimated = entry_price + price_change
+
+        # Blend with theoretical for stability (70% delta-based, 30% theoretical)
+        blended_price = 0.7 * estimated + 0.3 * theoretical_price
+
+        return max(min_price, blended_price)
+
+    return max(min_price, theoretical_price)
+
 
 # Export functions for use by other modules
-__all__ = ['EMA', 'VWAP', 'EWO', 'RSI', 'add_indicators']
+__all__ = ['EMA', 'VWAP', 'EWO', 'RSI', 'add_indicators',
+           'black_scholes_call', 'black_scholes_put', 'black_scholes_price',
+           'calculate_greeks', 'estimate_option_price_bs']
