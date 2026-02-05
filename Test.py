@@ -844,7 +844,7 @@ class Backtest:
         # Get stop loss settings from config
         SL_config = self.config.get('stop_loss', {})
         SL_enabled = SL_config.get('enabled', True)
-        SL_stop_loss_pct = SL_config.get('stop_loss_pct', 0.30)
+        SL_pct = SL_config.get('stop_loss_pct', 0.30)
         SL_trailing_trigger_pct = SL_config.get('trailing_trigger_pct', 0.50)
         SL_trailing_stop_pct = SL_config.get('trailing_stop_pct', 0.30)
         SL_breakeven_min_minutes = SL_config.get('breakeven_min_minutes', 30)
@@ -852,7 +852,7 @@ class Backtest:
         # Initialize stop loss manager
         SL_manager = StopLoss(
             entry_price=position.entry_price,
-            stop_loss_pct=SL_stop_loss_pct,
+            stop_loss_pct=SL_pct,
             trailing_trigger_pct=SL_trailing_trigger_pct,
             trailing_stop_pct=SL_trailing_stop_pct,
             breakeven_min_minutes=SL_breakeven_min_minutes

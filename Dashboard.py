@@ -39,7 +39,6 @@ COLORS = {
     'ema_20': '#29B6F6',          # Light Blue
     'ema_30': '#AB47BC',          # Purple
     'stop_loss_line': '#00C853',  # Green (changed from red)
-    'stop_loss_fill': 'rgba(0, 200, 83, 0.2)',  # Green shaded area
     'sl_c1': '#FFD54F',           # Amber (conditional trailing)
     'sl_c2': '#FF8A65',           # Deep Orange (EMA/VWAP bearish)
     'sl_ema': '#FF8A65',          # Same as sl_c2
@@ -262,7 +261,7 @@ def create_trade_chart(df, trade_label, show_all_exits=False, market_hours_only=
             row=1, col=1, secondary_y=True
         )
 
-    # Stop Loss line with green shaded area (right y-axis, tracks stop loss price)
+    # Stop Loss line (right y-axis, tracks stop loss price)
     if 'stop_loss' in df.columns and df['stop_loss'].notna().any():
         # Create hover text with stop_loss_mode if available
         if 'stop_loss_mode' in df.columns:
@@ -286,19 +285,6 @@ def create_trade_chart(df, trade_label, show_all_exits=False, market_hours_only=
             row=1, col=1, secondary_y=True
         )
 
-        # Green shaded area below stop loss (fill to zero)
-        fig.add_trace(
-            go.Scatter(
-                x=df['time'],
-                y=df['stop_loss'],
-                fill='tozeroy',
-                fillcolor=COLORS['stop_loss_fill'],
-                line=dict(width=0),
-                showlegend=False,
-                hoverinfo='skip'
-            ),
-            row=1, col=1, secondary_y=True
-        )
 
     # SL_C1 markers: Conditional trailing active (profit target + VWAP hold)
     if 'SL_C1' in df.columns and opt_col in df.columns:
