@@ -586,7 +586,8 @@ class TestPeakExit:
                  ewo_spread_threshold=0.1,
                  min_profit_pct=0.35,
                  confirmation_bars=2,
-                 velocity_lookback=3):
+                 velocity_lookback=3,
+                 overbought_memory=3):
         """
         Initialize TEST peak detection exit manager.
 
@@ -597,6 +598,7 @@ class TestPeakExit:
             min_profit_pct: Minimum profit % before considering exit (default: 0.35 = 35%)
             confirmation_bars: Number of declining bars needed to confirm (default: 2)
             velocity_lookback: Number of bars for velocity calculation (default: 3)
+            overbought_memory: Bars to remember overbought state for peak detection (default: 3)
         """
         self.entry_price = entry_price
         self.ewo_overbought_threshold = ewo_overbought_threshold
@@ -604,6 +606,7 @@ class TestPeakExit:
         self.min_profit_pct = min_profit_pct
         self.confirmation_bars = confirmation_bars
         self.velocity_lookback = velocity_lookback
+        self.overbought_memory = overbought_memory
 
         # Current state
         self.mode = self.MODE_WATCHING
@@ -615,6 +618,7 @@ class TestPeakExit:
         self.declining_count = 0
         self.peak_ewo_value = 0.0
         self.peak_price = entry_price
+        self.bars_since_overbought = 999  # Track bars since last overbought
 
     def _calculate_profit_pct(self, current_price):
         """Calculate current profit percentage."""
@@ -645,6 +649,19 @@ class TestPeakExit:
 
         return (ewo_fast >= self.ewo_overbought_threshold and
                 ewo_spread >= self.ewo_spread_threshold)
+
+    def _was_recently_overbought(self, ewo_fast, ewo_slow):
+        """
+        Check if currently or recently overbought.
+
+        This allows peak detection to work even when EWO has just dropped
+        below the threshold, which is critical for catching the actual peak.
+        """
+        if self._is_overbought(ewo_fast, ewo_slow):
+            self.bars_since_overbought = 0
+            return True
+        self.bars_since_overbought += 1
+        return self.bars_since_overbought <= self.overbought_memory
 
     def update(self, current_option_price, ewo_fast, ewo_slow):
         """
@@ -692,13 +709,17 @@ class TestPeakExit:
             else:
                 self.declining_count = 0
 
+        # Check recently overbought (updates internal counter)
+        recently_overbought = self._was_recently_overbought(ewo_fast, ewo_slow)
+
         # State machine for peak detection
         if self.mode == self.MODE_WATCHING:
             # Check for initial peak conditions
+            # Use recently_overbought to catch peaks when EWO has just dropped below threshold
             if (profit_pct >= self.min_profit_pct and
-                    self._is_overbought(ewo_fast, ewo_slow) and
+                    recently_overbought and
                     ewo_velocity is not None and ewo_velocity < 0):
-                # Peak detected - EWO overbought and starting to decline
+                # Peak detected - EWO was overbought and now declining
                 self.mode = self.MODE_PEAK_DETECTED
                 self.peak_ewo_value = self.max_ewo_fast
                 self.peak_price = self.max_option_price
@@ -742,7 +763,8 @@ class TestPeakExit:
             'peak_ewo_value': self.peak_ewo_value,
             'peak_price': self.peak_price,
             'profit_pct': profit_pct,
-            'is_overbought': self._is_overbought(ewo_fast, ewo_slow)
+            'is_overbought': self._is_overbought(ewo_fast, ewo_slow),
+            'recently_overbought': recently_overbought
         }
 
     def get_state(self):
@@ -758,7 +780,9 @@ class TestPeakExit:
             'ewo_overbought_threshold': self.ewo_overbought_threshold,
             'ewo_spread_threshold': self.ewo_spread_threshold,
             'min_profit_pct': self.min_profit_pct,
-            'confirmation_bars': self.confirmation_bars
+            'confirmation_bars': self.confirmation_bars,
+            'overbought_memory': self.overbought_memory,
+            'bars_since_overbought': self.bars_since_overbought
         }
 
 

@@ -902,7 +902,8 @@ class Backtest:
                 ewo_spread_threshold=test_config.get('ewo_spread_threshold', 0.1),
                 min_profit_pct=test_config.get('min_profit_pct', 0.35),
                 confirmation_bars=test_config.get('confirmation_bars', 2),
-                velocity_lookback=test_config.get('velocity_lookback', 3)
+                velocity_lookback=test_config.get('velocity_lookback', 3),
+                overbought_memory=test_config.get('overbought_memory', 3)
             )
 
         for i, (timestamp, bar) in enumerate(stock_data.iterrows()):
