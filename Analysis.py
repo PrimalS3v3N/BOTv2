@@ -161,7 +161,7 @@ def RSI(df, column='close', period=14):
     return rsi
 
 
-def add_indicators(df, ema_period=30, ewo_fast=5, ewo_slow=35, ewo_avg_period=15, rsi_period=14):
+def add_indicators(df, ema_period=30, ewo_fast=5, ewo_slow=35, ewo_avg_period=15, ewo_fast_avg_period=7, rsi_period=14):
     """
     Add all standard indicators to a DataFrame.
 
@@ -171,6 +171,7 @@ def add_indicators(df, ema_period=30, ewo_fast=5, ewo_slow=35, ewo_avg_period=15
         ewo_fast: Fast period for EWO (default: 5)
         ewo_slow: Slow period for EWO (default: 35)
         ewo_avg_period: Period for EWO rolling average (default: 15 for 15-min avg on 1-min data)
+        ewo_fast_avg_period: Period for EWO fast rolling average (default: 7 for 7-min avg on 1-min data)
         rsi_period: Period for RSI calculation (default: 14)
 
     Returns:
@@ -179,6 +180,7 @@ def add_indicators(df, ema_period=30, ewo_fast=5, ewo_slow=35, ewo_avg_period=15
         - vwap: Volume Weighted Average Price
         - ewo: Elliott Wave Oscillator
         - ewo_15min_avg: 15-minute rolling average of EWO
+        - ewo_7min_avg: 7-minute rolling average of EWO
         - rsi: Relative Strength Index (0-100 scale)
     """
     df = df.copy()
@@ -201,6 +203,9 @@ def add_indicators(df, ema_period=30, ewo_fast=5, ewo_slow=35, ewo_avg_period=15
 
     # Add EWO 15-minute rolling average (simple moving average over ewo_avg_period bars)
     df['ewo_15min_avg'] = df['ewo'].rolling(window=ewo_avg_period, min_periods=1).mean()
+
+    # Add EWO 7-minute rolling average (simple moving average over ewo_fast_avg_period bars)
+    df['ewo_7min_avg'] = df['ewo'].rolling(window=ewo_fast_avg_period, min_periods=1).mean()
 
     # Add RSI (based on true price)
     df['rsi'] = RSI(df, column='_true_price', period=rsi_period)

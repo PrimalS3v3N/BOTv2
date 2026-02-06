@@ -592,8 +592,8 @@ class TrackingMatrix:
 
     def add_record(self, timestamp, stock_price, option_price, volume, holding=True,
                    stop_loss=np.nan, stop_loss_mode=None, vwap=np.nan, ema_30=np.nan,
-                   stock_high=np.nan, stock_low=np.nan, ewo=np.nan, ewo_15min_avg=np.nan,
-                   rsi=np.nan):
+                   stock_high=np.nan, stock_low=np.nan, ewo=np.nan, ewo_7min_avg=np.nan,
+                   ewo_15min_avg=np.nan, rsi=np.nan):
         """Add a tracking record."""
         pnl_pct = self.position.get_pnl_pct(option_price) if holding else np.nan
 
@@ -622,6 +622,7 @@ class TrackingMatrix:
             'vwap': vwap,
             'ema_30': ema_30,
             'ewo': ewo,
+            'ewo_7min_avg': ewo_7min_avg,
             'ewo_15min_avg': ewo_15min_avg,
             'rsi': rsi,
         }
@@ -869,6 +870,7 @@ class Backtest:
             vwap = bar.get('vwap', np.nan)
             ema_30 = bar.get('ema_30', np.nan)
             ewo = bar.get('ewo', np.nan)
+            ewo_7min_avg = bar.get('ewo_7min_avg', np.nan)
             ewo_15min_avg = bar.get('ewo_15min_avg', np.nan)
             rsi = bar.get('rsi', np.nan)
 
@@ -930,6 +932,7 @@ class Backtest:
                     stock_high=stock_high,
                     stock_low=stock_low,
                     ewo=ewo,
+                    ewo_7min_avg=ewo_7min_avg,
                     ewo_15min_avg=ewo_15min_avg,
                     rsi=rsi
                 )
@@ -966,6 +969,7 @@ class Backtest:
                     stock_high=stock_high,
                     stock_low=stock_low,
                     ewo=ewo,
+                    ewo_7min_avg=ewo_7min_avg,
                     ewo_15min_avg=ewo_15min_avg,
                     rsi=rsi
                 )

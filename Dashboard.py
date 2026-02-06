@@ -395,6 +395,19 @@ def create_trade_chart(df, trade_label, show_all_exits=False, market_hours_only=
             row=2, col=1
         )
 
+        # EWO 7-min average line (if available)
+        if 'ewo_7min_avg' in df.columns and df['ewo_7min_avg'].notna().any():
+            fig.add_trace(
+                go.Scatter(
+                    x=df['time'],
+                    y=df['ewo_7min_avg'],
+                    name='EWO 7m Avg',
+                    line=dict(color='#4CAF50', width=1.5, dash='dash'),
+                    hovertemplate='EWO 7m Avg: %{y:.3f}<extra></extra>'
+                ),
+                row=2, col=1
+            )
+
         # EWO 15-min average line (if available)
         if 'ewo_15min_avg' in df.columns and df['ewo_15min_avg'].notna().any():
             fig.add_trace(
@@ -817,6 +830,9 @@ def main():
 
         if 'ewo' in matrix_df.columns:
             matrix_df['ewo'] = matrix_df['ewo'].apply(lambda x: f"{x:.3f}" if pd.notna(x) else "")
+
+        if 'ewo_7min_avg' in matrix_df.columns:
+            matrix_df['ewo_7min_avg'] = matrix_df['ewo_7min_avg'].apply(lambda x: f"{x:.3f}" if pd.notna(x) else "")
 
         if 'ewo_15min_avg' in matrix_df.columns:
             matrix_df['ewo_15min_avg'] = matrix_df['ewo_15min_avg'].apply(lambda x: f"{x:.3f}" if pd.notna(x) else "")

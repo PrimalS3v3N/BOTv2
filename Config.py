@@ -129,6 +129,7 @@ ANALYSIS_CONFIG = {
     'rsi_oversold': 30,                            # RSI oversold (stock default; use 20 for options)
     'ewo_fast': 5,                                 # EWO fast EMA period
     'ewo_slow': 35,                                # EWO slow EMA period
+    'ewo_fast_avg_period': 7,                      # EWO fast rolling average period (7-min)
     'support_resistance_lookback': 20,             # S/R lookback bars
     'trend_fast_period': 10,                       # Trend fast EMA
     'trend_slow_period': 20,                       # Trend slow EMA
@@ -258,7 +259,7 @@ DATAFRAME_COLUMNS = {
         'option_price', 'volume', 'holding', 'entry_price',
         'pnl', 'pnl_pct', 'highest_price', 'lowest_price', 'minutes_held',
         'stop_loss', 'stop_loss_mode',
-        'vwap', 'ema_30', 'ewo', 'ewo_15min_avg', 'rsi',
+        'vwap', 'ema_30', 'ewo', 'ewo_7min_avg', 'ewo_15min_avg', 'rsi',
     ],
 
     # Metadata columns appended to tracking matrix (Test.py)
