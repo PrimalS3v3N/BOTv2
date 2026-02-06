@@ -968,6 +968,15 @@ class Backtest:
                     rsi=rsi
                 )
 
+                # Check for overbought/oversold instant exit at entry bar
+                if i == entry_idx and not position.is_closed and not np.isnan(rsi):
+                    if position.option_type.upper() in ['CALL', 'CALLS', 'C'] and rsi >= 85:
+                        exit_price = option_price * (1 - self.slippage_pct)
+                        position.close(exit_price, timestamp, 'Overbought')
+                    elif position.option_type.upper() in ['PUT', 'PUTS', 'P'] and rsi <= 15:
+                        exit_price = option_price * (1 - self.slippage_pct)
+                        position.close(exit_price, timestamp, 'Oversold')
+
                 # Check for reversal exit (True Price < VWAP)
                 if SL_enabled and SL_reversal_exit_enabled and SL_reversal and not position.is_closed:
                     exit_price = option_price * (1 - self.slippage_pct)
