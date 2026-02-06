@@ -369,18 +369,23 @@ def estimate_option_price_bs(stock_price, strike, option_type, days_to_expiry,
                               entry_price=None, entry_stock_price=None,
                               volatility=None, risk_free_rate=None):
     """
-    Estimate option price using Black-Scholes model with delta adjustment.
+    Estimate option price using Black-Scholes model with offset calibration.
 
-    This function combines Black-Scholes theoretical pricing with practical
-    delta-based adjustments for more realistic backtesting.
+    When entry data is provided, calibrates BS to the actual market price:
+        offset = entry_price - BS(entry_stock_price)
+        price  = BS(current_stock_price) + offset
+
+    At entry the simulated price matches the signal cost exactly. Subsequent
+    bars move by full BS dynamics (delta + gamma) instead of a linear delta
+    approximation, keeping the stop-loss buffer consistent with entry pricing.
 
     Args:
         stock_price: Current stock price
         strike: Option strike price
         option_type: 'CALL' or 'PUT'
         days_to_expiry: Days until expiration
-        entry_price: Original entry price (optional, for delta adjustment)
-        entry_stock_price: Stock price at entry (optional, for delta adjustment)
+        entry_price: Original entry price (optional, for offset calibration)
+        entry_stock_price: Stock price at entry (optional, for offset calibration)
         volatility: Implied volatility (default from config)
         risk_free_rate: Risk-free rate (default from config)
 
@@ -401,26 +406,18 @@ def estimate_option_price_bs(stock_price, strike, option_type, days_to_expiry,
     # Calculate theoretical Black-Scholes price
     theoretical_price = black_scholes_price(stock_price, strike, T, risk_free_rate, volatility, option_type)
 
-    # If we have entry data, use delta-based adjustment for more realistic simulation
+    # If we have entry data, calibrate BS to actual market price using offset
+    # offset = entry_price - BS_theoretical(entry_stock) anchors the model
+    # so that at entry the simulated price matches the signal cost exactly,
+    # and subsequent bars move by full BS dynamics (delta + gamma)
     if entry_price and entry_stock_price and entry_price > 0:
-        # Calculate current greeks
-        greeks = calculate_greeks(stock_price, strike, T, risk_free_rate, volatility, option_type)
-        delta = greeks['delta']
+        entry_theoretical = black_scholes_price(
+            entry_stock_price, strike, T, risk_free_rate, volatility, option_type
+        )
+        offset = entry_price - entry_theoretical
+        calibrated_price = theoretical_price + offset
 
-        # Calculate price change based on stock movement
-        stock_change = stock_price - entry_stock_price
-        price_change = abs(delta) * stock_change
-
-        # For puts, price moves inversely to stock
-        if option_type.upper() in ['PUT', 'PUTS', 'P']:
-            price_change = -price_change
-
-        estimated = entry_price + price_change
-
-        # Blend with theoretical for stability (70% delta-based, 30% theoretical)
-        blended_price = 0.7 * estimated + 0.3 * theoretical_price
-
-        return max(min_price, blended_price)
+        return max(min_price, calibrated_price)
 
     return max(min_price, theoretical_price)
 
