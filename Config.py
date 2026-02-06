@@ -177,6 +177,13 @@ BACKTEST_CONFIG = {
         'rsi_oversold': 30,                        # RSI oversold threshold
     },
 
+    # Due Diligence - pre-entry checks on indicators before buying
+    'due_diligence': {
+        'enabled': True,
+        'DD_rsi_overbought': 85,               # Don't buy CALL if RSI above this
+        'DD_rsi_oversold': 15,                  # Don't buy PUT if RSI below this
+    },
+
     # --- Unused backtest settings (commented out for review) ---
     # 'position_size_pct': 0.02,                   # 2% per trade
     # 'max_positions': 5,                          # Max concurrent positions

@@ -59,7 +59,7 @@ Modules: Config.py, Signal.py, Analysis.py, Strategy.py
 import Config
 import Signal
 import Analysis
-from Strategy import StopLoss
+from Strategy import StopLoss, CheckDueDiligence
 
 
 # =============================================================================
@@ -813,6 +813,39 @@ class Backtest:
             )
 
         entry_option_price *= (1 + self.slippage_pct)
+
+        # Due Diligence check - validate indicators before entry
+        DD_config = self.config.get('due_diligence', {})
+        DD_enabled = DD_config.get('enabled', True)
+
+        if DD_enabled:
+            # Calculate indicators to get RSI at entry
+            DD_indicator_config = self.config.get('indicators', {})
+            DD_ema_period = DD_indicator_config.get('ema_period', 30)
+            DD_stock_data = Analysis.add_indicators(stock_data.copy(), ema_period=DD_ema_period)
+
+            DD_entry_bar = DD_stock_data.iloc[entry_idx]
+            DD_rsi = DD_entry_bar.get('rsi', np.nan)
+
+            DD_result = CheckDueDiligence(
+                DD_rsi=DD_rsi,
+                DD_option_type=signal['option_type'],
+                DD_rsi_overbought=DD_config.get('DD_rsi_overbought', 85),
+                DD_rsi_oversold=DD_config.get('DD_rsi_oversold', 15),
+            )
+
+            if not DD_result['DD_passed']:
+                # Create position and immediately close with DD reason
+                DD_position = Position(
+                    signal=signal,
+                    entry_price=entry_option_price,
+                    entry_time=entry_time,
+                    contracts=self.default_contracts
+                )
+                DD_position.close(entry_option_price, entry_time, DD_result['DD_reason'])
+                DD_matrix = TrackingMatrix(DD_position)
+                print(f"    DD Rejected: {DD_result['DD_details']}")
+                return DD_position, DD_matrix
 
         # Create position
         position = Position(

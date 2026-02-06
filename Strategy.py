@@ -214,6 +214,52 @@ def check_stop_loss(entry_price, current_price, highest_price_since_entry,
     }
 
 
+def CheckDueDiligence(DD_rsi, DD_option_type, DD_rsi_overbought=85, DD_rsi_oversold=15):
+    """
+    Due Diligence check - validates indicators before entry.
+
+    Called after signal is developed to check historicals and indicators
+    for reasons to buy or not buy.
+
+    Args:
+        DD_rsi: RSI value at signal entry time
+        DD_option_type: Option type ('CALL', 'CALLS', 'C', 'PUT', 'PUTS', 'P')
+        DD_rsi_overbought: RSI threshold for overbought (default: 85)
+        DD_rsi_oversold: RSI threshold for oversold (default: 15)
+
+    Returns:
+        dict with:
+            - DD_passed: True if all checks pass, False if trade should be skipped
+            - DD_reason: Exit reason string if rejected (None if passed)
+            - DD_details: Description of why the check failed
+    """
+    DD_passed = True
+    DD_reason = None
+    DD_details = None
+
+    # RSI Check
+    if not np.isnan(DD_rsi):
+        # CALL: If RSI is above overbought threshold, don't buy
+        if DD_option_type in ('CALL', 'CALLS', 'C'):
+            if DD_rsi > DD_rsi_overbought:
+                DD_passed = False
+                DD_reason = 'OverBought'
+                DD_details = f"RSI {DD_rsi:.1f} > {DD_rsi_overbought} (overbought)"
+
+        # PUT: If RSI is below oversold threshold, don't buy
+        elif DD_option_type in ('PUT', 'PUTS', 'P'):
+            if DD_rsi < DD_rsi_oversold:
+                DD_passed = False
+                DD_reason = 'OverSold'
+                DD_details = f"RSI {DD_rsi:.1f} < {DD_rsi_oversold} (oversold)"
+
+    return {
+        'DD_passed': DD_passed,
+        'DD_reason': DD_reason,
+        'DD_details': DD_details,
+    }
+
+
 """
 ================================================================================
 EXTERNAL - Module Interface
@@ -224,4 +270,4 @@ Modules: Config.py, Data.py, Analysis.py, Orders.py, Test.py
 import Config
 
 # Export for use by other modules
-__all__ = ['StopLoss', 'check_stop_loss']
+__all__ = ['StopLoss', 'check_stop_loss', 'CheckDueDiligence']
