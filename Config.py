@@ -165,6 +165,7 @@ BACKTEST_CONFIG = {
         'breakeven_threshold_pct': None,           # None = auto-calculate as entry/(1-stop_loss_pct)
         'breakeven_min_minutes': 30,               # Min hold before breakeven transition
         'trailing_trigger_pct': 0.50,              # Start trailing at profit (50%)
+        'reversal_exit_enabled': True,             # Exit when True Price < VWAP (reversal)
     },
 
     # Technical indicators for backtest

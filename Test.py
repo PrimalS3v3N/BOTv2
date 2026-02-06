@@ -848,6 +848,7 @@ class Backtest:
         SL_trailing_trigger_pct = SL_config.get('trailing_trigger_pct', 0.50)
         SL_trailing_stop_pct = SL_config.get('trailing_stop_pct', 0.30)
         SL_breakeven_min_minutes = SL_config.get('breakeven_min_minutes', 30)
+        SL_reversal_exit_enabled = SL_config.get('reversal_exit_enabled', True)
 
         # Initialize stop loss manager
         SL_manager = StopLoss(
@@ -899,13 +900,21 @@ class Backtest:
                 SL_price = np.nan
                 SL_mode = None
                 SL_triggered = False
+                SL_reversal = False
+                SL_bearish_signal = False
 
                 if SL_enabled:
                     minutes_held = position.get_minutes_held(timestamp)
-                    SL_result = SL_manager.update(option_price, minutes_held=minutes_held)
+                    true_price = Analysis.true_price(stock_price, stock_high, stock_low)
+                    SL_result = SL_manager.update(
+                        option_price, minutes_held=minutes_held,
+                        true_price=true_price, vwap=vwap, ema=ema_30
+                    )
                     SL_price = SL_result['stop_loss']
                     SL_mode = SL_result['mode']
                     SL_triggered = SL_result['triggered']
+                    SL_reversal = SL_result['reversal']
+                    SL_bearish_signal = SL_result['bearish_signal']
 
                 # Record tracking data with stop loss and indicators
                 matrix.add_record(
@@ -925,8 +934,14 @@ class Backtest:
                     rsi=rsi
                 )
 
+                # Check for reversal exit (True Price < VWAP)
+                if SL_enabled and SL_reversal_exit_enabled and SL_reversal and not position.is_closed:
+                    exit_price = option_price * (1 - self.slippage_pct)
+                    exit_reason = self._format_exit_reason('stop_loss_reversal')
+                    position.close(exit_price, timestamp, exit_reason)
+
                 # Check for stop loss exit (only if stop loss is enabled)
-                if SL_enabled and SL_triggered and not position.is_closed:
+                elif SL_enabled and SL_triggered and not position.is_closed:
                     exit_price = option_price * (1 - self.slippage_pct)
                     # Map stop loss mode to user-friendly format
                     exit_reason = self._format_exit_reason(f'stop_loss_{SL_mode}')
@@ -968,6 +983,7 @@ class Backtest:
         - stop_loss_initial -> "SL - Initial"
         - stop_loss_breakeven -> "SL - Breakeven"
         - stop_loss_trailing -> "SL - Trailing"
+        - stop_loss_reversal -> "SL - Reversal"
         - market_close -> "Market Close"
         """
         if reason is None:
@@ -980,6 +996,8 @@ class Backtest:
             return 'SL - Breakeven'
         elif reason == 'stop_loss_trailing':
             return 'SL - Trailing'
+        elif reason == 'stop_loss_reversal':
+            return 'SL - Reversal'
 
         # Market close
         elif reason == 'market_close':
