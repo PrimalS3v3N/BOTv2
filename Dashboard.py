@@ -495,11 +495,11 @@ def create_trade_chart(df, trade_label, show_all_exits=False, market_hours_only=
             yanchor='top',
             y=1,
             xanchor='right',
-            x=-0.02,
+            x=-0.05,
             bgcolor='rgba(0,0,0,0)',
             font=dict(size=11),
         ),
-        margin=dict(l=160, r=60, t=60, b=40)
+        margin=dict(l=180, r=60, t=60, b=40)
     )
 
     # Update axes
