@@ -889,7 +889,8 @@ class Backtest:
             stop_loss_pct=SL_pct,
             trailing_trigger_pct=SL_trailing_trigger_pct,
             trailing_stop_pct=SL_trailing_stop_pct,
-            breakeven_min_minutes=SL_breakeven_min_minutes
+            breakeven_min_minutes=SL_breakeven_min_minutes,
+            option_type=position.option_type
         )
 
         for i, (timestamp, bar) in enumerate(stock_data.iterrows()):

@@ -27,6 +27,10 @@ class StopLoss:
 
     3. TRAILING: When price reaches 50% above entry, switch to trailing stop
        at 30% below the highest price since entry.
+
+    Reversal detection is direction-aware:
+    - CALL: reversal when true_price < VWAP (stock dropping = bad for calls)
+    - PUT:  reversal when true_price > VWAP (stock rising = bad for puts)
     """
 
     # Stop loss modes
@@ -35,7 +39,7 @@ class StopLoss:
     MODE_TRAILING = 'trailing'
 
     def __init__(self, entry_price, stop_loss_pct=None, trailing_trigger_pct=0.50,
-                 trailing_stop_pct=0.30, breakeven_min_minutes=30):
+                 trailing_stop_pct=0.30, breakeven_min_minutes=30, option_type='CALL'):
         """
         Initialize stop loss manager.
 
@@ -45,9 +49,11 @@ class StopLoss:
             trailing_trigger_pct: Profit % to trigger trailing mode (default: 0.50 = 50%)
             trailing_stop_pct: Trailing stop % below high (default: 0.30 = 30%)
             breakeven_min_minutes: Minimum minutes held before allowing breakeven (default: 30)
+            option_type: 'CALL' or 'PUT' - determines reversal detection direction
         """
         self.entry_price = entry_price
         self.stop_loss_pct = stop_loss_pct if stop_loss_pct is not None else 0.30
+        self.is_put = option_type.upper() in ('PUT', 'PUTS', 'P')
         self.trailing_trigger_pct = trailing_trigger_pct
         self.trailing_stop_pct = trailing_stop_pct
         self.breakeven_min_minutes = breakeven_min_minutes
@@ -84,8 +90,10 @@ class StopLoss:
                 - stop_loss: Current stop loss price
                 - mode: Current stop loss mode
                 - triggered: True if stop loss was hit
-                - reversal: True if True Price fell below VWAP
-                - bearish_signal: True if EMA fell below VWAP
+                - reversal: True if True Price crossed VWAP against the position
+                            (CALL: true_price < VWAP, PUT: true_price > VWAP)
+                - bearish_signal: True if EMA crossed VWAP against the position
+                            (CALL: EMA < VWAP, PUT: EMA > VWAP)
         """
         # Track highest price since entry (for trailing stop)
         if current_price > self.highest_price_since_entry:
@@ -115,17 +123,27 @@ class StopLoss:
         # Check if stop loss triggered
         triggered = current_price <= self.stop_loss_price
 
-        # Reversal detection: True Price falls below VWAP
+        # Reversal detection: True Price crosses VWAP against the position
+        # CALL: true_price < VWAP means stock dropping (bad for calls)
+        # PUT:  true_price > VWAP means stock rising (bad for puts)
         reversal = False
         if true_price is not None and vwap is not None:
             if not np.isnan(true_price) and not np.isnan(vwap):
-                reversal = true_price < vwap
+                if self.is_put:
+                    reversal = true_price > vwap
+                else:
+                    reversal = true_price < vwap
 
-        # Bearish signal: EMA falls below VWAP
+        # Adverse signal: EMA crosses VWAP against the position
+        # CALL: EMA < VWAP (bearish for calls)
+        # PUT:  EMA > VWAP (bullish for stock = bearish for puts)
         bearish_signal = False
         if ema is not None and vwap is not None:
             if not np.isnan(ema) and not np.isnan(vwap):
-                bearish_signal = ema < vwap
+                if self.is_put:
+                    bearish_signal = ema > vwap
+                else:
+                    bearish_signal = ema < vwap
 
         return {
             'stop_loss': self.stop_loss_price,
