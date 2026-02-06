@@ -68,19 +68,24 @@ class StopLoss:
         """Calculate initial stop loss price."""
         return self.entry_price * (1.0 - self.stop_loss_pct)
 
-    def update(self, current_price, minutes_held=0):
+    def update(self, current_price, minutes_held=0, true_price=None, vwap=None, ema=None):
         """
         Update stop loss based on current price and time held.
 
         Args:
             current_price: Current contract price
             minutes_held: Minutes since entry (default: 0)
+            true_price: True Price of the stock (avg of high, low, close)
+            vwap: Current VWAP value
+            ema: Current EMA value
 
         Returns:
             dict with:
                 - stop_loss: Current stop loss price
                 - mode: Current stop loss mode
                 - triggered: True if stop loss was hit
+                - reversal: True if True Price fell below VWAP
+                - bearish_signal: True if EMA fell below VWAP
         """
         # Track highest price since entry (for trailing stop)
         if current_price > self.highest_price_since_entry:
@@ -110,13 +115,27 @@ class StopLoss:
         # Check if stop loss triggered
         triggered = current_price <= self.stop_loss_price
 
+        # Reversal detection: True Price falls below VWAP
+        reversal = False
+        if true_price is not None and vwap is not None:
+            if not np.isnan(true_price) and not np.isnan(vwap):
+                reversal = true_price < vwap
+
+        # Bearish signal: EMA falls below VWAP
+        bearish_signal = False
+        if ema is not None and vwap is not None:
+            if not np.isnan(ema) and not np.isnan(vwap):
+                bearish_signal = ema < vwap
+
         return {
             'stop_loss': self.stop_loss_price,
             'mode': self.mode,
             'triggered': triggered,
             'highest_price': self.highest_price_since_entry,
             'breakeven_threshold': self.breakeven_threshold,
-            'trailing_trigger': self.trailing_trigger
+            'trailing_trigger': self.trailing_trigger,
+            'reversal': reversal,
+            'bearish_signal': bearish_signal
         }
 
     def get_state(self):

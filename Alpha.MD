@@ -150,6 +150,10 @@ Three-phase stop loss system for options contracts (configured via `stop_loss` d
    - Only uses price highs AFTER entry (not before)
    - Stop only moves up, never down
 
+4. **REVERSAL Exit**: If True Price falls below VWAP, reversal detected → exit as "SL - Reversal"
+   - Enabled via `reversal_exit_enabled: True` in `stop_loss` config
+   - Bearish Signal: When EMA falls below VWAP (use to buy a Put in future reversal system)
+
 **Classes:**
 - `StopLoss` - Stateful stop loss manager
 - `check_stop_loss()` - Stateless function for backtesting
@@ -194,6 +198,7 @@ Three-phase stop loss system for options contracts (configured via `stop_loss` d
 
 **Exit Strategies:**
 - StopLoss (3-phase: initial → breakeven → trailing)
+- SL - Reversal (True Price < VWAP)
 - Market close exit (default fallback)
 
 **Tracking Matrix Columns:**
@@ -338,6 +343,13 @@ These rules are mandatory. All code changes must respect module boundaries.
 | Orders.py | Placeholder |
 
 ---
+
+## TODO
+
+- [ ] Build a contract reversal system looking for Bearish or Bullish Signals
+  - Bearish Signal: EMA < VWAP → buy a Put
+  - Bullish Signal: (TBD criteria) → buy a Call
+  - Integrate with StopLoss reversal detection for automatic contract flipping
 
 ## Next Steps
 
