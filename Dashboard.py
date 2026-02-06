@@ -96,6 +96,9 @@ def find_entry_exit(df):
     """Find entry and exit rows using multiple detection methods."""
     opt_col = 'option_price_estimate' if 'option_price_estimate' in df.columns else 'option_price'
 
+    if df.empty:
+        return None, None, opt_col
+
     entry_row = None
     exit_row = None
 
@@ -524,6 +527,13 @@ def create_trade_chart(df, trade_label, show_all_exits=False, market_hours_only=
 
 def get_trade_summary(df):
     """Extract concise trade summary including max/min profit percentages."""
+    if df.empty:
+        return {
+            'entry': 0, 'exit': 0, 'pnl_pct': 0, 'exit_reason': 'N/A',
+            'duration': 0, 'max_price': 0, 'min_price': 0,
+            'max_profit_pct': 0, 'min_profit_pct': 0, 'profit_min': 0
+        }
+
     entry_row, exit_row, opt_col = find_entry_exit(df)
 
     entry_price = entry_row[opt_col] if entry_row is not None and opt_col in entry_row else 0
@@ -574,6 +584,8 @@ def get_trade_summary(df):
 
 def get_trade_table(df):
     """Create a concise data table for the trade."""
+    if df.empty:
+        return pd.DataFrame({'Metric': ['No data'], 'Value': ['Empty trade']})
     entry_row, exit_row, opt_col = find_entry_exit(df)
 
     # Build table data
@@ -672,6 +684,8 @@ def main():
 
         trade_list = []
         for pos_id, df in matrices.items():
+            if df.empty:
+                continue
             # Build label as "Ticker : strike : c/p"
             ticker = df['ticker'].iloc[0] if 'ticker' in df.columns else 'UNK'
             strike = df['strike'].iloc[0] if 'strike' in df.columns else 0
@@ -688,6 +702,10 @@ def main():
 
         # Sort by P&L descending (winners first, losers last)
         trade_list.sort(key=lambda x: x[2], reverse=True)
+
+        if not trade_list:
+            st.warning("All trades have empty data.")
+            return
 
         selected_idx = st.selectbox(
             "Select Trade",
@@ -706,6 +724,8 @@ def main():
         total_investment = 0.0
         potential_profit_dollars = 0.0
         for _, tdf in matrices.items():
+            if tdf.empty:
+                continue
             s = get_trade_summary(tdf)
             entry_p = s['entry']
             exit_p = s['exit']
