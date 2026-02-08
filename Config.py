@@ -182,6 +182,8 @@ BACKTEST_CONFIG = {
         'enabled': True,
         'DD_rsi_overbought': 85,               # Don't buy CALL if RSI above this
         'DD_rsi_oversold': 15,                  # Don't buy PUT if RSI below this
+        'delay_on_overbought': True,            # Delay purchase instead of rejecting when overbought
+        'rsi_reentry_threshold': 57,            # Buy when RSI drops to/below this level after overbought
     },
 
     # --- Unused backtest settings (commented out for review) ---
@@ -257,6 +259,7 @@ DATAFRAME_COLUMNS = {
         'contracts', 'highest_price', 'lowest_price',
         'pnl', 'pnl_pct', 'minutes_held',
         'max_price_to_eod', 'max_stop_loss_price', 'profit_min',
+        'delay_reason', 'original_entry_time',
     ],
 
     # Per-bar tracking data from TrackingMatrix (Test.py)
@@ -272,6 +275,7 @@ DATAFRAME_COLUMNS = {
     'tracking_matrix_metadata': [
         'trade_label', 'ticker', 'strike', 'option_type', 'expiration',
         'contracts', 'entry_time', 'exit_time', 'exit_reason',
+        'delay_reason', 'original_entry_time',
     ],
 
     # Dashboard matrix display columns (Dashboard.py)

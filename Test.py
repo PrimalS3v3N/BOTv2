@@ -536,6 +536,10 @@ class Position:
         self.max_price_to_eod = entry_price  # Track max price from entry to end of day
         self.max_stop_loss_price = entry_price  # Track lowest price during holding (worst stop loss point)
 
+        # Delay tracking (RSI overbought purchase delay)
+        self.delay_reason = None              # Why entry was delayed (e.g., 'RSI Overbought')
+        self.original_entry_time = None       # Original signal entry time before delay
+
     def update(self, timestamp, price, stock_price=None):
         """Update position with new price data during holding period."""
         self.current_price = price
@@ -605,6 +609,8 @@ class Position:
             'max_price_to_eod': self.max_price_to_eod,
             'max_stop_loss_price': self.max_stop_loss_price,
             'profit_min': profit_min,
+            'delay_reason': self.delay_reason,
+            'original_entry_time': self.original_entry_time,
         }
 
 
@@ -673,6 +679,8 @@ class TrackingMatrix:
             df['entry_time'] = self.position.entry_time
             df['exit_time'] = self.position.exit_time
             df['exit_reason'] = self.position.exit_reason
+            df['delay_reason'] = self.position.delay_reason
+            df['original_entry_time'] = self.position.original_entry_time
 
             # Reorder columns per Config source of truth
             col_order = Config.DATAFRAME_COLUMNS['tracking_matrix'] + Config.DATAFRAME_COLUMNS['tracking_matrix_metadata']
@@ -867,17 +875,85 @@ class Backtest:
             )
 
             if not DD_result['DD_passed']:
-                # Create position and immediately close with DD reason
-                DD_position = Position(
-                    signal=signal,
-                    entry_price=entry_option_price,
-                    entry_time=entry_time,
-                    contracts=self.default_contracts
-                )
-                DD_position.close(entry_option_price, entry_time, DD_result['DD_reason'])
-                DD_matrix = TrackingMatrix(DD_position)
-                print(f"    DD Rejected: {DD_result['DD_details']}")
-                return DD_position, DD_matrix
+                DD_delay_enabled = DD_config.get('delay_on_overbought', True)
+                DD_rsi_reentry = DD_config.get('rsi_reentry_threshold', 57)
+
+                if DD_delay_enabled and DD_result['DD_reason'] == 'OverBought':
+                    # Scan forward for RSI reentry point (<= threshold)
+                    new_entry_idx = None
+                    for scan_idx in range(entry_idx + 1, len(DD_stock_data)):
+                        scan_bar = DD_stock_data.iloc[scan_idx]
+                        scan_rsi = scan_bar.get('rsi', np.nan)
+                        scan_time = DD_stock_data.index[scan_idx]
+
+                        # Stop scanning at market close
+                        if scan_time.time() >= dt.time(15, 55):
+                            break
+
+                        if not np.isnan(scan_rsi) and scan_rsi <= DD_rsi_reentry:
+                            new_entry_idx = scan_idx
+                            break
+
+                    if new_entry_idx is not None:
+                        # Delayed entry - RSI dropped below reentry threshold
+                        new_entry_bar = stock_data.iloc[new_entry_idx]
+                        new_entry_time = stock_data.index[new_entry_idx]
+                        new_entry_stock_price = new_entry_bar['close']
+
+                        new_days_to_expiry = (signal['expiration'] - new_entry_time.date()).days if signal['expiration'] else 30
+                        new_entry_option_price = Analysis.estimate_option_price_bs(
+                            stock_price=new_entry_stock_price,
+                            strike=signal['strike'],
+                            option_type=signal['option_type'],
+                            days_to_expiry=new_days_to_expiry
+                        )
+                        new_entry_option_price *= (1 + self.slippage_pct)
+
+                        position = Position(
+                            signal=signal,
+                            entry_price=new_entry_option_price,
+                            entry_time=new_entry_time,
+                            contracts=self.default_contracts
+                        )
+                        position.delay_reason = 'RSI Overbought'
+                        position.original_entry_time = entry_time
+
+                        matrix = TrackingMatrix(position)
+                        self._simulate_position(position, matrix, stock_data, signal, new_entry_idx, new_entry_stock_price)
+
+                        reentry_rsi = DD_stock_data.iloc[new_entry_idx].get('rsi', np.nan)
+                        print(f"    RSI Overbought delay: entry at {new_entry_time.strftime('%H:%M')} "
+                              f"(RSI: {DD_rsi:.1f} -> {reentry_rsi:.1f})")
+                        return position, matrix
+                    else:
+                        # No reentry found - track data through end of day for analysis
+                        position = Position(
+                            signal=signal,
+                            entry_price=entry_option_price,
+                            entry_time=entry_time,
+                            contracts=self.default_contracts
+                        )
+                        position.delay_reason = 'RSI Overbought'
+                        position.original_entry_time = entry_time
+                        position.close(entry_option_price, entry_time, 'Overbought - No Reentry')
+
+                        matrix = TrackingMatrix(position)
+                        self._simulate_position(position, matrix, stock_data, signal, entry_idx, entry_stock_price)
+
+                        print(f"    RSI Overbought: no reentry below {DD_rsi_reentry} found, tracking through EOD")
+                        return position, matrix
+                else:
+                    # Non-overbought DD rejection (e.g., OverSold) or delay disabled
+                    DD_position = Position(
+                        signal=signal,
+                        entry_price=entry_option_price,
+                        entry_time=entry_time,
+                        contracts=self.default_contracts
+                    )
+                    DD_position.close(entry_option_price, entry_time, DD_result['DD_reason'])
+                    DD_matrix = TrackingMatrix(DD_position)
+                    print(f"    DD Rejected: {DD_result['DD_details']}")
+                    return DD_position, DD_matrix
 
         # Create position
         position = Position(
