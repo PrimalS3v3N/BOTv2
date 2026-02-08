@@ -197,7 +197,7 @@ def create_trade_chart(df, trade_label, show_all_exits=False, market_hours_only=
                 x=df['time'],
                 y=df['vwap'],
                 name='VWAP',
-                line=dict(color=COLORS['vwap'], width=2, dash='dash'),
+                line=dict(color='#FF0000', width=2),
                 hovertemplate='VWAP: $%{y:.2f}<extra></extra>'
             ),
             row=1, col=1, secondary_y=False
@@ -216,13 +216,13 @@ def create_trade_chart(df, trade_label, show_all_exits=False, market_hours_only=
             row=1, col=1, secondary_y=False
         )
 
-    # True Price (left y-axis) - white with high/low error bars
+    # True Price (left y-axis) - blue with high/low error bars
     if 'true_price' in df.columns and df['true_price'].notna().any():
         true_price_trace = go.Scatter(
             x=df['time'],
             y=df['true_price'],
             name='True Price',
-            line=dict(color='white', width=2),
+            line=dict(color='#2196F3', width=2),
             hovertemplate='True Price: $%{y:.2f}<extra></extra>'
         )
 
@@ -235,8 +235,8 @@ def create_trade_chart(df, trade_label, show_all_exits=False, market_hours_only=
                 symmetric=False,
                 array=tp_error_plus,
                 arrayminus=tp_error_minus,
-                color='rgba(255, 255, 255, 0.4)',
-                thickness=1,
+                color='rgba(255, 255, 255, 0.8)',
+                thickness=3,
                 width=0
             )
 
@@ -395,9 +395,9 @@ def create_trade_chart(df, trade_label, show_all_exits=False, market_hours_only=
                 go.Scatter(
                     x=df['time'],
                     y=df['ewo_15min_avg'],
-                    name='EWO 15m Avg',
+                    name='Avg(EWO)',
                     line=dict(color='#FF9800', width=2, dash='dot'),
-                    hovertemplate='EWO 15m Avg: %{y:.3f}<extra></extra>'
+                    hovertemplate='Avg(EWO): %{y:.3f}<extra></extra>'
                 ),
                 row=2, col=1
             )
@@ -497,12 +497,12 @@ def create_trade_chart(df, trade_label, show_all_exits=False, market_hours_only=
             orientation='v',
             yanchor='top',
             y=1,
-            xanchor='right',
-            x=-0.05,
+            xanchor='left',
+            x=1.05,
             bgcolor='rgba(0,0,0,0)',
             font=dict(size=11),
         ),
-        margin=dict(l=180, r=60, t=60, b=40)
+        margin=dict(l=60, r=180, t=60, b=40)
     )
 
     # Update axes
