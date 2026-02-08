@@ -184,6 +184,8 @@ BACKTEST_CONFIG = {
         'DD_rsi_oversold': 15,                  # Don't buy PUT if RSI below this
         'delay_on_overbought': True,            # Delay purchase instead of rejecting when overbought
         'rsi_reentry_threshold': 57,            # Buy when RSI drops to/below this level after overbought
+        'delay_on_oversold': True,              # Delay purchase instead of rejecting when oversold
+        'rsi_reentry_threshold_oversold': 43,   # Buy when RSI rises to/above this level after oversold
     },
 
     # --- Unused backtest settings (commented out for review) ---
