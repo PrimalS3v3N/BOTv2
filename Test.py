@@ -45,6 +45,36 @@ except ImportError:
 # Timezone for market hours
 EASTERN = ZoneInfo('America/New_York')
 
+
+def adjust_lookback_for_weekend(lookback_days):
+    """
+    Adjust lookback_days when running on weekends so the window
+    always reaches back to trading days.
+
+    On Saturday (weekday 5): add 1 day to skip Saturday
+    On Sunday   (weekday 6): add 2 days to skip Saturday + Sunday
+
+    Examples on Saturday:
+        lookback_days=1 -> 2  (reaches Friday)
+        lookback_days=2 -> 3  (reaches Thursday)
+    Examples on Sunday:
+        lookback_days=1 -> 3  (reaches Friday)
+        lookback_days=2 -> 4  (reaches Thursday)
+    """
+    today = dt.datetime.now(EASTERN).weekday()  # Mon=0 ... Sun=6
+    if today == 5:  # Saturday
+        adjusted = lookback_days + 1
+        print(f"  Weekend adjustment: Saturday detected, "
+              f"lookback_days {lookback_days} -> {adjusted}")
+        return adjusted
+    elif today == 6:  # Sunday
+        adjusted = lookback_days + 2
+        print(f"  Weekend adjustment: Sunday detected, "
+              f"lookback_days {lookback_days} -> {adjusted}")
+        return adjusted
+    return lookback_days
+
+
 # Module-level DataFrame for variable explorer visibility
 discord_messages_df = pd.DataFrame()
 
@@ -689,7 +719,9 @@ class Backtest:
         if config:
             self.config.update(config)
 
-        self.lookback_days = lookback_days or self.config.get('lookback_days', 5)
+        self.lookback_days = adjust_lookback_for_weekend(
+            lookback_days or self.config.get('lookback_days', 5)
+        )
         self.initial_capital = self.config.get('initial_capital', 10000.0)
         self.default_contracts = self.config.get('default_contracts', 1)
         self.slippage_pct = self.config.get('slippage_pct', 0.001)
