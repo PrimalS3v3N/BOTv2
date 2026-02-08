@@ -783,25 +783,6 @@ def main():
             st.warning("All trades have empty data.")
             return
 
-        # Trade type filter
-        trade_type_filter = st.selectbox(
-            "Trade Type",
-            ["All Trades", "Normal", "RSI Delayed", "No Reentry"],
-            index=0
-        )
-
-        # Apply filter
-        if trade_type_filter == "Normal":
-            trade_list = [t for t in trade_list if t[3] is None]
-        elif trade_type_filter == "RSI Delayed":
-            trade_list = [t for t in trade_list if '[RSI-D]' in t[0]]
-        elif trade_type_filter == "No Reentry":
-            trade_list = [t for t in trade_list if '[NO-RE]' in t[0]]
-
-        if not trade_list:
-            st.warning(f"No {trade_type_filter.lower()} trades found.")
-            return
-
         selected_idx = st.selectbox(
             "Select Trade",
             range(len(trade_list)),
@@ -811,6 +792,8 @@ def main():
         st.markdown("---")
         market_hours_only = st.toggle("Market Hours", value=True, help="ON: Full market hours view | OFF: Holding period only")
         show_all_exits = st.toggle("Show All Exit Signals", value=False)
+        show_ewo = st.toggle("Show EWO Graph", value=True)
+        show_rsi = st.toggle("Show RSI Graph", value=True)
 
         st.markdown("---")
 
@@ -837,12 +820,6 @@ def main():
 
         st.markdown(f"**Total Profit:** ${total_profit_dollars:,.2f} ({total_profit_pct:+.1f}%)")
         st.markdown(f"**Potential Profit:** ${potential_profit_dollars:,.2f} ({potential_profit_pct:+.1f}%)")
-
-        st.markdown("---")
-
-        # EWO and RSI graph toggles
-        show_ewo = st.toggle("Show EWO Graph", value=True)
-        show_rsi = st.toggle("Show RSI Graph", value=True)
 
         st.markdown("---")
         st.caption(f"{len(matrices)} trades loaded")
