@@ -403,7 +403,7 @@ def create_trade_chart(df, trade_label, show_all_exits=False, market_hours_only=
     # RSI reentry threshold line for delayed trades
     if delay_info and delay_info.get('delay_reason') and has_rsi:
         is_oversold = delay_info.get('delay_reason') == 'RSI Oversold'
-        rsi_reentry = 43 if is_oversold else 30
+        rsi_reentry = 70 if is_oversold else 30
         time_range = [df['time'].iloc[0], df['time'].iloc[-1]]
         fig.add_trace(
             go.Scatter(

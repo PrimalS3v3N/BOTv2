@@ -185,7 +185,7 @@ BACKTEST_CONFIG = {
         'delay_on_overbought': True,            # Delay purchase instead of rejecting when overbought
         'rsi_reentry_threshold': 30,            # Buy when Avg(RSI) drops to/below this level after overbought (+ EWO negative)
         'delay_on_oversold': True,              # Delay purchase instead of rejecting when oversold
-        'rsi_reentry_threshold_oversold': 43,   # Buy when RSI rises to/above this level after oversold
+        'rsi_reentry_threshold_oversold': 70,   # Buy when Avg(RSI) rises to/above this level after oversold (+ EWO positive)
     },
 
     # Closure - Peak: Avg RSI (10min) based exit in last 30 minutes of trading day
