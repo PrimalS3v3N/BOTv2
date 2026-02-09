@@ -183,16 +183,16 @@ BACKTEST_CONFIG = {
         'DD_rsi_overbought': 85,               # Don't buy CALL if RSI above this
         'DD_rsi_oversold': 15,                  # Don't buy PUT if RSI below this
         'delay_on_overbought': True,            # Delay purchase instead of rejecting when overbought
-        'rsi_reentry_threshold': 57,            # Buy when RSI drops to/below this level after overbought
+        'rsi_reentry_threshold': 30,            # Buy when Avg(RSI) drops to/below this level after overbought (+ EWO negative)
         'delay_on_oversold': True,              # Delay purchase instead of rejecting when oversold
-        'rsi_reentry_threshold_oversold': 43,   # Buy when RSI rises to/above this level after oversold
+        'rsi_reentry_threshold_oversold': 70,   # Buy when Avg(RSI) rises to/above this level after oversold (+ EWO positive)
     },
 
-    # Closure - Peak: RSI-based exit in last 30 minutes of trading day
+    # Closure - Peak: Avg RSI (10min) based exit in last 30 minutes of trading day
     'closure_peak': {
         'enabled': True,
-        'rsi_call_threshold': 87,              # Sell CALL contracts when RSI >= this
-        'rsi_put_threshold': 13,               # Sell PUT contracts when RSI <= this
+        'rsi_call_threshold': 85,              # Sell CALL contracts when Avg RSI (10min) >= this
+        'rsi_put_threshold': 15,               # Sell PUT contracts when Avg RSI (10min) <= this
         'minutes_before_close': 30,            # Activate in last N minutes (15:30+)
     },
 

@@ -877,21 +877,24 @@ class Backtest:
 
             if not DD_result['DD_passed']:
                 DD_delay_enabled = DD_config.get('delay_on_overbought', True)
-                DD_rsi_reentry = DD_config.get('rsi_reentry_threshold', 57)
+                DD_rsi_reentry = DD_config.get('rsi_reentry_threshold', 30)
 
                 if DD_delay_enabled and DD_result['DD_reason'] == 'OverBought':
-                    # Scan forward for Avg(RSI) reentry point (<= threshold)
+                    # Scan forward for Avg(RSI) reentry point (<= threshold) AND EWO negative
                     new_entry_idx = None
                     for scan_idx in range(entry_idx + 1, len(DD_stock_data)):
                         scan_bar = DD_stock_data.iloc[scan_idx]
                         scan_rsi_avg = scan_bar.get('rsi_10min_avg', np.nan)
+                        scan_ewo = scan_bar.get('ewo', np.nan)
                         scan_time = DD_stock_data.index[scan_idx]
 
                         # Stop scanning at market close
                         if scan_time.time() >= dt.time(15, 55):
                             break
 
-                        if not np.isnan(scan_rsi_avg) and scan_rsi_avg <= DD_rsi_reentry:
+                        # Reentry requires Avg(RSI) below threshold AND EWO negative
+                        if (not np.isnan(scan_rsi_avg) and scan_rsi_avg <= DD_rsi_reentry and
+                                not np.isnan(scan_ewo) and scan_ewo < 0):
                             new_entry_idx = scan_idx
                             break
 
@@ -923,8 +926,9 @@ class Backtest:
                         self._simulate_position(position, matrix, stock_data, signal, new_entry_idx, new_entry_stock_price)
 
                         reentry_rsi_avg = DD_stock_data.iloc[new_entry_idx].get('rsi_10min_avg', np.nan)
+                        reentry_ewo = DD_stock_data.iloc[new_entry_idx].get('ewo', np.nan)
                         print(f"    RSI Overbought delay: entry at {new_entry_time.strftime('%H:%M')} "
-                              f"(RSI: {DD_rsi:.1f} -> Avg(RSI): {reentry_rsi_avg:.1f})")
+                              f"(RSI: {DD_rsi:.1f} -> Avg(RSI): {reentry_rsi_avg:.1f}, EWO: {reentry_ewo:.3f})")
                         return position, matrix
                     else:
                         # No reentry found - track data through end of day for analysis
@@ -941,23 +945,26 @@ class Backtest:
                         matrix = TrackingMatrix(position)
                         self._simulate_position(position, matrix, stock_data, signal, entry_idx, entry_stock_price)
 
-                        print(f"    RSI Overbought: no Avg(RSI) reentry below {DD_rsi_reentry} found, tracking through EOD")
+                        print(f"    RSI Overbought: no reentry (Avg(RSI) <= {DD_rsi_reentry} + EWO < 0) found, tracking through EOD")
                         return position, matrix
                 elif DD_config.get('delay_on_oversold', True) and DD_result['DD_reason'] == 'OverSold':
-                    DD_rsi_reentry_os = DD_config.get('rsi_reentry_threshold_oversold', 43)
+                    DD_rsi_reentry_os = DD_config.get('rsi_reentry_threshold_oversold', 70)
 
-                    # Scan forward for Avg(RSI) reentry point (>= threshold)
+                    # Scan forward for Avg(RSI) reentry point (>= threshold) AND EWO positive
                     new_entry_idx = None
                     for scan_idx in range(entry_idx + 1, len(DD_stock_data)):
                         scan_bar = DD_stock_data.iloc[scan_idx]
                         scan_rsi_avg = scan_bar.get('rsi_10min_avg', np.nan)
+                        scan_ewo = scan_bar.get('ewo', np.nan)
                         scan_time = DD_stock_data.index[scan_idx]
 
                         # Stop scanning at market close
                         if scan_time.time() >= dt.time(15, 55):
                             break
 
-                        if not np.isnan(scan_rsi_avg) and scan_rsi_avg >= DD_rsi_reentry_os:
+                        # Reentry requires Avg(RSI) above threshold AND EWO positive
+                        if (not np.isnan(scan_rsi_avg) and scan_rsi_avg >= DD_rsi_reentry_os and
+                                not np.isnan(scan_ewo) and scan_ewo > 0):
                             new_entry_idx = scan_idx
                             break
 
@@ -989,8 +996,9 @@ class Backtest:
                         self._simulate_position(position, matrix, stock_data, signal, new_entry_idx, new_entry_stock_price)
 
                         reentry_rsi_avg = DD_stock_data.iloc[new_entry_idx].get('rsi_10min_avg', np.nan)
+                        reentry_ewo = DD_stock_data.iloc[new_entry_idx].get('ewo', np.nan)
                         print(f"    RSI Oversold delay: entry at {new_entry_time.strftime('%H:%M')} "
-                              f"(RSI: {DD_rsi:.1f} -> Avg(RSI): {reentry_rsi_avg:.1f})")
+                              f"(RSI: {DD_rsi:.1f} -> Avg(RSI): {reentry_rsi_avg:.1f}, EWO: {reentry_ewo:.3f})")
                         return position, matrix
                     else:
                         # No reentry found - track data through end of day for analysis
@@ -1007,7 +1015,7 @@ class Backtest:
                         matrix = TrackingMatrix(position)
                         self._simulate_position(position, matrix, stock_data, signal, entry_idx, entry_stock_price)
 
-                        print(f"    RSI Oversold: no Avg(RSI) reentry above {DD_rsi_reentry_os} found, tracking through EOD")
+                        print(f"    RSI Oversold: no reentry (Avg(RSI) >= {DD_rsi_reentry_os} + EWO > 0) found, tracking through EOD")
                         return position, matrix
                 else:
                     # DD rejection with delay disabled
@@ -1178,12 +1186,12 @@ class Backtest:
                     exit_reason = self._format_exit_reason(f'stop_loss_{SL_mode}')
                     position.close(exit_price, timestamp, exit_reason)
 
-                # Closure - Peak: RSI-based exit in last 30 minutes of trading day
-                elif CP_enabled and not position.is_closed and not np.isnan(rsi) and timestamp.time() >= CP_start_time:
-                    if position.option_type.upper() in ['CALL', 'CALLS', 'C'] and rsi >= CP_rsi_call:
+                # Closure - Peak: Avg RSI (10min) based exit in last 30 minutes of trading day
+                elif CP_enabled and not position.is_closed and not np.isnan(rsi_10min_avg) and timestamp.time() >= CP_start_time:
+                    if position.option_type.upper() in ['CALL', 'CALLS', 'C'] and rsi_10min_avg >= CP_rsi_call:
                         exit_price = option_price * (1 - self.slippage_pct)
                         position.close(exit_price, timestamp, 'Closure - Peak')
-                    elif position.option_type.upper() in ['PUT', 'PUTS', 'P'] and rsi <= CP_rsi_put:
+                    elif position.option_type.upper() in ['PUT', 'PUTS', 'P'] and rsi_10min_avg <= CP_rsi_put:
                         exit_price = option_price * (1 - self.slippage_pct)
                         position.close(exit_price, timestamp, 'Closure - Peak')
 
