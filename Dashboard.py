@@ -354,10 +354,13 @@ def create_trade_chart(df, trade_label, show_all_exits=False, market_hours_only=
             row=1, col=1, secondary_y=True
         )
 
-    # Delay markers (RSI Overbought purchase delay)
+    # Delay markers (RSI Overbought/Oversold purchase delay)
     if delay_info and delay_info.get('original_entry_time') and entry_row is not None:
         original_time = parse_time(delay_info['original_entry_time'])
         actual_entry_time = parse_time(entry_row['timestamp'])
+        is_oversold = delay_info.get('delay_reason') == 'RSI Oversold'
+        signal_label = 'OS Signal' if is_oversold else 'OB Signal'
+        signal_name = 'Signal (Oversold)' if is_oversold else 'Signal (Overbought)'
 
         if original_time and actual_entry_time and original_time != actual_entry_time:
             # Find option price at original signal time for marker placement
@@ -373,13 +376,13 @@ def create_trade_chart(df, trade_label, show_all_exits=False, market_hours_only=
                     x=[original_time],
                     y=[orig_opt_price],
                     mode='markers+text',
-                    name='Signal (Overbought)',
+                    name=signal_name,
                     marker=dict(symbol='diamond', size=16, color='#FF9800',
                                 line=dict(color='white', width=2)),
-                    text=['OB Signal'],
+                    text=[signal_label],
                     textposition='bottom center',
                     textfont=dict(size=9, color='#FF9800'),
-                    hovertemplate=f'Overbought Signal<br>${{y:.2f}}<extra></extra>'
+                    hovertemplate=f'{signal_name}<br>${{y:.2f}}<extra></extra>'
                 ),
                 row=1, col=1, secondary_y=True
             )
@@ -392,9 +395,10 @@ def create_trade_chart(df, trade_label, show_all_exits=False, market_hours_only=
                 row=1, col=1
             )
 
-    # RSI reentry threshold line (57) for delayed trades
+    # RSI reentry threshold line for delayed trades
     if delay_info and delay_info.get('delay_reason') and has_rsi:
-        rsi_reentry = 57
+        is_oversold = delay_info.get('delay_reason') == 'RSI Oversold'
+        rsi_reentry = 43 if is_oversold else 57
         time_range = [df['time'].iloc[0], df['time'].iloc[-1]]
         fig.add_trace(
             go.Scatter(
@@ -501,6 +505,19 @@ def create_trade_chart(df, trade_label, show_all_exits=False, market_hours_only=
             ),
             row=2, col=1, secondary_y=True
         )
+
+        # Avg(RSI) 10-min average line (if available)
+        if 'rsi_10min_avg' in df.columns and df['rsi_10min_avg'].notna().any():
+            fig.add_trace(
+                go.Scatter(
+                    x=df['time'],
+                    y=df['rsi_10min_avg'],
+                    name='Avg(RSI)',
+                    line=dict(color='#FF9800', width=2, dash='dot'),
+                    hovertemplate='Avg(RSI): %{y:.1f}<extra></extra>'
+                ),
+                row=2, col=1, secondary_y=True
+            )
 
         # RSI reference lines on secondary y-axis
         # Use scatter traces for reference lines since add_hline doesn't support secondary_y
@@ -765,7 +782,7 @@ def main():
 
             if 'delay_reason' in df.columns and df['delay_reason'].notna().any():
                 delay_reason = df['delay_reason'].iloc[0]
-                if exit_reason_val == 'Overbought - No Reentry':
+                if exit_reason_val in ('Overbought - No Reentry', 'Oversold - No Reentry'):
                     label = f"{label} [NO-RE]"
                 else:
                     label = f"{label} [RSI-D]"
@@ -935,6 +952,9 @@ def main():
 
         if 'rsi' in matrix_df.columns:
             matrix_df['rsi'] = matrix_df['rsi'].apply(lambda x: f"{x:.1f}" if pd.notna(x) else "")
+
+        if 'rsi_10min_avg' in matrix_df.columns:
+            matrix_df['rsi_10min_avg'] = matrix_df['rsi_10min_avg'].apply(lambda x: f"{x:.1f}" if pd.notna(x) else "")
 
         st.dataframe(matrix_df, use_container_width=True, hide_index=True)
     else:

@@ -184,6 +184,8 @@ BACKTEST_CONFIG = {
         'DD_rsi_oversold': 15,                  # Don't buy PUT if RSI below this
         'delay_on_overbought': True,            # Delay purchase instead of rejecting when overbought
         'rsi_reentry_threshold': 57,            # Buy when RSI drops to/below this level after overbought
+        'delay_on_oversold': True,              # Delay purchase instead of rejecting when oversold
+        'rsi_reentry_threshold_oversold': 43,   # Buy when RSI rises to/above this level after oversold
     },
 
     # Closure - Peak: RSI-based exit in last 30 minutes of trading day
@@ -276,7 +278,7 @@ DATAFRAME_COLUMNS = {
         'option_price', 'volume', 'holding', 'entry_price',
         'pnl', 'pnl_pct', 'highest_price', 'lowest_price', 'minutes_held',
         'stop_loss', 'stop_loss_mode',
-        'vwap', 'ema_30', 'ewo', 'ewo_15min_avg', 'rsi',
+        'vwap', 'ema_30', 'ewo', 'ewo_15min_avg', 'rsi', 'rsi_10min_avg',
     ],
 
     # Metadata columns appended to tracking matrix (Test.py)
@@ -291,7 +293,7 @@ DATAFRAME_COLUMNS = {
         'timestamp', 'holding', 'stock_price', 'stock_high', 'stock_low',
         'true_price', 'option_price', 'pnl_pct',
         'stop_loss', 'stop_loss_mode', 'sl_cushion',
-        'vwap', 'ema_20', 'ema_30', 'ewo', 'ewo_15min_avg', 'rsi',
+        'vwap', 'ema_20', 'ema_30', 'ewo', 'ewo_15min_avg', 'rsi', 'rsi_10min_avg',
         'SL_C1', 'SL_C2',
     ],
 }
