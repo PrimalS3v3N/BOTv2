@@ -179,6 +179,7 @@ def add_indicators(df, ema_period=30, ewo_fast=5, ewo_slow=35, ewo_avg_period=15
         - ema_30: 30-period EMA
         - vwap: Volume Weighted Average Price
         - vwap_ema_avg: (VWAP + EMA) / 2
+        - emavwap: (EMA + VWAP) / 2
         - ewo: Elliott Wave Oscillator
         - ewo_15min_avg: 15-minute rolling average of EWO
         - rsi: Relative Strength Index (0-100 scale)
@@ -213,6 +214,9 @@ def add_indicators(df, ema_period=30, ewo_fast=5, ewo_slow=35, ewo_avg_period=15
 
     # Add VWAP-EMA Average: (VWAP + EMA) / 2
     df['vwap_ema_avg'] = (df['vwap'] + df['ema_30']) / 2
+
+    # Add EMAVWAP: (EMA + VWAP) / 2
+    df['emavwap'] = (df['ema_30'] + df['vwap']) / 2
 
     # Clean up temporary column
     df = df.drop(columns=['_true_price'])
