@@ -181,15 +181,20 @@ def create_trade_chart(df, trade_label, show_all_exits=False, market_hours_only=
     # Check if RSI data is available (and toggle is on)
     has_rsi = show_rsi and 'rsi' in df.columns and df['rsi'].notna().any()
 
+    # RSI uses secondary y-axis only when EWO is also shown (they share row 2)
+    # When EWO is off, RSI uses the primary y-axis to avoid empty primary axis issues
+    rsi_secondary = has_ewo
+
     # Create subplots: main chart + combined indicator subplot below
     if has_ewo or has_rsi:
-        # 2 rows: main chart, indicators (EWO left axis, RSI right axis)
+        # 2 rows: main chart, indicators
+        row2_spec = {"secondary_y": True} if has_ewo else {"secondary_y": False}
         fig = make_subplots(
             rows=2, cols=1,
             shared_xaxes=True,
             vertical_spacing=0.05,
             row_heights=[0.60, 0.40],
-            specs=[[{"secondary_y": True}], [{"secondary_y": True}]]
+            specs=[[{"secondary_y": True}], [row2_spec]]
         )
     else:
         fig = make_subplots(specs=[[{"secondary_y": True}]])
@@ -398,7 +403,7 @@ def create_trade_chart(df, trade_label, show_all_exits=False, market_hours_only=
     # RSI reentry threshold line for delayed trades
     if delay_info and delay_info.get('delay_reason') and has_rsi:
         is_oversold = delay_info.get('delay_reason') == 'RSI Oversold'
-        rsi_reentry = 43 if is_oversold else 57
+        rsi_reentry = 43 if is_oversold else 30
         time_range = [df['time'].iloc[0], df['time'].iloc[-1]]
         fig.add_trace(
             go.Scatter(
@@ -408,7 +413,7 @@ def create_trade_chart(df, trade_label, show_all_exits=False, market_hours_only=
                 line=dict(color='rgba(255, 152, 0, 0.9)', width=1.5, dash='dashdot'),
                 hovertemplate=f'RSI Reentry: {rsi_reentry}<extra></extra>'
             ),
-            row=2, col=1, secondary_y=True
+            row=2, col=1, secondary_y=rsi_secondary
         )
 
     # Show all exit strategy markers (when toggle is on)
@@ -492,7 +497,7 @@ def create_trade_chart(df, trade_label, show_all_exits=False, market_hours_only=
             row=2, col=1
         )
 
-    # RSI on row 2, secondary y-axis (shares subplot with EWO)
+    # RSI on row 2 (secondary y-axis when sharing with EWO, primary when alone)
     if has_rsi:
         # RSI line in white
         fig.add_trace(
@@ -503,7 +508,7 @@ def create_trade_chart(df, trade_label, show_all_exits=False, market_hours_only=
                 line=dict(color='white', width=1.5),
                 hovertemplate='RSI: %{y:.1f}<extra></extra>'
             ),
-            row=2, col=1, secondary_y=True
+            row=2, col=1, secondary_y=rsi_secondary
         )
 
         # Avg(RSI) 10-min average line (if available)
@@ -516,10 +521,10 @@ def create_trade_chart(df, trade_label, show_all_exits=False, market_hours_only=
                     line=dict(color='#FF9800', width=2, dash='dot'),
                     hovertemplate='Avg(RSI): %{y:.1f}<extra></extra>'
                 ),
-                row=2, col=1, secondary_y=True
+                row=2, col=1, secondary_y=rsi_secondary
             )
 
-        # RSI reference lines on secondary y-axis
+        # RSI reference lines
         # Use scatter traces for reference lines since add_hline doesn't support secondary_y
         time_range = [df['time'].iloc[0], df['time'].iloc[-1]]
 
@@ -531,7 +536,7 @@ def create_trade_chart(df, trade_label, show_all_exits=False, market_hours_only=
                 line=dict(color='rgba(255, 82, 82, 0.7)', width=1, dash='dot'),
                 showlegend=False, hoverinfo='skip'
             ),
-            row=2, col=1, secondary_y=True
+            row=2, col=1, secondary_y=rsi_secondary
         )
 
         # Oversold line (30)
@@ -542,7 +547,7 @@ def create_trade_chart(df, trade_label, show_all_exits=False, market_hours_only=
                 line=dict(color='rgba(105, 240, 174, 0.7)', width=1, dash='dot'),
                 showlegend=False, hoverinfo='skip'
             ),
-            row=2, col=1, secondary_y=True
+            row=2, col=1, secondary_y=rsi_secondary
         )
 
         # Neutral line (50)
@@ -553,7 +558,7 @@ def create_trade_chart(df, trade_label, show_all_exits=False, market_hours_only=
                 line=dict(color='gray', width=1, dash='dash'),
                 showlegend=False, hoverinfo='skip'
             ),
-            row=2, col=1, secondary_y=True
+            row=2, col=1, secondary_y=rsi_secondary
         )
 
     # Layout
@@ -592,7 +597,7 @@ def create_trade_chart(df, trade_label, show_all_exits=False, market_hours_only=
 
     if has_rsi:
         fig.update_yaxes(
-            title_text="RSI", secondary_y=True, row=2, col=1,
+            title_text="RSI", secondary_y=rsi_secondary, row=2, col=1,
             range=[0, 100], tickvals=[0, 30, 50, 70, 100]
         )
 
