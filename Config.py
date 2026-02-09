@@ -182,10 +182,11 @@ BACKTEST_CONFIG = {
         'enabled': True,
         'DD_rsi_overbought': 85,               # Don't buy CALL if RSI above this
         'DD_rsi_oversold': 15,                  # Don't buy PUT if RSI below this
+        'lookback_bars': 15,                    # Look back N bars before entry to detect recent overbought/oversold
         'delay_on_overbought': True,            # Delay purchase instead of rejecting when overbought
-        'rsi_reentry_threshold': 30,            # Buy when Avg(RSI) drops to/below this level after overbought (+ EWO negative)
+        'rsi_reentry_threshold': 30,            # Buy when Avg(RSI) drops to/below this level after overbought (+ EWO & EWO avg negative)
         'delay_on_oversold': True,              # Delay purchase instead of rejecting when oversold
-        'rsi_reentry_threshold_oversold': 70,   # Buy when Avg(RSI) rises to/above this level after oversold (+ EWO positive)
+        'rsi_reentry_threshold_oversold': 70,   # Buy when Avg(RSI) rises to/above this level after oversold (+ EWO & EWO avg positive)
     },
 
     # Closure - Peak: Avg RSI (10min) based exit in last 30 minutes of trading day
