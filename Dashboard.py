@@ -348,7 +348,7 @@ def create_trade_chart(df, trade_label, show_all_exits=False, market_hours_only=
                 marker=dict(symbol='triangle-up', size=18, color=COLORS['exit'], line=dict(color='white', width=2)),
                 text=[str(exit_reason)],
                 textposition='top center',
-                textfont=dict(size=10, color=COLORS['exit']),
+                textfont=dict(size=12, color=COLORS['exit']),
                 hovertemplate=f'EXIT: {exit_reason}<br>$%{{y:.2f}}<extra></extra>'
             ),
             row=1, col=1, secondary_y=True
@@ -378,7 +378,7 @@ def create_trade_chart(df, trade_label, show_all_exits=False, market_hours_only=
                                 line=dict(color='white', width=2)),
                     text=['OB Signal'],
                     textposition='bottom center',
-                    textfont=dict(size=9, color='#FF9800'),
+                    textfont=dict(size=11, color='#FF9800'),
                     hovertemplate=f'Overbought Signal<br>$%{{y:.2f}}<extra></extra>'
                 ),
                 row=1, col=1, secondary_y=True
@@ -548,6 +548,7 @@ def create_trade_chart(df, trade_label, show_all_exits=False, market_hours_only=
     fig.update_layout(
         title=trade_label,
         template='plotly_dark',
+        font=dict(size=14),
         height=chart_height,
         hovermode='x unified',
         legend=dict(
@@ -557,7 +558,7 @@ def create_trade_chart(df, trade_label, show_all_exits=False, market_hours_only=
             xanchor='left',
             x=1.05,
             bgcolor='rgba(0,0,0,0)',
-            font=dict(size=11),
+            font=dict(size=13),
         ),
         margin=dict(l=60, r=180, t=60, b=40)
     )
