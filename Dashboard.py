@@ -506,6 +506,19 @@ def create_trade_chart(df, trade_label, show_all_exits=False, market_hours_only=
             row=2, col=1, secondary_y=True
         )
 
+        # Avg(RSI) 10-min average line (if available)
+        if 'rsi_10min_avg' in df.columns and df['rsi_10min_avg'].notna().any():
+            fig.add_trace(
+                go.Scatter(
+                    x=df['time'],
+                    y=df['rsi_10min_avg'],
+                    name='Avg(RSI)',
+                    line=dict(color='#FF9800', width=2, dash='dot'),
+                    hovertemplate='Avg(RSI): %{y:.1f}<extra></extra>'
+                ),
+                row=2, col=1, secondary_y=True
+            )
+
         # RSI reference lines on secondary y-axis
         # Use scatter traces for reference lines since add_hline doesn't support secondary_y
         time_range = [df['time'].iloc[0], df['time'].iloc[-1]]
@@ -962,6 +975,9 @@ def main():
 
         if 'rsi' in matrix_df.columns:
             matrix_df['rsi'] = matrix_df['rsi'].apply(lambda x: f"{x:.1f}" if pd.notna(x) else "")
+
+        if 'rsi_10min_avg' in matrix_df.columns:
+            matrix_df['rsi_10min_avg'] = matrix_df['rsi_10min_avg'].apply(lambda x: f"{x:.1f}" if pd.notna(x) else "")
 
         st.dataframe(matrix_df, use_container_width=True, hide_index=True)
     else:

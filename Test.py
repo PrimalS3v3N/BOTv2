@@ -629,7 +629,7 @@ class TrackingMatrix:
     def add_record(self, timestamp, stock_price, option_price, volume, holding=True,
                    stop_loss=np.nan, stop_loss_mode=None, vwap=np.nan, ema_30=np.nan,
                    stock_high=np.nan, stock_low=np.nan, ewo=np.nan, ewo_15min_avg=np.nan,
-                   rsi=np.nan):
+                   rsi=np.nan, rsi_10min_avg=np.nan):
         """Add a tracking record."""
         pnl_pct = self.position.get_pnl_pct(option_price) if holding else np.nan
 
@@ -660,6 +660,7 @@ class TrackingMatrix:
             'ewo': ewo,
             'ewo_15min_avg': ewo_15min_avg,
             'rsi': rsi,
+            'rsi_10min_avg': rsi_10min_avg,
         }
 
         self.records.append(record)
@@ -879,23 +880,23 @@ class Backtest:
                 DD_rsi_reentry = DD_config.get('rsi_reentry_threshold', 57)
 
                 if DD_delay_enabled and DD_result['DD_reason'] == 'OverBought':
-                    # Scan forward for RSI reentry point (<= threshold)
+                    # Scan forward for Avg(RSI) reentry point (<= threshold)
                     new_entry_idx = None
                     for scan_idx in range(entry_idx + 1, len(DD_stock_data)):
                         scan_bar = DD_stock_data.iloc[scan_idx]
-                        scan_rsi = scan_bar.get('rsi', np.nan)
+                        scan_rsi_avg = scan_bar.get('rsi_10min_avg', np.nan)
                         scan_time = DD_stock_data.index[scan_idx]
 
                         # Stop scanning at market close
                         if scan_time.time() >= dt.time(15, 55):
                             break
 
-                        if not np.isnan(scan_rsi) and scan_rsi <= DD_rsi_reentry:
+                        if not np.isnan(scan_rsi_avg) and scan_rsi_avg <= DD_rsi_reentry:
                             new_entry_idx = scan_idx
                             break
 
                     if new_entry_idx is not None:
-                        # Delayed entry - RSI dropped below reentry threshold
+                        # Delayed entry - Avg(RSI) dropped below reentry threshold
                         new_entry_bar = stock_data.iloc[new_entry_idx]
                         new_entry_time = stock_data.index[new_entry_idx]
                         new_entry_stock_price = new_entry_bar['close']
@@ -921,9 +922,9 @@ class Backtest:
                         matrix = TrackingMatrix(position)
                         self._simulate_position(position, matrix, stock_data, signal, new_entry_idx, new_entry_stock_price)
 
-                        reentry_rsi = DD_stock_data.iloc[new_entry_idx].get('rsi', np.nan)
+                        reentry_rsi_avg = DD_stock_data.iloc[new_entry_idx].get('rsi_10min_avg', np.nan)
                         print(f"    RSI Overbought delay: entry at {new_entry_time.strftime('%H:%M')} "
-                              f"(RSI: {DD_rsi:.1f} -> {reentry_rsi:.1f})")
+                              f"(RSI: {DD_rsi:.1f} -> Avg(RSI): {reentry_rsi_avg:.1f})")
                         return position, matrix
                     else:
                         # No reentry found - track data through end of day for analysis
@@ -940,28 +941,28 @@ class Backtest:
                         matrix = TrackingMatrix(position)
                         self._simulate_position(position, matrix, stock_data, signal, entry_idx, entry_stock_price)
 
-                        print(f"    RSI Overbought: no reentry below {DD_rsi_reentry} found, tracking through EOD")
+                        print(f"    RSI Overbought: no Avg(RSI) reentry below {DD_rsi_reentry} found, tracking through EOD")
                         return position, matrix
                 elif DD_config.get('delay_on_oversold', True) and DD_result['DD_reason'] == 'OverSold':
                     DD_rsi_reentry_os = DD_config.get('rsi_reentry_threshold_oversold', 43)
 
-                    # Scan forward for RSI reentry point (>= threshold)
+                    # Scan forward for Avg(RSI) reentry point (>= threshold)
                     new_entry_idx = None
                     for scan_idx in range(entry_idx + 1, len(DD_stock_data)):
                         scan_bar = DD_stock_data.iloc[scan_idx]
-                        scan_rsi = scan_bar.get('rsi', np.nan)
+                        scan_rsi_avg = scan_bar.get('rsi_10min_avg', np.nan)
                         scan_time = DD_stock_data.index[scan_idx]
 
                         # Stop scanning at market close
                         if scan_time.time() >= dt.time(15, 55):
                             break
 
-                        if not np.isnan(scan_rsi) and scan_rsi >= DD_rsi_reentry_os:
+                        if not np.isnan(scan_rsi_avg) and scan_rsi_avg >= DD_rsi_reentry_os:
                             new_entry_idx = scan_idx
                             break
 
                     if new_entry_idx is not None:
-                        # Delayed entry - RSI rose above reentry threshold
+                        # Delayed entry - Avg(RSI) rose above reentry threshold
                         new_entry_bar = stock_data.iloc[new_entry_idx]
                         new_entry_time = stock_data.index[new_entry_idx]
                         new_entry_stock_price = new_entry_bar['close']
@@ -987,9 +988,9 @@ class Backtest:
                         matrix = TrackingMatrix(position)
                         self._simulate_position(position, matrix, stock_data, signal, new_entry_idx, new_entry_stock_price)
 
-                        reentry_rsi = DD_stock_data.iloc[new_entry_idx].get('rsi', np.nan)
+                        reentry_rsi_avg = DD_stock_data.iloc[new_entry_idx].get('rsi_10min_avg', np.nan)
                         print(f"    RSI Oversold delay: entry at {new_entry_time.strftime('%H:%M')} "
-                              f"(RSI: {DD_rsi:.1f} -> {reentry_rsi:.1f})")
+                              f"(RSI: {DD_rsi:.1f} -> Avg(RSI): {reentry_rsi_avg:.1f})")
                         return position, matrix
                     else:
                         # No reentry found - track data through end of day for analysis
@@ -1006,7 +1007,7 @@ class Backtest:
                         matrix = TrackingMatrix(position)
                         self._simulate_position(position, matrix, stock_data, signal, entry_idx, entry_stock_price)
 
-                        print(f"    RSI Oversold: no reentry above {DD_rsi_reentry_os} found, tracking through EOD")
+                        print(f"    RSI Oversold: no Avg(RSI) reentry above {DD_rsi_reentry_os} found, tracking through EOD")
                         return position, matrix
                 else:
                     # DD rejection with delay disabled
@@ -1079,6 +1080,7 @@ class Backtest:
             ewo = bar.get('ewo', np.nan)
             ewo_15min_avg = bar.get('ewo_15min_avg', np.nan)
             rsi = bar.get('rsi', np.nan)
+            rsi_10min_avg = bar.get('rsi_10min_avg', np.nan)
 
             current_days_to_expiry = max(0, days_to_expiry - (timestamp.date() - position.entry_time.date()).days)
 
@@ -1139,7 +1141,8 @@ class Backtest:
                     stock_low=stock_low,
                     ewo=ewo,
                     ewo_15min_avg=ewo_15min_avg,
-                    rsi=rsi
+                    rsi=rsi,
+                    rsi_10min_avg=rsi_10min_avg
                 )
 
                 # Check for overbought/oversold instant exit at entry bar
@@ -1184,7 +1187,8 @@ class Backtest:
                     stock_low=stock_low,
                     ewo=ewo,
                     ewo_15min_avg=ewo_15min_avg,
-                    rsi=rsi
+                    rsi=rsi,
+                    rsi_10min_avg=rsi_10min_avg
                 )
 
         # Close at end of data if still open
