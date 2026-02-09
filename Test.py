@@ -627,8 +627,9 @@ class TrackingMatrix:
         self.records = []
 
     def add_record(self, timestamp, stock_price, option_price, volume, holding=True,
-                   stop_loss=np.nan, stop_loss_mode=None, vwap=np.nan, ema_30=np.nan,
-                   stock_high=np.nan, stock_low=np.nan, ewo=np.nan, ewo_15min_avg=np.nan,
+                   stop_loss=np.nan, stop_loss_mode=None, vwap=np.nan, ema_20=np.nan,
+                   ema_30=np.nan, vwap_ema_avg=np.nan, stock_high=np.nan, stock_low=np.nan,
+                   ewo=np.nan, ewo_15min_avg=np.nan,
                    rsi=np.nan, rsi_10min_avg=np.nan):
         """Add a tracking record."""
         pnl_pct = self.position.get_pnl_pct(option_price) if holding else np.nan
@@ -656,7 +657,9 @@ class TrackingMatrix:
             'stop_loss_mode': stop_loss_mode,
             # Technical indicators
             'vwap': vwap,
+            'ema_20': ema_20,
             'ema_30': ema_30,
+            'vwap_ema_avg': vwap_ema_avg,
             'ewo': ewo,
             'ewo_15min_avg': ewo_15min_avg,
             'rsi': rsi,
@@ -1123,7 +1126,9 @@ class Backtest:
 
             # Get indicator values for this bar
             vwap = bar.get('vwap', np.nan)
+            ema_20 = bar.get('ema_20', np.nan)
             ema_30 = bar.get('ema_30', np.nan)
+            vwap_ema_avg = bar.get('vwap_ema_avg', np.nan)
             ewo = bar.get('ewo', np.nan)
             ewo_15min_avg = bar.get('ewo_15min_avg', np.nan)
             rsi = bar.get('rsi', np.nan)
@@ -1183,7 +1188,9 @@ class Backtest:
                     stop_loss=SL_price,
                     stop_loss_mode=SL_mode,
                     vwap=vwap,
+                    ema_20=ema_20,
                     ema_30=ema_30,
+                    vwap_ema_avg=vwap_ema_avg,
                     stock_high=stock_high,
                     stock_low=stock_low,
                     ewo=ewo,
@@ -1238,7 +1245,9 @@ class Backtest:
                     stop_loss=np.nan,
                     stop_loss_mode=None,
                     vwap=vwap,
+                    ema_20=ema_20,
                     ema_30=ema_30,
+                    vwap_ema_avg=vwap_ema_avg,
                     stock_high=stock_high,
                     stock_low=stock_low,
                     ewo=ewo,

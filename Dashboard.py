@@ -38,6 +38,7 @@ COLORS = {
     # Stop loss tracking
     'ema_20': '#29B6F6',          # Light Blue
     'ema_30': '#AB47BC',          # Purple
+    'vwap_ema_avg': '#FFEB3B',    # Yellow
     'stop_loss_line': '#00C853',  # Green (changed from red)
     'sl_c1': '#FFD54F',           # Amber (conditional trailing)
     'sl_c2': '#FF8A65',           # Deep Orange (EMA/VWAP bearish)
@@ -212,15 +213,41 @@ def create_trade_chart(df, trade_label, show_all_exits=False, market_hours_only=
             row=1, col=1, secondary_y=False
         )
 
-    # EMA (left y-axis) - orange
+    # EMA 20 (left y-axis) - light blue
+    if 'ema_20' in df.columns and df['ema_20'].notna().any():
+        fig.add_trace(
+            go.Scatter(
+                x=df['time'],
+                y=df['ema_20'],
+                name='EMA 20',
+                line=dict(color=COLORS['ema_20'], width=1.5, dash='dot'),
+                hovertemplate='EMA 20: $%{y:.2f}<extra></extra>'
+            ),
+            row=1, col=1, secondary_y=False
+        )
+
+    # EMA 30 (left y-axis) - purple
     if 'ema_30' in df.columns and df['ema_30'].notna().any():
         fig.add_trace(
             go.Scatter(
                 x=df['time'],
                 y=df['ema_30'],
-                name='EMA',
-                line=dict(color='#FF9800', width=1.5, dash='dot'),
-                hovertemplate='EMA: $%{y:.2f}<extra></extra>'
+                name='EMA 30',
+                line=dict(color=COLORS['ema_30'], width=1.5, dash='dot'),
+                hovertemplate='EMA 30: $%{y:.2f}<extra></extra>'
+            ),
+            row=1, col=1, secondary_y=False
+        )
+
+    # VWAP-EMA Average (left y-axis) - yellow
+    if 'vwap_ema_avg' in df.columns and df['vwap_ema_avg'].notna().any():
+        fig.add_trace(
+            go.Scatter(
+                x=df['time'],
+                y=df['vwap_ema_avg'],
+                name='(VWAP+EMA)/2',
+                line=dict(color='#FFEB3B', width=1.5, dash='dashdot'),
+                hovertemplate='(VWAP+EMA)/2: $%{y:.2f}<extra></extra>'
             ),
             row=1, col=1, secondary_y=False
         )
@@ -902,6 +929,49 @@ def main():
     row2[5].metric("TBD", "1")
     row2[6].metric("TBD", "1")
 
+    # EMA + VWAP Dataset section
+    st.subheader("EMA + VWAP Dataset")
+
+    ema_vwap_cols = ['timestamp', 'true_price', 'vwap', 'ema_20', 'ema_30', 'vwap_ema_avg']
+    ema_vwap_available = [c for c in ema_vwap_cols if c in df.columns]
+
+    if len(ema_vwap_available) > 1:
+        ev_df = df[ema_vwap_available].copy()
+
+        # Filter based on market hours toggle
+        if market_hours_only and 'timestamp' in ev_df.columns:
+            import datetime as dt
+            ev_df['_time'] = ev_df['timestamp'].apply(parse_time)
+            ev_df = ev_df[
+                (ev_df['_time'].dt.time >= dt.time(9, 0)) &
+                (ev_df['_time'].dt.time <= dt.time(16, 0))
+            ]
+            ev_df = ev_df.drop(columns=['_time'])
+        elif not market_hours_only and 'holding' in df.columns:
+            ev_df = ev_df[df['holding'] == True]
+
+        # Add computed spread/signal columns from raw numeric data before formatting
+        if 'ema_20' in ev_df.columns and 'vwap' in ev_df.columns:
+            ev_df['ema20_vwap_spread'] = ev_df['ema_20'] - ev_df['vwap']
+        if 'ema_30' in ev_df.columns and 'vwap' in ev_df.columns:
+            ev_df['ema30_vwap_spread'] = ev_df['ema_30'] - ev_df['vwap']
+        if 'ema_20' in ev_df.columns and 'ema_30' in ev_df.columns:
+            ev_df['ema_cross'] = ev_df['ema_20'] - ev_df['ema_30']
+
+        # Format price columns as currency
+        for col in ['true_price', 'vwap', 'ema_20', 'ema_30', 'vwap_ema_avg']:
+            if col in ev_df.columns:
+                ev_df[col] = ev_df[col].apply(lambda x: f"${x:.2f}" if pd.notna(x) else "")
+
+        # Format spread columns as signed values
+        for col in ['ema20_vwap_spread', 'ema30_vwap_spread', 'ema_cross']:
+            if col in ev_df.columns:
+                ev_df[col] = ev_df[col].apply(lambda x: f"{x:+.3f}" if pd.notna(x) else "")
+
+        st.dataframe(ev_df, use_container_width=True, hide_index=True)
+    else:
+        st.info("No EMA/VWAP data available. Run a backtest to generate data.")
+
     # Data table
     st.subheader("Trade Details")
     table_df = get_trade_table(df)
@@ -939,7 +1009,7 @@ def main():
             matrix_df = matrix_df[df['holding'] == True]
 
         # Format numeric columns
-        for col in ['stock_price', 'stock_high', 'stock_low', 'true_price', 'option_price', 'stop_loss', 'vwap', 'ema_20', 'ema_30']:
+        for col in ['stock_price', 'stock_high', 'stock_low', 'true_price', 'option_price', 'stop_loss', 'vwap', 'ema_20', 'ema_30', 'vwap_ema_avg']:
             if col in matrix_df.columns:
                 matrix_df[col] = matrix_df[col].apply(lambda x: f"${x:.2f}" if pd.notna(x) else "")
 
