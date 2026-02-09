@@ -186,6 +186,14 @@ BACKTEST_CONFIG = {
         'rsi_reentry_threshold': 57,            # Buy when RSI drops to/below this level after overbought
     },
 
+    # Closure - Peak: RSI-based exit in last 30 minutes of trading day
+    'closure_peak': {
+        'enabled': True,
+        'rsi_call_threshold': 87,              # Sell CALL contracts when RSI >= this
+        'rsi_put_threshold': 13,               # Sell PUT contracts when RSI <= this
+        'minutes_before_close': 30,            # Activate in last N minutes (15:30+)
+    },
+
     # --- Unused backtest settings (commented out for review) ---
     # 'position_size_pct': 0.02,                   # 2% per trade
     # 'max_positions': 5,                          # Max concurrent positions

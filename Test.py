@@ -991,6 +991,17 @@ class Backtest:
         SL_breakeven_min_minutes = SL_config.get('breakeven_min_minutes', 30)
         SL_reversal_exit_enabled = SL_config.get('reversal_exit_enabled', True)
 
+        # Get Closure - Peak settings from config
+        CP_config = self.config.get('closure_peak', {})
+        CP_enabled = CP_config.get('enabled', True)
+        CP_rsi_call = CP_config.get('rsi_call_threshold', 87)
+        CP_rsi_put = CP_config.get('rsi_put_threshold', 13)
+        CP_minutes = CP_config.get('minutes_before_close', 30)
+        # Calculate closure window start time (e.g., 15:30 for 30 mins before 16:00)
+        CP_start_hour = 15
+        CP_start_minute = 60 - CP_minutes
+        CP_start_time = dt.time(CP_start_hour, CP_start_minute)
+
         # Initialize stop loss manager
         SL_manager = StopLoss(
             entry_price=position.entry_price,
@@ -1098,6 +1109,15 @@ class Backtest:
                     exit_reason = self._format_exit_reason(f'stop_loss_{SL_mode}')
                     position.close(exit_price, timestamp, exit_reason)
 
+                # Closure - Peak: RSI-based exit in last 30 minutes of trading day
+                elif CP_enabled and not position.is_closed and not np.isnan(rsi) and timestamp.time() >= CP_start_time:
+                    if position.option_type.upper() in ['CALL', 'CALLS', 'C'] and rsi >= CP_rsi_call:
+                        exit_price = option_price * (1 - self.slippage_pct)
+                        position.close(exit_price, timestamp, 'Closure - Peak')
+                    elif position.option_type.upper() in ['PUT', 'PUTS', 'P'] and rsi <= CP_rsi_put:
+                        exit_price = option_price * (1 - self.slippage_pct)
+                        position.close(exit_price, timestamp, 'Closure - Peak')
+
                 # Exit at market close
                 elif timestamp.time() >= dt.time(15, 55) and not position.is_closed:
                     exit_price = option_price * (1 - self.slippage_pct)
@@ -1135,6 +1155,7 @@ class Backtest:
         - stop_loss_breakeven -> "SL - Breakeven"
         - stop_loss_trailing -> "SL - Trailing"
         - stop_loss_reversal -> "SL - Reversal"
+        - closure_peak -> "Closure - Peak"
         - market_close -> "Market Close"
         """
         if reason is None:
@@ -1149,6 +1170,10 @@ class Backtest:
             return 'SL - Trailing'
         elif reason == 'stop_loss_reversal':
             return 'SL - Reversal'
+
+        # Closure - Peak
+        elif reason == 'closure_peak':
+            return 'Closure - Peak'
 
         # Market close
         elif reason == 'market_close':
