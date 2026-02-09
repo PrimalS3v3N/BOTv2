@@ -38,6 +38,7 @@ COLORS = {
     # Stop loss tracking
     'ema_20': '#29B6F6',          # Light Blue
     'ema_30': '#AB47BC',          # Purple
+    'vwap_ema_avg': '#FFEB3B',    # Yellow
     'stop_loss_line': '#00C853',  # Green (changed from red)
     'sl_c1': '#FFD54F',           # Amber (conditional trailing)
     'sl_c2': '#FF8A65',           # Deep Orange (EMA/VWAP bearish)
@@ -221,6 +222,19 @@ def create_trade_chart(df, trade_label, show_all_exits=False, market_hours_only=
                 name='EMA',
                 line=dict(color='#FF9800', width=1.5, dash='dot'),
                 hovertemplate='EMA: $%{y:.2f}<extra></extra>'
+            ),
+            row=1, col=1, secondary_y=False
+        )
+
+    # VWAP-EMA Average (left y-axis) - yellow
+    if 'vwap_ema_avg' in df.columns and df['vwap_ema_avg'].notna().any():
+        fig.add_trace(
+            go.Scatter(
+                x=df['time'],
+                y=df['vwap_ema_avg'],
+                name='(VWAP+EMA)/2',
+                line=dict(color='#FFEB3B', width=1.5, dash='dashdot'),
+                hovertemplate='(VWAP+EMA)/2: $%{y:.2f}<extra></extra>'
             ),
             row=1, col=1, secondary_y=False
         )
@@ -939,7 +953,7 @@ def main():
             matrix_df = matrix_df[df['holding'] == True]
 
         # Format numeric columns
-        for col in ['stock_price', 'stock_high', 'stock_low', 'true_price', 'option_price', 'stop_loss', 'vwap', 'ema_20', 'ema_30']:
+        for col in ['stock_price', 'stock_high', 'stock_low', 'true_price', 'option_price', 'stop_loss', 'vwap', 'ema_20', 'ema_30', 'vwap_ema_avg']:
             if col in matrix_df.columns:
                 matrix_df[col] = matrix_df[col].apply(lambda x: f"${x:.2f}" if pd.notna(x) else "")
 

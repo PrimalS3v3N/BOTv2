@@ -279,7 +279,7 @@ DATAFRAME_COLUMNS = {
         'option_price', 'volume', 'holding', 'entry_price',
         'pnl', 'pnl_pct', 'highest_price', 'lowest_price', 'minutes_held',
         'stop_loss', 'stop_loss_mode',
-        'vwap', 'ema_30', 'ewo', 'ewo_15min_avg', 'rsi', 'rsi_10min_avg',
+        'vwap', 'ema_30', 'vwap_ema_avg', 'ewo', 'ewo_15min_avg', 'rsi', 'rsi_10min_avg',
     ],
 
     # Metadata columns appended to tracking matrix (Test.py)
@@ -294,7 +294,7 @@ DATAFRAME_COLUMNS = {
         'timestamp', 'holding', 'stock_price', 'stock_high', 'stock_low',
         'true_price', 'option_price', 'pnl_pct',
         'stop_loss', 'stop_loss_mode', 'sl_cushion',
-        'vwap', 'ema_20', 'ema_30', 'ewo', 'ewo_15min_avg', 'rsi', 'rsi_10min_avg',
+        'vwap', 'ema_20', 'ema_30', 'vwap_ema_avg', 'ewo', 'ewo_15min_avg', 'rsi', 'rsi_10min_avg',
         'SL_C1', 'SL_C2',
     ],
 }
