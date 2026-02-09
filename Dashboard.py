@@ -354,7 +354,7 @@ def create_trade_chart(df, trade_label, show_all_exits=False, market_hours_only=
                 text=[str(exit_reason)],
                 textposition='top center',
                 textfont=dict(size=10, color=COLORS['exit']),
-                hovertemplate=f'EXIT: {exit_reason}<br>${{y:.2f}}<extra></extra>'
+                hovertemplate=f'EXIT: {exit_reason}<br>$%{{y:.2f}}<extra></extra>'
             ),
             row=1, col=1, secondary_y=True
         )
@@ -387,7 +387,7 @@ def create_trade_chart(df, trade_label, show_all_exits=False, market_hours_only=
                     text=[signal_label],
                     textposition='bottom center',
                     textfont=dict(size=9, color='#FF9800'),
-                    hovertemplate=f'{signal_name}<br>${{y:.2f}}<extra></extra>'
+                    hovertemplate=f'{signal_name}<br>$%{{y:.2f}}<extra></extra>'
                 ),
                 row=1, col=1, secondary_y=True
             )
@@ -436,7 +436,7 @@ def create_trade_chart(df, trade_label, show_all_exits=False, market_hours_only=
                         mode='markers',
                         name=sig_type.replace('_', ' ').title(),
                         marker=dict(symbol=symbol, size=10, color=color, opacity=0.7),
-                        hovertemplate=f'{sig_type.replace("_", " ").title()}<br>${{y:.2f}}<extra></extra>'
+                        hovertemplate=f'{sig_type.replace("_", " ").title()}<br>$%{{y:.2f}}<extra></extra>'
                     ),
                     row=1, col=1, secondary_y=True
                 )
