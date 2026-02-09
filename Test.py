@@ -1226,7 +1226,7 @@ class Backtest:
                 # Exit at market close
                 elif timestamp.time() >= dt.time(15, 55) and not position.is_closed:
                     exit_price = option_price * (1 - self.slippage_pct)
-                    position.close(exit_price, timestamp, 'Market Close')
+                    position.close(exit_price, timestamp, 'Closure-Market')
             else:
                 # Record tracking data for non-holding periods (pre-entry or post-exit)
                 matrix.add_record(
@@ -1250,7 +1250,7 @@ class Backtest:
         # Close at end of data if still open
         if not position.is_closed:
             exit_price = position.current_price * (1 - self.slippage_pct)
-            position.close(exit_price, stock_data.index[-1], 'Market Close')
+            position.close(exit_price, stock_data.index[-1], 'Closure-Market')
 
     def _format_exit_reason(self, reason):
         """
@@ -1262,7 +1262,7 @@ class Backtest:
         - stop_loss_trailing -> "SL - Trailing"
         - stop_loss_reversal -> "SL - Reversal"
         - closure_peak -> "Closure - Peak"
-        - market_close -> "Market Close"
+        - market_close -> "Closure-Market"
         """
         if reason is None:
             return 'Unknown'
@@ -1281,9 +1281,9 @@ class Backtest:
         elif reason == 'closure_peak':
             return 'Closure - Peak'
 
-        # Market close
+        # Closure-Market
         elif reason == 'market_close':
-            return 'Market Close'
+            return 'Closure-Market'
 
         # Return original if no mapping found
         return reason
