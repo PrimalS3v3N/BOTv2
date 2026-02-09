@@ -628,7 +628,7 @@ class TrackingMatrix:
 
     def add_record(self, timestamp, stock_price, option_price, volume, holding=True,
                    stop_loss=np.nan, stop_loss_mode=None, vwap=np.nan, ema_30=np.nan,
-                   vwap_ema_avg=np.nan, stock_high=np.nan, stock_low=np.nan,
+                   vwap_ema_avg=np.nan, emavwap=np.nan, stock_high=np.nan, stock_low=np.nan,
                    ewo=np.nan, ewo_15min_avg=np.nan,
                    rsi=np.nan, rsi_10min_avg=np.nan):
         """Add a tracking record."""
@@ -659,6 +659,7 @@ class TrackingMatrix:
             'vwap': vwap,
             'ema_30': ema_30,
             'vwap_ema_avg': vwap_ema_avg,
+            'emavwap': emavwap,
             'ewo': ewo,
             'ewo_15min_avg': ewo_15min_avg,
             'rsi': rsi,
@@ -1127,6 +1128,7 @@ class Backtest:
             vwap = bar.get('vwap', np.nan)
             ema_30 = bar.get('ema_30', np.nan)
             vwap_ema_avg = bar.get('vwap_ema_avg', np.nan)
+            emavwap = bar.get('emavwap', np.nan)
             ewo = bar.get('ewo', np.nan)
             ewo_15min_avg = bar.get('ewo_15min_avg', np.nan)
             rsi = bar.get('rsi', np.nan)
@@ -1188,6 +1190,7 @@ class Backtest:
                     vwap=vwap,
                     ema_30=ema_30,
                     vwap_ema_avg=vwap_ema_avg,
+                    emavwap=emavwap,
                     stock_high=stock_high,
                     stock_low=stock_low,
                     ewo=ewo,
@@ -1244,6 +1247,7 @@ class Backtest:
                     vwap=vwap,
                     ema_30=ema_30,
                     vwap_ema_avg=vwap_ema_avg,
+                    emavwap=emavwap,
                     stock_high=stock_high,
                     stock_low=stock_low,
                     ewo=ewo,
