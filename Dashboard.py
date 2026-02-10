@@ -150,7 +150,7 @@ def find_entry_exit(df):
     return entry_row, exit_row, opt_col
 
 
-def create_trade_chart(df, trade_label, show_all_exits=False, market_hours_only=False, show_ewo=True, show_rsi=True, delay_info=None):
+def create_trade_chart(df, trade_label, show_all_exits=False, market_hours_only=False, show_ewo=True, show_rsi=True, show_supertrend=False, delay_info=None):
     """Create dual-axis chart with stock/option prices, error bars, and combined EWO/RSI subplot.
 
     Args:
@@ -254,6 +254,54 @@ def create_trade_chart(df, trade_label, show_all_exits=False, market_hours_only=
             ),
             row=1, col=1, secondary_y=False
         )
+
+    # Supertrend (left y-axis) - color-coded by direction
+    if show_supertrend and 'supertrend' in df.columns and df['supertrend'].notna().any():
+        if 'supertrend_direction' in df.columns:
+            # Split into bullish (green) and bearish (red) segments for color coding
+            st_up = df[df['supertrend_direction'] == 1]
+            st_down = df[df['supertrend_direction'] == -1]
+
+            if not st_up.empty:
+                fig.add_trace(
+                    go.Scatter(
+                        x=st_up['time'],
+                        y=st_up['supertrend'],
+                        name='ST (Bull)',
+                        mode='markers+lines',
+                        line=dict(color='#00C853', width=2),
+                        marker=dict(size=3, color='#00C853'),
+                        connectgaps=False,
+                        hovertemplate='Supertrend: $%{y:.2f} (Bull)<extra></extra>'
+                    ),
+                    row=1, col=1, secondary_y=False
+                )
+            if not st_down.empty:
+                fig.add_trace(
+                    go.Scatter(
+                        x=st_down['time'],
+                        y=st_down['supertrend'],
+                        name='ST (Bear)',
+                        mode='markers+lines',
+                        line=dict(color='#FF1744', width=2),
+                        marker=dict(size=3, color='#FF1744'),
+                        connectgaps=False,
+                        hovertemplate='Supertrend: $%{y:.2f} (Bear)<extra></extra>'
+                    ),
+                    row=1, col=1, secondary_y=False
+                )
+        else:
+            # Fallback: single color if no direction data
+            fig.add_trace(
+                go.Scatter(
+                    x=df['time'],
+                    y=df['supertrend'],
+                    name='Supertrend',
+                    line=dict(color=COLORS['supertrend'], width=2),
+                    hovertemplate='Supertrend: $%{y:.2f}<extra></extra>'
+                ),
+                row=1, col=1, secondary_y=False
+            )
 
     # True Price (left y-axis) - blue with high/low error bars
     if 'true_price' in df.columns and df['true_price'].notna().any():
@@ -862,6 +910,7 @@ def main():
         show_all_exits = st.toggle("Show All Exit Signals", value=False)
         show_ewo = st.toggle("Show EWO Graph", value=True)
         show_rsi = st.toggle("Show RSI Graph", value=True)
+        show_supertrend = st.toggle("Show Supertrend", value=False, help="Overlay Supertrend indicator on main chart")
 
         st.markdown("---")
 
@@ -905,7 +954,7 @@ def main():
         }
 
     # Chart first (no summary above)
-    fig = create_trade_chart(df, trade_label, show_all_exits, market_hours_only, show_ewo, show_rsi, delay_info)
+    fig = create_trade_chart(df, trade_label, show_all_exits, market_hours_only, show_ewo, show_rsi, show_supertrend, delay_info)
     if fig:
         st.plotly_chart(fig, use_container_width=True)
     else:
@@ -985,7 +1034,7 @@ def main():
             matrix_df = matrix_df[df['holding'] == True]
 
         # Format numeric columns
-        for col in ['stock_price', 'stock_high', 'stock_low', 'true_price', 'option_price', 'stop_loss', 'vwap', 'ema_20', 'ema_30', 'vwap_ema_avg', 'emavwap']:
+        for col in ['stock_price', 'stock_high', 'stock_low', 'true_price', 'option_price', 'stop_loss', 'vwap', 'ema_20', 'ema_30', 'vwap_ema_avg', 'emavwap', 'supertrend']:
             if col in matrix_df.columns:
                 matrix_df[col] = matrix_df[col].apply(lambda x: f"${x:.2f}" if pd.notna(x) else "")
 

@@ -161,7 +161,101 @@ def RSI(df, column='close', period=14):
     return rsi
 
 
-def add_indicators(df, ema_period=30, ewo_fast=5, ewo_slow=35, ewo_avg_period=15, rsi_period=14, rsi_avg_period=10):
+def Supertrend(df, atr_period=10, multiplier=3.0):
+    """
+    Calculate Supertrend indicator.
+
+    Supertrend uses ATR (Average True Range) to create dynamic support/resistance
+    bands around the price. The indicator flips between upper and lower bands
+    based on trend direction.
+
+    - When price closes above the upper band: Uptrend (bullish)
+    - When price closes below the lower band: Downtrend (bearish)
+
+    Args:
+        df: DataFrame with 'high', 'low', 'close' columns
+        atr_period: Period for ATR calculation (default: 10)
+        multiplier: ATR multiplier for band width (default: 3.0)
+
+    Returns:
+        tuple: (supertrend Series, direction Series)
+            - supertrend: the Supertrend line values
+            - direction: 1 for uptrend (bullish), -1 for downtrend (bearish)
+    """
+    if not all(col in df.columns for col in ['high', 'low', 'close']):
+        return pd.Series(index=df.index, dtype=float), pd.Series(index=df.index, dtype=float)
+
+    high = df['high']
+    low = df['low']
+    close = df['close']
+
+    # Calculate True Range and ATR
+    tr1 = high - low
+    tr2 = (high - close.shift(1)).abs()
+    tr3 = (low - close.shift(1)).abs()
+    true_range = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = true_range.ewm(span=atr_period, adjust=False).mean()
+
+    # HL2 (midpoint)
+    hl2 = (high + low) / 2
+
+    # Basic bands
+    basic_upper = hl2 + multiplier * atr
+    basic_lower = hl2 - multiplier * atr
+
+    # Initialize final bands and direction
+    final_upper = basic_upper.copy()
+    final_lower = basic_lower.copy()
+    supertrend = pd.Series(index=df.index, dtype=float)
+    direction = pd.Series(index=df.index, dtype=float)
+
+    for i in range(1, len(df)):
+        # Final upper band: use previous final upper if current basic upper is lower
+        # and previous close was above previous final upper
+        if basic_upper.iloc[i] < final_upper.iloc[i - 1] or close.iloc[i - 1] > final_upper.iloc[i - 1]:
+            final_upper.iloc[i] = basic_upper.iloc[i]
+        else:
+            final_upper.iloc[i] = final_upper.iloc[i - 1]
+
+        # Final lower band: use previous final lower if current basic lower is higher
+        # and previous close was below previous final lower
+        if basic_lower.iloc[i] > final_lower.iloc[i - 1] or close.iloc[i - 1] < final_lower.iloc[i - 1]:
+            final_lower.iloc[i] = basic_lower.iloc[i]
+        else:
+            final_lower.iloc[i] = final_lower.iloc[i - 1]
+
+    # Determine direction and supertrend line
+    # Start with initial direction based on first valid close vs bands
+    direction.iloc[0] = 1  # Assume uptrend initially
+
+    for i in range(1, len(df)):
+        prev_dir = direction.iloc[i - 1]
+
+        if prev_dir == 1:  # Was uptrend
+            if close.iloc[i] < final_lower.iloc[i]:
+                direction.iloc[i] = -1  # Flip to downtrend
+            else:
+                direction.iloc[i] = 1
+        else:  # Was downtrend
+            if close.iloc[i] > final_upper.iloc[i]:
+                direction.iloc[i] = 1  # Flip to uptrend
+            else:
+                direction.iloc[i] = -1
+
+        # Supertrend line follows lower band in uptrend, upper band in downtrend
+        if direction.iloc[i] == 1:
+            supertrend.iloc[i] = final_lower.iloc[i]
+        else:
+            supertrend.iloc[i] = final_upper.iloc[i]
+
+    # Set first value
+    supertrend.iloc[0] = final_lower.iloc[0] if direction.iloc[0] == 1 else final_upper.iloc[0]
+
+    return supertrend, direction
+
+
+def add_indicators(df, ema_period=30, ewo_fast=5, ewo_slow=35, ewo_avg_period=15, rsi_period=14, rsi_avg_period=10,
+                   supertrend_period=10, supertrend_multiplier=3.0):
     """
     Add all standard indicators to a DataFrame.
 
@@ -173,6 +267,8 @@ def add_indicators(df, ema_period=30, ewo_fast=5, ewo_slow=35, ewo_avg_period=15
         ewo_avg_period: Period for EWO rolling average (default: 15 for 15-min avg on 1-min data)
         rsi_period: Period for RSI calculation (default: 14)
         rsi_avg_period: Period for RSI rolling average (default: 10 for 10-min avg on 1-min data)
+        supertrend_period: ATR period for Supertrend (default: 10)
+        supertrend_multiplier: ATR multiplier for Supertrend bands (default: 3.0)
 
     Returns:
         DataFrame with added indicator columns:
@@ -184,6 +280,8 @@ def add_indicators(df, ema_period=30, ewo_fast=5, ewo_slow=35, ewo_avg_period=15
         - ewo_15min_avg: 15-minute rolling average of EWO
         - rsi: Relative Strength Index (0-100 scale)
         - rsi_10min_avg: 10-minute rolling average of RSI
+        - supertrend: Supertrend line value
+        - supertrend_direction: 1 (uptrend/bullish) or -1 (downtrend/bearish)
     """
     df = df.copy()
 
@@ -217,6 +315,11 @@ def add_indicators(df, ema_period=30, ewo_fast=5, ewo_slow=35, ewo_avg_period=15
 
     # Add EMAVWAP: (EMA + VWAP) / 2
     df['emavwap'] = (df['ema_30'] + df['vwap']) / 2
+
+    # Add Supertrend
+    df['supertrend'], df['supertrend_direction'] = Supertrend(
+        df, atr_period=supertrend_period, multiplier=supertrend_multiplier
+    )
 
     # Clean up temporary column
     df = df.drop(columns=['_true_price'])
@@ -436,6 +539,6 @@ def estimate_option_price_bs(stock_price, strike, option_type, days_to_expiry,
 
 
 # Export functions for use by other modules
-__all__ = ['EMA', 'VWAP', 'EWO', 'true_price', 'RSI', 'add_indicators',
+__all__ = ['EMA', 'VWAP', 'EWO', 'true_price', 'RSI', 'Supertrend', 'add_indicators',
            'black_scholes_call', 'black_scholes_put', 'black_scholes_price',
            'calculate_greeks', 'estimate_option_price_bs']

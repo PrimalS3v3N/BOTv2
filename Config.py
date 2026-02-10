@@ -176,6 +176,8 @@ BACKTEST_CONFIG = {
         'rsi_period': 14,                          # RSI calculation period
         'rsi_overbought': 70,                      # RSI overbought threshold
         'rsi_oversold': 30,                        # RSI oversold threshold
+        'supertrend_period': 10,                   # Supertrend ATR period (bars)
+        'supertrend_multiplier': 3.0,              # Supertrend ATR multiplier
     },
 
     # Due Diligence - pre-entry checks on indicators before buying
@@ -235,6 +237,7 @@ DATAFRAME_COLUMNS = {
         'pnl', 'pnl_pct', 'highest_price', 'lowest_price', 'minutes_held',
         'stop_loss', 'stop_loss_mode',
         'vwap', 'ema_30', 'vwap_ema_avg', 'emavwap', 'ewo', 'ewo_15min_avg', 'rsi', 'rsi_10min_avg',
+        'supertrend', 'supertrend_direction',
     ],
 
     # Metadata columns appended to tracking matrix (Test.py)
@@ -250,6 +253,7 @@ DATAFRAME_COLUMNS = {
         'true_price', 'option_price', 'pnl_pct',
         'stop_loss', 'stop_loss_mode', 'sl_cushion',
         'vwap', 'ema_20', 'ema_30', 'vwap_ema_avg', 'emavwap', 'ewo', 'ewo_15min_avg', 'rsi', 'rsi_10min_avg',
+        'supertrend', 'supertrend_direction',
         'SL_C1', 'SL_C2', 'SL_C3',
     ],
 }

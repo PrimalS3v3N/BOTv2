@@ -630,7 +630,8 @@ class TrackingMatrix:
                    stop_loss=np.nan, stop_loss_mode=None, vwap=np.nan, ema_30=np.nan,
                    vwap_ema_avg=np.nan, emavwap=np.nan, stock_high=np.nan, stock_low=np.nan,
                    ewo=np.nan, ewo_15min_avg=np.nan,
-                   rsi=np.nan, rsi_10min_avg=np.nan):
+                   rsi=np.nan, rsi_10min_avg=np.nan,
+                   supertrend=np.nan, supertrend_direction=np.nan):
         """Add a tracking record."""
         pnl_pct = self.position.get_pnl_pct(option_price) if holding else np.nan
 
@@ -664,6 +665,8 @@ class TrackingMatrix:
             'ewo_15min_avg': ewo_15min_avg,
             'rsi': rsi,
             'rsi_10min_avg': rsi_10min_avg,
+            'supertrend': supertrend,
+            'supertrend_direction': supertrend_direction,
         }
 
         self.records.append(record)
@@ -1085,8 +1088,14 @@ class Backtest:
         indicator_config = self.config.get('indicators', {})
         ema_period = indicator_config.get('ema_period', 30)
 
+        # Get supertrend settings from config
+        supertrend_period = indicator_config.get('supertrend_period', 10)
+        supertrend_multiplier = indicator_config.get('supertrend_multiplier', 3.0)
+
         # Add technical indicators to stock data
-        stock_data = Analysis.add_indicators(stock_data, ema_period=ema_period)
+        stock_data = Analysis.add_indicators(stock_data, ema_period=ema_period,
+                                             supertrend_period=supertrend_period,
+                                             supertrend_multiplier=supertrend_multiplier)
 
         # Get stop loss settings from config
         SL_config = self.config.get('stop_loss', {})
@@ -1145,6 +1154,8 @@ class Backtest:
             ewo_15min_avg = bar.get('ewo_15min_avg', np.nan)
             rsi = bar.get('rsi', np.nan)
             rsi_10min_avg = bar.get('rsi_10min_avg', np.nan)
+            st_value = bar.get('supertrend', np.nan)
+            st_direction = bar.get('supertrend_direction', np.nan)
 
             current_days_to_expiry = max(0, days_to_expiry - (timestamp.date() - position.entry_time.date()).days)
 
@@ -1240,7 +1251,9 @@ class Backtest:
                     ewo=ewo,
                     ewo_15min_avg=ewo_15min_avg,
                     rsi=rsi,
-                    rsi_10min_avg=rsi_10min_avg
+                    rsi_10min_avg=rsi_10min_avg,
+                    supertrend=st_value,
+                    supertrend_direction=st_direction
                 )
 
                 # Check for overbought/oversold instant exit at entry bar
@@ -1304,7 +1317,9 @@ class Backtest:
                     ewo=ewo,
                     ewo_15min_avg=ewo_15min_avg,
                     rsi=rsi,
-                    rsi_10min_avg=rsi_10min_avg
+                    rsi_10min_avg=rsi_10min_avg,
+                    supertrend=st_value,
+                    supertrend_direction=st_direction
                 )
 
         # Close at end of data if still open
