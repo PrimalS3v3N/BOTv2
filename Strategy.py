@@ -306,6 +306,135 @@ def CheckDueDiligence(DD_rsi, DD_option_type, DD_rsi_overbought=85, DD_rsi_overs
     }
 
 
+def _calc_fulfillment(value, zero_ref, target, overflow_cap):
+    """
+    Calculate fulfillment percentage for a single indicator.
+
+    Linear scale from 0% (at zero_ref) to 100% (at target), continuing
+    past 100% as overflow credit, capped at overflow_cap.
+
+    The formula is direction-agnostic: it works whether target > zero_ref
+    (indicator needs to rise, e.g. PUT RSI) or target < zero_ref
+    (indicator needs to fall, e.g. CALL RSI).
+
+    Args:
+        value: Current indicator value
+        zero_ref: Value where fulfillment = 0% (starting point, no progress)
+        target: Value where fulfillment = 100% (condition fully met)
+        overflow_cap: Maximum fulfillment % (e.g. 130)
+
+    Returns:
+        Fulfillment percentage (0 to overflow_cap), clamped at floor of 0.
+    """
+    target_distance = target - zero_ref
+    if target_distance == 0:
+        return overflow_cap if value == target else 0.0
+
+    progress = value - zero_ref
+    fulfillment = (progress / target_distance) * 100.0
+
+    return max(0.0, min(fulfillment, overflow_cap))
+
+
+def score_reentry_confidence(rsi, ewo, ewo_avg, minutes_elapsed, scoring_config, option_type):
+    """
+    Fulfillment-based adaptive reentry scoring.
+
+    Each indicator earns a fulfillment percentage:
+    - 0%   = no progress from starting reference
+    - 100% = target condition fully met
+    - >100% = overflow credit (compensates for lagging indicators)
+
+    Weighted average of all fulfillments must reach the confidence threshold
+    (default 100%) AND each individual component must meet the safety floor
+    (default 20%) to trigger entry.
+
+    Args:
+        rsi: Raw RSI value (instantaneous, not averaged)
+        ewo: Raw EWO value (instantaneous)
+        ewo_avg: EWO 15-minute average
+        minutes_elapsed: Minutes since DD rejection
+        scoring_config: Config dict from due_diligence.reentry_scoring
+        option_type: 'CALL', 'CALLS', 'C', 'PUT', 'PUTS', 'P'
+
+    Returns:
+        dict with:
+            - enter: True if reentry conditions are met
+            - confidence: Weighted average fulfillment %
+            - fulfillments: Dict of per-indicator fulfillment %
+            - safety_floor_passed: True if all components >= floor
+    """
+    is_put = option_type.upper() in ('PUT', 'PUTS', 'P')
+    direction_config = scoring_config.get('put' if is_put else 'call', {})
+
+    confidence_threshold = scoring_config.get('confidence_threshold', 100)
+    safety_floor = scoring_config.get('safety_floor', 20)
+
+    # Get per-indicator configs with defaults
+    rsi_cfg = direction_config.get('rsi', {})
+    ewo_cfg = direction_config.get('ewo', {})
+    ewo_avg_cfg = direction_config.get('ewo_avg', {})
+    time_cfg = direction_config.get('time_minutes', {})
+
+    # Calculate fulfillment for each indicator
+    rsi_f = _calc_fulfillment(
+        rsi,
+        rsi_cfg.get('zero_ref', 85 if not is_put else 15),
+        rsi_cfg.get('target', 30 if not is_put else 70),
+        rsi_cfg.get('overflow_cap', 130),
+    )
+
+    ewo_f = _calc_fulfillment(
+        ewo,
+        ewo_cfg.get('zero_ref', 0.5 if not is_put else -0.5),
+        ewo_cfg.get('target', 0),
+        ewo_cfg.get('overflow_cap', 130),
+    )
+
+    ewo_avg_f = _calc_fulfillment(
+        ewo_avg,
+        ewo_avg_cfg.get('zero_ref', 0.5 if not is_put else -0.5),
+        ewo_avg_cfg.get('target', 0),
+        ewo_avg_cfg.get('overflow_cap', 120),
+    )
+
+    time_f = _calc_fulfillment(
+        minutes_elapsed,
+        time_cfg.get('zero_ref', 0),
+        time_cfg.get('target', 15),
+        time_cfg.get('overflow_cap', 115),
+    )
+
+    # Get weights
+    w_rsi = rsi_cfg.get('weight', 1.5)
+    w_ewo = ewo_cfg.get('weight', 1.0)
+    w_ewo_avg = ewo_avg_cfg.get('weight', 0.5)
+    w_time = time_cfg.get('weight', 1.0)
+
+    total_weight = w_rsi + w_ewo + w_ewo_avg + w_time
+
+    # Weighted average
+    confidence = (w_rsi * rsi_f + w_ewo * ewo_f + w_ewo_avg * ewo_avg_f + w_time * time_f) / total_weight
+
+    # Safety floor check — no single indicator can be strongly adverse
+    fulfillments = {
+        'rsi': rsi_f,
+        'ewo': ewo_f,
+        'ewo_avg': ewo_avg_f,
+        'time': time_f,
+    }
+    safety_floor_passed = all(f >= safety_floor for f in fulfillments.values())
+
+    enter = confidence >= confidence_threshold and safety_floor_passed
+
+    return {
+        'enter': enter,
+        'confidence': confidence,
+        'fulfillments': fulfillments,
+        'safety_floor_passed': safety_floor_passed,
+    }
+
+
 """
 ================================================================================
 EXTERNAL - Module Interface
@@ -316,4 +445,4 @@ Modules: Config.py, Data.py, Analysis.py, Orders.py, Test.py
 import Config
 
 # Export for use by other modules
-__all__ = ['StopLoss', 'check_stop_loss', 'CheckDueDiligence']
+__all__ = ['StopLoss', 'check_stop_loss', 'CheckDueDiligence', 'score_reentry_confidence']

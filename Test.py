@@ -89,7 +89,7 @@ Modules: Config.py, Signal.py, Analysis.py, Strategy.py
 import Config
 import Signal
 import Analysis
-from Strategy import StopLoss, CheckDueDiligence
+from Strategy import StopLoss, CheckDueDiligence, score_reentry_confidence
 
 
 # =============================================================================
@@ -905,11 +905,16 @@ class Backtest:
                 DD_rsi_reentry = DD_config.get('rsi_reentry_threshold', 30)
 
                 if DD_delay_enabled and DD_result['DD_reason'] == 'OverBought':
-                    # Scan forward for Avg(RSI) reentry point (<= threshold) AND EWO negative AND EWO avg negative
+                    # Scan forward for reentry using fulfillment-based scoring
+                    DD_scoring_config = DD_config.get('reentry_scoring', {})
+                    DD_scoring_enabled = DD_scoring_config.get('enabled', True)
+                    DD_rejection_time = DD_stock_data.index[entry_idx]
+
                     new_entry_idx = None
+                    reentry_score = None
                     for scan_idx in range(entry_idx + 1, len(DD_stock_data)):
                         scan_bar = DD_stock_data.iloc[scan_idx]
-                        scan_rsi_avg = scan_bar.get('rsi_10min_avg', np.nan)
+                        scan_rsi = scan_bar.get('rsi', np.nan)
                         scan_ewo = scan_bar.get('ewo', np.nan)
                         scan_ewo_avg = scan_bar.get('ewo_15min_avg', np.nan)
                         scan_time = DD_stock_data.index[scan_idx]
@@ -918,15 +923,32 @@ class Backtest:
                         if scan_time.time() >= dt.time(15, 55):
                             break
 
-                        # Reentry requires Avg(RSI) below threshold AND EWO negative AND EWO avg negative
-                        if (not np.isnan(scan_rsi_avg) and scan_rsi_avg <= DD_rsi_reentry and
-                                not np.isnan(scan_ewo) and scan_ewo < 0 and
-                                not np.isnan(scan_ewo_avg) and scan_ewo_avg < 0):
-                            new_entry_idx = scan_idx
-                            break
+                        # Skip if any required indicator is NaN
+                        if np.isnan(scan_rsi) or np.isnan(scan_ewo) or np.isnan(scan_ewo_avg):
+                            continue
+
+                        if DD_scoring_enabled:
+                            # Fulfillment-based scoring: weighted avg of indicator fulfillments >= 100%
+                            minutes_elapsed = (scan_time - DD_rejection_time).total_seconds() / 60.0
+                            reentry_score = score_reentry_confidence(
+                                rsi=scan_rsi, ewo=scan_ewo, ewo_avg=scan_ewo_avg,
+                                minutes_elapsed=minutes_elapsed,
+                                scoring_config=DD_scoring_config,
+                                option_type=signal['option_type'],
+                            )
+                            if reentry_score['enter']:
+                                new_entry_idx = scan_idx
+                                break
+                        else:
+                            # Legacy binary AND logic
+                            scan_rsi_avg = scan_bar.get('rsi_10min_avg', np.nan)
+                            if (not np.isnan(scan_rsi_avg) and scan_rsi_avg <= DD_rsi_reentry and
+                                    scan_ewo < 0 and scan_ewo_avg < 0):
+                                new_entry_idx = scan_idx
+                                break
 
                     if new_entry_idx is not None:
-                        # Delayed entry - Avg(RSI) dropped below reentry threshold
+                        # Delayed entry - reentry conditions met
                         new_entry_bar = stock_data.iloc[new_entry_idx]
                         new_entry_time = stock_data.index[new_entry_idx]
                         new_entry_stock_price = new_entry_bar['close']
@@ -952,11 +974,20 @@ class Backtest:
                         matrix = TrackingMatrix(position)
                         self._simulate_position(position, matrix, stock_data, signal, new_entry_idx, new_entry_stock_price)
 
-                        reentry_rsi_avg = DD_stock_data.iloc[new_entry_idx].get('rsi_10min_avg', np.nan)
-                        reentry_ewo = DD_stock_data.iloc[new_entry_idx].get('ewo', np.nan)
-                        reentry_ewo_avg = DD_stock_data.iloc[new_entry_idx].get('ewo_15min_avg', np.nan)
-                        print(f"    RSI Overbought delay: entry at {new_entry_time.strftime('%H:%M')} "
-                              f"(RSI: {DD_rsi:.1f} -> Avg(RSI): {reentry_rsi_avg:.1f}, EWO: {reentry_ewo:.3f}, EWO Avg: {reentry_ewo_avg:.3f})")
+                        reentry_bar = DD_stock_data.iloc[new_entry_idx]
+                        reentry_rsi = reentry_bar.get('rsi', np.nan)
+                        reentry_ewo = reentry_bar.get('ewo', np.nan)
+                        reentry_ewo_avg = reentry_bar.get('ewo_15min_avg', np.nan)
+                        if DD_scoring_enabled and reentry_score:
+                            f = reentry_score['fulfillments']
+                            print(f"    RSI Overbought delay: entry at {new_entry_time.strftime('%H:%M')} "
+                                  f"(RSI: {DD_rsi:.1f} -> {reentry_rsi:.1f}, EWO: {reentry_ewo:.3f}, EWO Avg: {reentry_ewo_avg:.3f}) "
+                                  f"[Confidence: {reentry_score['confidence']:.1f}% | "
+                                  f"RSI:{f['rsi']:.0f}% EWO:{f['ewo']:.0f}% EWO_avg:{f['ewo_avg']:.0f}% Time:{f['time']:.0f}%]")
+                        else:
+                            reentry_rsi_avg = reentry_bar.get('rsi_10min_avg', np.nan)
+                            print(f"    RSI Overbought delay: entry at {new_entry_time.strftime('%H:%M')} "
+                                  f"(RSI: {DD_rsi:.1f} -> Avg(RSI): {reentry_rsi_avg:.1f}, EWO: {reentry_ewo:.3f}, EWO Avg: {reentry_ewo_avg:.3f})")
                         return position, matrix
                     else:
                         # No reentry found - track data through end of day for analysis
@@ -973,16 +1004,21 @@ class Backtest:
                         matrix = TrackingMatrix(position)
                         self._simulate_position(position, matrix, stock_data, signal, entry_idx, entry_stock_price)
 
-                        print(f"    RSI Overbought: no reentry (Avg(RSI) <= {DD_rsi_reentry} + EWO < 0 + EWO Avg < 0) found, tracking through EOD")
+                        print(f"    RSI Overbought: no reentry found, tracking through EOD")
                         return position, matrix
                 elif DD_config.get('delay_on_oversold', True) and DD_result['DD_reason'] == 'OverSold':
                     DD_rsi_reentry_os = DD_config.get('rsi_reentry_threshold_oversold', 70)
 
-                    # Scan forward for Avg(RSI) reentry point (>= threshold) AND EWO positive AND EWO avg positive
+                    # Scan forward for reentry using fulfillment-based scoring
+                    DD_scoring_config = DD_config.get('reentry_scoring', {})
+                    DD_scoring_enabled = DD_scoring_config.get('enabled', True)
+                    DD_rejection_time = DD_stock_data.index[entry_idx]
+
                     new_entry_idx = None
+                    reentry_score = None
                     for scan_idx in range(entry_idx + 1, len(DD_stock_data)):
                         scan_bar = DD_stock_data.iloc[scan_idx]
-                        scan_rsi_avg = scan_bar.get('rsi_10min_avg', np.nan)
+                        scan_rsi = scan_bar.get('rsi', np.nan)
                         scan_ewo = scan_bar.get('ewo', np.nan)
                         scan_ewo_avg = scan_bar.get('ewo_15min_avg', np.nan)
                         scan_time = DD_stock_data.index[scan_idx]
@@ -991,15 +1027,32 @@ class Backtest:
                         if scan_time.time() >= dt.time(15, 55):
                             break
 
-                        # Reentry requires Avg(RSI) above threshold AND EWO positive AND EWO avg positive
-                        if (not np.isnan(scan_rsi_avg) and scan_rsi_avg >= DD_rsi_reentry_os and
-                                not np.isnan(scan_ewo) and scan_ewo > 0 and
-                                not np.isnan(scan_ewo_avg) and scan_ewo_avg > 0):
-                            new_entry_idx = scan_idx
-                            break
+                        # Skip if any required indicator is NaN
+                        if np.isnan(scan_rsi) or np.isnan(scan_ewo) or np.isnan(scan_ewo_avg):
+                            continue
+
+                        if DD_scoring_enabled:
+                            # Fulfillment-based scoring: weighted avg of indicator fulfillments >= 100%
+                            minutes_elapsed = (scan_time - DD_rejection_time).total_seconds() / 60.0
+                            reentry_score = score_reentry_confidence(
+                                rsi=scan_rsi, ewo=scan_ewo, ewo_avg=scan_ewo_avg,
+                                minutes_elapsed=minutes_elapsed,
+                                scoring_config=DD_scoring_config,
+                                option_type=signal['option_type'],
+                            )
+                            if reentry_score['enter']:
+                                new_entry_idx = scan_idx
+                                break
+                        else:
+                            # Legacy binary AND logic
+                            scan_rsi_avg = scan_bar.get('rsi_10min_avg', np.nan)
+                            if (not np.isnan(scan_rsi_avg) and scan_rsi_avg >= DD_rsi_reentry_os and
+                                    scan_ewo > 0 and scan_ewo_avg > 0):
+                                new_entry_idx = scan_idx
+                                break
 
                     if new_entry_idx is not None:
-                        # Delayed entry - Avg(RSI) rose above reentry threshold
+                        # Delayed entry - reentry conditions met
                         new_entry_bar = stock_data.iloc[new_entry_idx]
                         new_entry_time = stock_data.index[new_entry_idx]
                         new_entry_stock_price = new_entry_bar['close']
@@ -1025,11 +1078,20 @@ class Backtest:
                         matrix = TrackingMatrix(position)
                         self._simulate_position(position, matrix, stock_data, signal, new_entry_idx, new_entry_stock_price)
 
-                        reentry_rsi_avg = DD_stock_data.iloc[new_entry_idx].get('rsi_10min_avg', np.nan)
-                        reentry_ewo = DD_stock_data.iloc[new_entry_idx].get('ewo', np.nan)
-                        reentry_ewo_avg = DD_stock_data.iloc[new_entry_idx].get('ewo_15min_avg', np.nan)
-                        print(f"    RSI Oversold delay: entry at {new_entry_time.strftime('%H:%M')} "
-                              f"(RSI: {DD_rsi:.1f} -> Avg(RSI): {reentry_rsi_avg:.1f}, EWO: {reentry_ewo:.3f}, EWO Avg: {reentry_ewo_avg:.3f})")
+                        reentry_bar = DD_stock_data.iloc[new_entry_idx]
+                        reentry_rsi = reentry_bar.get('rsi', np.nan)
+                        reentry_ewo = reentry_bar.get('ewo', np.nan)
+                        reentry_ewo_avg = reentry_bar.get('ewo_15min_avg', np.nan)
+                        if DD_scoring_enabled and reentry_score:
+                            f = reentry_score['fulfillments']
+                            print(f"    RSI Oversold delay: entry at {new_entry_time.strftime('%H:%M')} "
+                                  f"(RSI: {DD_rsi:.1f} -> {reentry_rsi:.1f}, EWO: {reentry_ewo:.3f}, EWO Avg: {reentry_ewo_avg:.3f}) "
+                                  f"[Confidence: {reentry_score['confidence']:.1f}% | "
+                                  f"RSI:{f['rsi']:.0f}% EWO:{f['ewo']:.0f}% EWO_avg:{f['ewo_avg']:.0f}% Time:{f['time']:.0f}%]")
+                        else:
+                            reentry_rsi_avg = reentry_bar.get('rsi_10min_avg', np.nan)
+                            print(f"    RSI Oversold delay: entry at {new_entry_time.strftime('%H:%M')} "
+                                  f"(RSI: {DD_rsi:.1f} -> Avg(RSI): {reentry_rsi_avg:.1f}, EWO: {reentry_ewo:.3f}, EWO Avg: {reentry_ewo_avg:.3f})")
                         return position, matrix
                     else:
                         # No reentry found - track data through end of day for analysis
@@ -1046,7 +1108,7 @@ class Backtest:
                         matrix = TrackingMatrix(position)
                         self._simulate_position(position, matrix, stock_data, signal, entry_idx, entry_stock_price)
 
-                        print(f"    RSI Oversold: no reentry (Avg(RSI) >= {DD_rsi_reentry_os} + EWO > 0 + EWO Avg > 0) found, tracking through EOD")
+                        print(f"    RSI Oversold: no reentry found, tracking through EOD")
                         return position, matrix
                 else:
                     # DD rejection with delay disabled
