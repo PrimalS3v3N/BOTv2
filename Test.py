@@ -618,6 +618,8 @@ class Databook:
         self.position = position
         self.trade_label = position.get_trade_label()
         self.records = []
+        self.day_high = -np.inf
+        self.day_low = np.inf
 
     def add_record(self, timestamp, stock_price, option_price, volume, holding=True,
                    vwap=np.nan, ema_30=np.nan,
@@ -631,11 +633,25 @@ class Databook:
         # Calculate True Price via Analysis module
         tp = Analysis.true_price(stock_price, stock_high, stock_low)
 
-        # Market bias: Bullish if price is above VWAP, Bearish if below
-        if not np.isnan(vwap) and vwap > 0:
-            market_bias = 'Bullish' if stock_price >= vwap else 'Bearish'
+        # Track running day high/low for sideways band calculation
+        if not np.isnan(stock_high):
+            self.day_high = max(self.day_high, stock_high)
+        if not np.isnan(stock_low) and stock_low > 0:
+            self.day_low = min(self.day_low, stock_low)
+
+        # Market bias: +1 (bullish), 0 (sideways), -1 (bearish)
+        # Sideways zone = VWAP +/- 10% of today's high-low range
+        if not np.isnan(vwap) and vwap > 0 and self.day_high > self.day_low:
+            day_range = self.day_high - self.day_low
+            sideways_band = 0.10 * day_range
+            if stock_price >= vwap + sideways_band:
+                market_bias = 1
+            elif stock_price <= vwap - sideways_band:
+                market_bias = -1
+            else:
+                market_bias = 0
         else:
-            market_bias = ''
+            market_bias = np.nan
 
         record = {
             'timestamp': timestamp,

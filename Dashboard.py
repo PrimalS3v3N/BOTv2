@@ -528,13 +528,15 @@ def get_trade_summary(df):
                 profit_min = (min_price - entry_price) * contracts * 100
 
     # Market bias at exit (last holding bar's VWAP assessment)
+    # Values: +1 = Bullish, 0 = Sideways, -1 = Bearish
+    BIAS_LABELS = {1: 'Bullish', 0: 'Sideways', -1: 'Bearish'}
     market_bias = 'N/A'
     if 'market_bias' in df.columns and 'holding' in df.columns:
         holding_df = df[df['holding'] == True]
         if not holding_df.empty:
             last_bias = holding_df['market_bias'].iloc[-1]
-            if pd.notna(last_bias) and last_bias != '':
-                market_bias = last_bias
+            if pd.notna(last_bias):
+                market_bias = BIAS_LABELS.get(int(last_bias), 'N/A')
 
     return {
         'entry': entry_price,
@@ -790,6 +792,12 @@ def main():
 
         if 'pnl_pct' in matrix_df.columns:
             matrix_df['pnl_pct'] = matrix_df['pnl_pct'].apply(lambda x: f"{x:+.1f}%" if pd.notna(x) else "")
+
+        if 'market_bias' in matrix_df.columns:
+            bias_map = {1: 'Bullish', 0: 'Sideways', -1: 'Bearish'}
+            matrix_df['market_bias'] = matrix_df['market_bias'].apply(
+                lambda x: bias_map.get(int(x), '') if pd.notna(x) else ""
+            )
 
         if 'ewo' in matrix_df.columns:
             matrix_df['ewo'] = matrix_df['ewo'].apply(lambda x: f"{x:.3f}" if pd.notna(x) else "")
