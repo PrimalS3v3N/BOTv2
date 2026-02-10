@@ -450,84 +450,215 @@ conditions are met, not just IF they are met.
 
 ---
 
-### DESIGN: Adaptive Reentry Scoring System (BUG-003 Fix)
+### DESIGN: Fulfillment-Based Adaptive Reentry (BUG-003 Fix)
 
-**Goal:** Replace the binary triple-AND gate with a weighted confidence score that lets strong
-signals compensate for lagging indicators. The system should self-adjust: a deep RSI pullback
-can overcome a slightly positive EWO average, and time elapsed since rejection adds confidence
-that the overbought condition has cooled.
+**Goal:** Replace the binary triple-AND gate with a fulfillment percentage system where each
+indicator earns credit toward 100%. Indicators that exceed their target generate overflow
+credit that compensates for lagging indicators that haven't reached theirs yet.
 
-**Current system (binary):**
+**Core concept:**
+```
+Each indicator → fulfillment % (0% = no progress, 100% = target met, >100% = overflow)
+Weighted average of all fulfillments >= 100% → ENTER
+```
+
+**Current system (binary - all or nothing):**
 ```
 IF rsi_10min_avg <= 30 AND ewo < 0 AND ewo_15min_avg < 0 → ENTER
-ELSE → SKIP
+ELSE → SKIP (even if 2 of 3 are strongly met)
 ```
 
-**Proposed system (weighted score):**
+---
+
+#### Fulfillment Formula
+
+Each indicator uses a single linear formula:
+
 ```
-score = (w_rsi * rsi_score) + (w_ewo * ewo_score) + (w_ewo_avg * ewo_avg_score) + (w_time * time_score)
-IF score >= confidence_threshold → ENTER
+fulfillment = min(progress / target_distance * 100, overflow_cap)
 ```
 
-**Component scoring (CALL overbought reentry):**
+Where:
+- `progress` = how far the indicator has moved from its starting reference toward the target
+- `target_distance` = total distance from starting reference to the target (100% point)
+- `overflow_cap` = maximum fulfillment % (limits how much one indicator can compensate)
 
-| Component | What it measures | Score formula | Range |
-|-----------|-----------------|---------------|-------|
-| RSI pullback | How far RSI dropped from overbought | `(85 - raw_rsi) / 85` clamped to [0, 1] | 0-1 |
-| EWO direction | Is momentum shifting? | `1.0 if ewo < 0, else max(0, 1 - ewo/0.5)` | 0-1 |
-| EWO avg trend | Has avg momentum shifted? | `1.0 if ewo_avg < 0, else max(0, 1 - ewo_avg/0.5)` | 0-1 |
-| Time decay | How long since rejection? | `min(minutes_elapsed / 20, 1.0)` | 0-1 |
+When `progress > target_distance`, fulfillment naturally exceeds 100% — this is the overflow
+that compensates for other indicators still below 100%.
 
-**Default weights (configurable in Config.py):**
+---
+
+#### Indicator Definitions (CALL Overbought Reentry)
+
+| Indicator | 0% Reference | 100% Target | Overflow Cap | Weight | Rationale |
+|-----------|-------------|-------------|-------------|--------|-----------|
+| Raw RSI   | 85          | 30          | 130%        | 1.5    | Fastest reactor, most reliable for mean reversion |
+| EWO       | +0.5        | 0           | 130%        | 1.0    | Direct momentum, moderate lag |
+| EWO_avg   | +0.5        | 0           | 120%        | 0.5    | Heaviest lag, least overflow credit |
+| Time (min)| 0           | 15          | 115%        | 1.0    | Passive cooldown, time heals overbought |
+
+**Why weighted average (not simple average)?** The fastest-reacting, most reliable indicators
+(RSI, EWO) get higher weights AND higher overflow caps. This means a strong RSI pullback has
+more voice than a lagging EWO_avg — matching how much we should actually trust each signal.
+Total weights = 4.0.
+
+**Safety floor:** Each individual component must be >= 20% to prevent entering when any
+single indicator is strongly adverse (e.g., EWO very positive while RSI is low).
+
+---
+
+#### Formulas (CALL)
+
+```python
+# RSI: lower is better (pulling back from overbought)
+rsi_fulfillment = min((85 - rsi) / (85 - 30) * 100, 130)    # 0% at 85, 100% at 30, cap 130%
+
+# EWO: lower is better (momentum shifting bearish → good for pullback entry)
+ewo_fulfillment = min((0.5 - ewo) / (0.5 - 0) * 100, 130)   # 0% at +0.5, 100% at 0, cap 130%
+
+# EWO_avg: same as EWO but lower cap (lags most)
+ewo_avg_fulfillment = min((0.5 - ewo_avg) / (0.5 - 0) * 100, 120)
+
+# Time: more elapsed = more cooldown
+time_fulfillment = min(minutes / 15 * 100, 115)               # 0% at 0min, 100% at 15min, cap 115%
+
+# Weighted average
+confidence = (1.5 * rsi_f + 1.0 * ewo_f + 0.5 * ewo_avg_f + 1.0 * time_f) / 4.0
+
+# Entry decision
+enter = confidence >= 100 and min(rsi_f, ewo_f, ewo_avg_f, time_f) >= 20
+```
+
+#### Formulas (PUT - mirror)
+
+```python
+# RSI: higher is better (rising from oversold)
+rsi_fulfillment = min((rsi - 15) / (70 - 15) * 100, 130)     # 0% at 15, 100% at 70, cap 130%
+
+# EWO: higher is better (momentum shifting bullish)
+ewo_fulfillment = min((ewo - (-0.5)) / (0 - (-0.5)) * 100, 130)
+
+# EWO_avg: same direction as EWO
+ewo_avg_fulfillment = min((ewo_avg - (-0.5)) / (0 - (-0.5)) * 100, 120)
+```
+
+---
+
+#### Worked Example: 09:42 (the missed entry)
+
+Signal rejected at 09:30 (RSI 91.9, overbought). Scanning forward:
+
+**09:37** — RSI=26.1, EWO=0.027, EWO_avg=0.208, Time=7min
+```
+RSI:     (85-26.1)/55 * 100 = 107.1%  (overflow! RSI already past target)
+EWO:     (0.5-0.027)/0.5 * 100 = 94.6%  (almost there but not quite)
+EWO_avg: (0.5-0.208)/0.5 * 100 = 58.4%  (lagging behind)
+Time:    7/15 * 100 = 46.7%  (too early)
+
+Confidence = (1.5×107.1 + 1.0×94.6 + 0.5×58.4 + 1.0×46.7) / 4.0
+           = (160.7 + 94.6 + 29.2 + 46.7) / 4.0
+           = 82.8%  → SKIP ✗ (too early, EWO_avg and time lagging)
+```
+
+**09:40** — RSI=37.3, EWO=-0.227, EWO_avg=0.150, Time=10min
+```
+RSI:     (85-37.3)/55 * 100 = 86.7%  (RSI hasn't hit target yet)
+EWO:     (0.5+0.227)/0.5 * 100 = 130%  (capped, strong overflow)
+EWO_avg: (0.5-0.150)/0.5 * 100 = 70.0%
+Time:    10/15 * 100 = 66.7%
+
+Confidence = (1.5×86.7 + 1.0×130 + 0.5×70 + 1.0×66.7) / 4.0
+           = (130.1 + 130 + 35 + 66.7) / 4.0
+           = 90.4%  → SKIP ✗ (RSI not deep enough yet)
+```
+
+**09:42** — RSI=24.2, EWO=-0.446, EWO_avg=0.088, Time=12min
+```
+RSI:     (85-24.2)/55 * 100 = 110.5%  (overflow — deep pullback)
+EWO:     (0.5+0.446)/0.5 * 100 = 130%  (capped — strongly negative)
+EWO_avg: (0.5-0.088)/0.5 * 100 = 82.4%  (below target but has partial credit)
+Time:    12/15 * 100 = 80.0%  (reasonable elapsed time)
+
+Confidence = (1.5×110.5 + 1.0×130 + 0.5×82.4 + 1.0×80) / 4.0
+           = (165.8 + 130 + 41.2 + 80) / 4.0
+           = 104.2%  → ENTER ✓
+
+Safety floor: min(110.5, 130, 82.4, 80) = 80% >= 20% ✓
+```
+
+RSI overflow (110.5%) and EWO overflow (130%) compensate for the lagging EWO_avg (82.4%)
+and time (80%). The weighted average crosses 100% because the two most responsive indicators
+are contributing surplus confidence.
+
+---
+
+#### How This Self-Adjusts to Different Scenarios
+
+**Fast V-recovery (like 09:42):** RSI drops hard and fast → big overflow from RSI/EWO
+compensates for slow averages. System enters on the pullback before averages catch up.
+
+**Slow grind down:** RSI drops gradually, EWO follows, averages eventually catch up.
+All indicators converge toward 100% together → enters when enough total confidence.
+
+**False pullback:** RSI dips briefly but EWO stays positive, time is short. Not enough
+combined fulfillment → correctly stays out.
+
+**Extended consolidation:** Time keeps accumulating toward 115%, slowly adding confidence
+even if indicators are stuck in the 70-80% range. Eventually tips the balance if the
+pullback is real but gradual.
+
+---
+
+#### Config (all in Config.py under `due_diligence`)
+
 ```python
 'reentry_scoring': {
-    'enabled': True,
-    'weight_rsi': 0.40,          # RSI pullback depth (most important)
-    'weight_ewo': 0.25,          # EWO direction
-    'weight_ewo_avg': 0.15,      # EWO average (least important, lags most)
-    'weight_time': 0.20,         # Time elapsed since rejection
-    'confidence_threshold': 0.60, # Minimum score to enter
-    'min_rsi_raw': 40,           # Safety: raw RSI must be below this regardless of score
+    'enabled': True,                    # False = use old binary AND logic
+    'confidence_threshold': 100,        # Weighted avg must reach this %
+    'safety_floor': 20,                 # Min fulfillment per component (%)
+    'rsi': {
+        'zero_ref': 85,                 # 0% fulfillment (overbought level)
+        'target': 30,                   # 100% fulfillment
+        'overflow_cap': 130,            # Max fulfillment %
+        'weight': 1.5,                  # Averaging weight
+    },
+    'ewo': {
+        'zero_ref': 0.5,
+        'target': 0,
+        'overflow_cap': 130,
+        'weight': 1.0,
+    },
+    'ewo_avg': {
+        'zero_ref': 0.5,
+        'target': 0,
+        'overflow_cap': 120,            # Lower cap — lags most
+        'weight': 0.5,                  # Lower weight — least responsive
+    },
+    'time_minutes': {
+        'zero_ref': 0,
+        'target': 15,
+        'overflow_cap': 115,
+        'weight': 1.0,
+    },
 }
 ```
 
-**09:42 example with scoring:**
-```
-rsi_score    = (85 - 24.2) / 85           = 0.715
-ewo_score    = 1.0  (ewo = -0.446 < 0)    = 1.000
-ewo_avg_score = max(0, 1 - 0.088/0.5)     = 0.824
-time_score   = min(12/20, 1.0)            = 0.600
+#### Where this lives in the codebase
 
-score = (0.40 * 0.715) + (0.25 * 1.0) + (0.15 * 0.824) + (0.20 * 0.6)
-      = 0.286 + 0.250 + 0.124 + 0.120
-      = 0.780
-
-0.780 >= 0.60 → ENTER ✓
-raw RSI 24.2 < 40 → safety check passes ✓
-```
-
-The strong RSI pullback (0.715) and EWO direction (1.0) overcome the lagging EWO average.
-
-**PUT oversold reentry (mirror logic):**
-Same structure but inverted: RSI rising from oversold, EWO positive, etc.
-```
-rsi_score = (raw_rsi - 15) / 85  (how far RSI rose from oversold)
-ewo_score = 1.0 if ewo > 0
-ewo_avg_score = 1.0 if ewo_avg > 0
-```
-
-**Where this lives in the codebase:**
-- Scoring logic: `Strategy.py` (new function `score_reentry_confidence()`)
+- Scoring logic: `Strategy.py` → new `score_reentry_confidence(rsi, ewo, ewo_avg, minutes, config)`
 - Config: `Config.py` under `due_diligence.reentry_scoring`
-- Caller: `Test.py:910-926` (replace the triple-AND scan with scoring call)
+- Caller: `Test.py:910-926` → replace triple-AND scan with scoring call
+- Dashboard: Add fulfillment % columns to tracking matrix for visibility
 
-**Advantages over current system:**
-1. No missed V-shaped recoveries — strong pullbacks score high even with lagging averages
-2. Self-adjusting — each component contributes proportionally, no single indicator can veto
-3. Time decay adds urgency — the longer we wait, the more likely overbought has cooled
-4. Safety rail — `min_rsi_raw` prevents entering if RSI hasn't actually pulled back
-5. Fully configurable — all weights/thresholds in Config.py, easy to tune via backtesting
-6. Backwards compatible — set `enabled: False` to keep the old binary logic
+#### Advantages over current binary system
+
+1. **Self-adjusting** — strong signals compensate for lagging ones proportionally
+2. **No missed V-recoveries** — deep RSI pullbacks overflow past 100%, covering slow averages
+3. **Intuitive** — 100% = condition met, >100% = extra confidence, <100% = partial progress
+4. **Gradual, not binary** — every indicator earns partial credit, nothing is wasted
+5. **Time as a factor** — overbought conditions cool over time, system accounts for this
+6. **Tunable per-indicator** — weights, caps, and targets all in Config.py
+7. **Backwards compatible** — `enabled: False` reverts to old binary logic
 
 ---
 
