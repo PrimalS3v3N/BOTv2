@@ -344,6 +344,78 @@ These rules are mandatory. All code changes must respect module boundaries.
 
 ---
 
+## Known Bugs
+
+### BUG-001: Reversal Exit Fires on Entry Bar (Same-Candle Buy/Sell)
+
+**Severity:** High
+**File:** `Test.py:1257`
+**Observed:** 2026-02-09 11:24
+
+**Problem:** The reversal exit (`SL - Reversal`) has no guard for the entry bar. It runs on
+every bar including `i == entry_idx`, so if `True Price < VWAP` (CALL) or `True Price > VWAP`
+(PUT) is already true at entry, the position opens and immediately closes on the same candle
+with ~0% PnL.
+
+**Example:** At 11:24, True Price $1000.95 < VWAP $1001.15 → instant reversal exit.
+RSI was 32.8 (DD check passed fine), but the VWAP relationship was never checked pre-entry.
+
+**Fix Options:**
+1. Add `i > entry_idx` guard to the reversal exit check at line 1257
+2. Add VWAP/price relationship check to DD pre-entry validation
+3. Both (recommended)
+
+---
+
+### BUG-002: Downtrend Exit Fires on Entry Bar (Same-Candle Buy/Sell)
+
+**Severity:** High
+**File:** `Test.py:1263`
+**Observed:** 2026-02-09 09:56
+
+**Problem:** Same structural bug as BUG-001 but for the downtrend exit (`SL - DownTrend`).
+The downtrend check also has no `i > entry_idx` guard, so if `True Price < vwap_ema_avg AND
+EMA < vwap_ema_avg` is already true at entry, the position is immediately closed.
+
+**Example:** At 09:56, True Price $690.58 < vwap_ema_avg $690.78, AND EMA $690.50 <
+vwap_ema_avg $690.78 → instant downtrend exit. RSI was 51.1 (perfectly neutral).
+
+**Fix Options:**
+1. Add `i > entry_idx` guard to the downtrend exit check at line 1263 (same fix as BUG-001)
+2. Add downtrend condition check to DD pre-entry validation
+3. Both (recommended)
+
+---
+
+### BUG-003: Overbought Reentry Conditions Too Strict (Missed Entries)
+
+**Severity:** Medium
+**File:** `Test.py:922-924`
+**Observed:** 2026-02-10 09:42
+
+**Problem:** When DD rejects a CALL entry as overbought, the reentry scan requires ALL THREE
+conditions simultaneously: `rsi_10min_avg <= 30 AND ewo < 0 AND ewo_15min_avg < 0`. The use
+of lagging averaged indicators (10min RSI avg, 15min EWO avg) makes this triple-AND condition
+nearly impossible to satisfy during V-shaped recoveries, causing missed profitable entries.
+
+**Example:** Signal at 09:30 with RSI 91.9 (correctly rejected). At 09:42, raw RSI was 24.2
+(excellent CALL entry), but RSI_10min_avg was 41.0 (still > 30 threshold) and EWO_15min_avg
+was 0.088 (still > 0). The triple condition was NEVER met. Stock recovered from $693.66 to
+$696+ by 09:58 — missed >100% option move.
+
+**Root Cause:** 10-minute RSI average lags too far behind instantaneous RSI during rapid
+reversals. Combined with 15-minute EWO average requirement, the reentry window is nearly
+unreachable.
+
+**Fix Options:**
+1. Use instantaneous RSI instead of rsi_10min_avg for reentry check
+2. Relax threshold (e.g., rsi_avg <= 40 instead of <= 30)
+3. Use OR logic instead of AND for the three conditions
+4. Reduce averaging windows (e.g., 5min RSI avg instead of 10min)
+5. Drop the ewo_15min_avg requirement (keep only rsi_avg + ewo)
+
+---
+
 ## TODO
 
 - [ ] Build a contract reversal system looking for Bearish or Bullish Signals
