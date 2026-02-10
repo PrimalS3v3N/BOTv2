@@ -1528,19 +1528,6 @@ class Backtest:
             return False
 
 
-# =============================================================================
-# EXTERNAL - Quick Test Function
-# =============================================================================
-
-def quick_test(days=1):
-    """Run a quick backtest and save results for Dashboard."""
-    bt = Backtest(lookback_days=days)
-    bt.run()
-    bt.summary()
-    bt.BT_Save()  # Save data for Dashboard.py to load
-    return bt
-
-
 def test_options_pricing():
     """
     Test the Black-Scholes options pricing for both CALL and PUT options.
@@ -1675,4 +1662,6 @@ if __name__ == '__main__':
     if len(sys.argv) > 1 and sys.argv[1] == '--test-pricing':
         test_options_pricing()
     else:
-        bt = quick_test(days=1)
+        bt = Backtest(lookback_days=1)
+        bt.run()
+        bt.BT_Save()
