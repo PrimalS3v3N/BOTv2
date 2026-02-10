@@ -190,6 +190,72 @@ BACKTEST_CONFIG = {
         'rsi_reentry_threshold': 30,            # Buy when Avg(RSI) drops to/below this level after overbought (+ EWO & EWO avg negative)
         'delay_on_oversold': True,              # Delay purchase instead of rejecting when oversold
         'rsi_reentry_threshold_oversold': 70,   # Buy when Avg(RSI) rises to/above this level after oversold (+ EWO & EWO avg positive)
+
+        # Fulfillment-based adaptive reentry scoring
+        # Replaces the binary triple-AND gate (rsi_avg <= 30 AND ewo < 0 AND ewo_avg < 0)
+        # Each indicator earns a fulfillment %: 0% (no progress) → 100% (target met) → cap (overflow)
+        # Weighted average of all fulfillments >= 100% triggers entry
+        'reentry_scoring': {
+            'enabled': True,                    # False = use old binary AND logic
+            'confidence_threshold': 100,        # Weighted avg must reach this %
+            'safety_floor': 20,                 # Min fulfillment per component (%)
+
+            # CALL overbought reentry indicator settings
+            'call': {
+                'rsi': {
+                    'zero_ref': 85,             # 0% fulfillment (overbought level)
+                    'target': 30,               # 100% fulfillment
+                    'overflow_cap': 130,        # Max fulfillment %
+                    'weight': 1.5,              # Averaging weight (highest — fastest reactor)
+                },
+                'ewo': {
+                    'zero_ref': 0.5,            # 0% fulfillment (strongly positive momentum)
+                    'target': 0,                # 100% fulfillment (momentum crossed negative)
+                    'overflow_cap': 130,        # Max fulfillment %
+                    'weight': 1.0,              # Averaging weight
+                },
+                'ewo_avg': {
+                    'zero_ref': 0.5,            # 0% fulfillment
+                    'target': 0,                # 100% fulfillment
+                    'overflow_cap': 120,        # Lower cap — lags most
+                    'weight': 0.5,              # Lowest weight — least responsive
+                },
+                'time_minutes': {
+                    'zero_ref': 0,              # 0% fulfillment (just rejected)
+                    'target': 15,               # 100% fulfillment (15 min cooldown)
+                    'overflow_cap': 115,        # Max fulfillment %
+                    'weight': 1.0,              # Averaging weight
+                },
+            },
+
+            # PUT oversold reentry indicator settings (mirror of CALL)
+            'put': {
+                'rsi': {
+                    'zero_ref': 15,             # 0% fulfillment (oversold level)
+                    'target': 70,               # 100% fulfillment
+                    'overflow_cap': 130,
+                    'weight': 1.5,
+                },
+                'ewo': {
+                    'zero_ref': -0.5,           # 0% fulfillment (strongly negative momentum)
+                    'target': 0,                # 100% fulfillment (momentum crossed positive)
+                    'overflow_cap': 130,
+                    'weight': 1.0,
+                },
+                'ewo_avg': {
+                    'zero_ref': -0.5,
+                    'target': 0,
+                    'overflow_cap': 120,
+                    'weight': 0.5,
+                },
+                'time_minutes': {
+                    'zero_ref': 0,
+                    'target': 15,
+                    'overflow_cap': 115,
+                    'weight': 1.0,
+                },
+            },
+        },
     },
 
     # Closure - Peak: Avg RSI (10min) based exit in last 30 minutes of trading day
