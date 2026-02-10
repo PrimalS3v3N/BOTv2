@@ -54,12 +54,12 @@ DISCORD_CONFIG = {
     'test_message_limit': 100,                     # Messages per request (test mode)
     'alert_marker': '<a:RedAlert:759583962237763595>',  # Discord alert emoji ID
     'rate_limit': {
-        'min_delay': 2.0,                          # Min seconds between requests
-        'max_delay': 5.0,                          # Max seconds between requests
-        'batch_size': 50,                          # Messages per request
+        'min_delay': .5,                          # Min seconds between requests
+        'max_delay': 1.5,                          # Max seconds between requests
+        'batch_size': 75,                          # Messages per request
         'long_pause_chance': 0.15,                 # Chance of longer pause (15%)
-        'long_pause_min': 8.0,                     # Long pause min (seconds)
-        'long_pause_max': 15.0,                    # Long pause max (seconds)
+        'long_pause_min': 1.0,                     # Long pause min (seconds)
+        'long_pause_max': 2.0,                    # Long pause max (seconds)
     },
     'spoof_browser': True,                         # Enable browser spoofing
     'browser_config': {
@@ -157,10 +157,10 @@ BACKTEST_CONFIG = {
     # Stop Loss - three phases: initial -> breakeven -> trailing
     'stop_loss': {
         'enabled': True,
-        'stop_loss_pct': 0.25,                     # Max loss from entry (25%)
+        'stop_loss_pct': 0.27,                     # Max loss from entry (25%)
         'stop_loss_warning_pct': 0.15,             # Warning threshold (15%)
         'profit_target_pct': 1.00,                 # Profit target (100%)
-        'trailing_stop_pct': 0.20,                 # Trailing below highest (20%)
+        'trailing_stop_pct': 0.35,                 # Trailing below highest (20%)
         'time_stop_minutes': 60,                   # Time stop (minutes)
         'breakeven_threshold_pct': None,           # None = auto-calculate as entry/(1-stop_loss_pct)
         'breakeven_min_minutes': 30,               # Min hold before breakeven transition
