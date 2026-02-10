@@ -89,7 +89,6 @@ Modules: Config.py, Signal.py, Analysis.py, Strategy.py
 import Config
 import Signal
 import Analysis
-from Strategy import StopLoss, CheckDueDiligence, score_reentry_confidence
 
 
 # =============================================================================
@@ -536,10 +535,6 @@ class Position:
         self.max_price_to_eod = entry_price  # Track max price from entry to end of day
         self.max_stop_loss_price = entry_price  # Track lowest price during holding (worst stop loss point)
 
-        # Delay tracking (RSI overbought purchase delay)
-        self.delay_reason = None              # Why entry was delayed (e.g., 'RSI Overbought')
-        self.original_entry_time = None       # Original signal entry time before delay
-
     def update(self, timestamp, price, stock_price=None):
         """Update position with new price data during holding period."""
         self.current_price = price
@@ -609,8 +604,6 @@ class Position:
             'max_price_to_eod': self.max_price_to_eod,
             'max_stop_loss_price': self.max_stop_loss_price,
             'profit_min': profit_min,
-            'delay_reason': self.delay_reason,
-            'original_entry_time': self.original_entry_time,
         }
 
 
@@ -627,7 +620,7 @@ class TrackingMatrix:
         self.records = []
 
     def add_record(self, timestamp, stock_price, option_price, volume, holding=True,
-                   stop_loss=np.nan, stop_loss_mode=None, vwap=np.nan, ema_30=np.nan,
+                   vwap=np.nan, ema_30=np.nan,
                    vwap_ema_avg=np.nan, emavwap=np.nan, stock_high=np.nan, stock_low=np.nan,
                    ewo=np.nan, ewo_15min_avg=np.nan,
                    rsi=np.nan, rsi_10min_avg=np.nan,
@@ -653,9 +646,6 @@ class TrackingMatrix:
             'highest_price': self.position.highest_price if holding else np.nan,
             'lowest_price': self.position.lowest_price if holding else np.nan,
             'minutes_held': self.position.get_minutes_held(timestamp) if holding else np.nan,
-            # Stop loss tracking
-            'stop_loss': stop_loss,
-            'stop_loss_mode': stop_loss_mode,
             # Technical indicators
             'vwap': vwap,
             'ema_30': ema_30,
@@ -686,8 +676,6 @@ class TrackingMatrix:
             df['entry_time'] = self.position.entry_time
             df['exit_time'] = self.position.exit_time
             df['exit_reason'] = self.position.exit_reason
-            df['delay_reason'] = self.position.delay_reason
-            df['original_entry_time'] = self.position.original_entry_time
 
             # Reorder columns per Config source of truth
             col_order = Config.DATAFRAME_COLUMNS['tracking_matrix'] + Config.DATAFRAME_COLUMNS['tracking_matrix_metadata']
@@ -861,271 +849,6 @@ class Backtest:
 
         entry_option_price *= (1 + self.slippage_pct)
 
-        # Due Diligence check - validate indicators before entry
-        DD_config = self.config.get('due_diligence', {})
-        DD_enabled = DD_config.get('enabled', True)
-
-        if DD_enabled:
-            # Calculate indicators to get RSI at entry
-            DD_indicator_config = self.config.get('indicators', {})
-            DD_ema_period = DD_indicator_config.get('ema_period', 30)
-            DD_stock_data = Analysis.add_indicators(stock_data.copy(), ema_period=DD_ema_period)
-
-            DD_entry_bar = DD_stock_data.iloc[entry_idx]
-            DD_rsi = DD_entry_bar.get('rsi', np.nan)
-
-            DD_result = CheckDueDiligence(
-                DD_rsi=DD_rsi,
-                DD_option_type=signal['option_type'],
-                DD_rsi_overbought=DD_config.get('DD_rsi_overbought', 85),
-                DD_rsi_oversold=DD_config.get('DD_rsi_oversold', 15),
-            )
-
-            # Lookback: check if RSI was recently overbought/oversold before signal
-            if DD_result['DD_passed']:
-                DD_lookback_bars = DD_config.get('lookback_bars', 15)
-                if DD_lookback_bars > 0 and entry_idx > 0:
-                    lookback_start = max(0, entry_idx - DD_lookback_bars)
-                    recent_data = DD_stock_data.iloc[lookback_start:entry_idx]
-                    if len(recent_data) > 0:
-                        DD_ob_threshold = DD_config.get('DD_rsi_overbought', 85)
-                        DD_os_threshold = DD_config.get('DD_rsi_oversold', 15)
-                        if signal['option_type'].upper() in ('CALL', 'CALLS', 'C'):
-                            recent_max_rsi = recent_data['rsi'].max()
-                            if not np.isnan(recent_max_rsi) and recent_max_rsi > DD_ob_threshold:
-                                DD_result['DD_passed'] = False
-                                DD_result['DD_reason'] = 'OverBought'
-                                DD_result['DD_details'] = f"Recent RSI {recent_max_rsi:.1f} > {DD_ob_threshold} (recently overbought within {DD_lookback_bars} bars)"
-                        elif signal['option_type'].upper() in ('PUT', 'PUTS', 'P'):
-                            recent_min_rsi = recent_data['rsi'].min()
-                            if not np.isnan(recent_min_rsi) and recent_min_rsi < DD_os_threshold:
-                                DD_result['DD_passed'] = False
-                                DD_result['DD_reason'] = 'OverSold'
-                                DD_result['DD_details'] = f"Recent RSI {recent_min_rsi:.1f} < {DD_os_threshold} (recently oversold within {DD_lookback_bars} bars)"
-
-            if not DD_result['DD_passed']:
-                DD_delay_enabled = DD_config.get('delay_on_overbought', True)
-                DD_rsi_reentry = DD_config.get('rsi_reentry_threshold', 30)
-
-                if DD_delay_enabled and DD_result['DD_reason'] == 'OverBought':
-                    # Scan forward for reentry using fulfillment-based scoring
-                    DD_scoring_config = DD_config.get('reentry_scoring', {})
-                    DD_scoring_enabled = DD_scoring_config.get('enabled', True)
-                    DD_rejection_time = DD_stock_data.index[entry_idx]
-
-                    new_entry_idx = None
-                    reentry_score = None
-                    for scan_idx in range(entry_idx + 1, len(DD_stock_data)):
-                        scan_bar = DD_stock_data.iloc[scan_idx]
-                        scan_rsi = scan_bar.get('rsi', np.nan)
-                        scan_ewo = scan_bar.get('ewo', np.nan)
-                        scan_ewo_avg = scan_bar.get('ewo_15min_avg', np.nan)
-                        scan_time = DD_stock_data.index[scan_idx]
-
-                        # Stop scanning at market close
-                        if scan_time.time() >= dt.time(15, 55):
-                            break
-
-                        # Skip if any required indicator is NaN
-                        if np.isnan(scan_rsi) or np.isnan(scan_ewo) or np.isnan(scan_ewo_avg):
-                            continue
-
-                        if DD_scoring_enabled:
-                            # Fulfillment-based scoring: weighted avg of indicator fulfillments >= 100%
-                            minutes_elapsed = (scan_time - DD_rejection_time).total_seconds() / 60.0
-                            reentry_score = score_reentry_confidence(
-                                rsi=scan_rsi, ewo=scan_ewo, ewo_avg=scan_ewo_avg,
-                                minutes_elapsed=minutes_elapsed,
-                                scoring_config=DD_scoring_config,
-                                option_type=signal['option_type'],
-                            )
-                            if reentry_score['enter']:
-                                new_entry_idx = scan_idx
-                                break
-                        else:
-                            # Legacy binary AND logic
-                            scan_rsi_avg = scan_bar.get('rsi_10min_avg', np.nan)
-                            if (not np.isnan(scan_rsi_avg) and scan_rsi_avg <= DD_rsi_reentry and
-                                    scan_ewo < 0 and scan_ewo_avg < 0):
-                                new_entry_idx = scan_idx
-                                break
-
-                    if new_entry_idx is not None:
-                        # Delayed entry - reentry conditions met
-                        new_entry_bar = stock_data.iloc[new_entry_idx]
-                        new_entry_time = stock_data.index[new_entry_idx]
-                        new_entry_stock_price = new_entry_bar['close']
-
-                        new_days_to_expiry = (signal['expiration'] - new_entry_time.date()).days if signal['expiration'] else 30
-                        new_entry_option_price = Analysis.estimate_option_price_bs(
-                            stock_price=new_entry_stock_price,
-                            strike=signal['strike'],
-                            option_type=signal['option_type'],
-                            days_to_expiry=new_days_to_expiry
-                        )
-                        new_entry_option_price *= (1 + self.slippage_pct)
-
-                        position = Position(
-                            signal=signal,
-                            entry_price=new_entry_option_price,
-                            entry_time=new_entry_time,
-                            contracts=self.default_contracts
-                        )
-                        position.delay_reason = 'RSI Overbought'
-                        position.original_entry_time = entry_time
-
-                        matrix = TrackingMatrix(position)
-                        self._simulate_position(position, matrix, stock_data, signal, new_entry_idx, new_entry_stock_price)
-
-                        reentry_bar = DD_stock_data.iloc[new_entry_idx]
-                        reentry_rsi = reentry_bar.get('rsi', np.nan)
-                        reentry_ewo = reentry_bar.get('ewo', np.nan)
-                        reentry_ewo_avg = reentry_bar.get('ewo_15min_avg', np.nan)
-                        if DD_scoring_enabled and reentry_score:
-                            f = reentry_score['fulfillments']
-                            print(f"    RSI Overbought delay: entry at {new_entry_time.strftime('%H:%M')} "
-                                  f"(RSI: {DD_rsi:.1f} -> {reentry_rsi:.1f}, EWO: {reentry_ewo:.3f}, EWO Avg: {reentry_ewo_avg:.3f}) "
-                                  f"[Confidence: {reentry_score['confidence']:.1f}% | "
-                                  f"RSI:{f['rsi']:.0f}% EWO:{f['ewo']:.0f}% EWO_avg:{f['ewo_avg']:.0f}% Time:{f['time']:.0f}%]")
-                        else:
-                            reentry_rsi_avg = reentry_bar.get('rsi_10min_avg', np.nan)
-                            print(f"    RSI Overbought delay: entry at {new_entry_time.strftime('%H:%M')} "
-                                  f"(RSI: {DD_rsi:.1f} -> Avg(RSI): {reentry_rsi_avg:.1f}, EWO: {reentry_ewo:.3f}, EWO Avg: {reentry_ewo_avg:.3f})")
-                        return position, matrix
-                    else:
-                        # No reentry found - track data through end of day for analysis
-                        position = Position(
-                            signal=signal,
-                            entry_price=entry_option_price,
-                            entry_time=entry_time,
-                            contracts=self.default_contracts
-                        )
-                        position.delay_reason = 'RSI Overbought'
-                        position.original_entry_time = entry_time
-                        position.close(entry_option_price, entry_time, 'Overbought - No Reentry')
-
-                        matrix = TrackingMatrix(position)
-                        self._simulate_position(position, matrix, stock_data, signal, entry_idx, entry_stock_price)
-
-                        print(f"    RSI Overbought: no reentry found, tracking through EOD")
-                        return position, matrix
-                elif DD_config.get('delay_on_oversold', True) and DD_result['DD_reason'] == 'OverSold':
-                    DD_rsi_reentry_os = DD_config.get('rsi_reentry_threshold_oversold', 70)
-
-                    # Scan forward for reentry using fulfillment-based scoring
-                    DD_scoring_config = DD_config.get('reentry_scoring', {})
-                    DD_scoring_enabled = DD_scoring_config.get('enabled', True)
-                    DD_rejection_time = DD_stock_data.index[entry_idx]
-
-                    new_entry_idx = None
-                    reentry_score = None
-                    for scan_idx in range(entry_idx + 1, len(DD_stock_data)):
-                        scan_bar = DD_stock_data.iloc[scan_idx]
-                        scan_rsi = scan_bar.get('rsi', np.nan)
-                        scan_ewo = scan_bar.get('ewo', np.nan)
-                        scan_ewo_avg = scan_bar.get('ewo_15min_avg', np.nan)
-                        scan_time = DD_stock_data.index[scan_idx]
-
-                        # Stop scanning at market close
-                        if scan_time.time() >= dt.time(15, 55):
-                            break
-
-                        # Skip if any required indicator is NaN
-                        if np.isnan(scan_rsi) or np.isnan(scan_ewo) or np.isnan(scan_ewo_avg):
-                            continue
-
-                        if DD_scoring_enabled:
-                            # Fulfillment-based scoring: weighted avg of indicator fulfillments >= 100%
-                            minutes_elapsed = (scan_time - DD_rejection_time).total_seconds() / 60.0
-                            reentry_score = score_reentry_confidence(
-                                rsi=scan_rsi, ewo=scan_ewo, ewo_avg=scan_ewo_avg,
-                                minutes_elapsed=minutes_elapsed,
-                                scoring_config=DD_scoring_config,
-                                option_type=signal['option_type'],
-                            )
-                            if reentry_score['enter']:
-                                new_entry_idx = scan_idx
-                                break
-                        else:
-                            # Legacy binary AND logic
-                            scan_rsi_avg = scan_bar.get('rsi_10min_avg', np.nan)
-                            if (not np.isnan(scan_rsi_avg) and scan_rsi_avg >= DD_rsi_reentry_os and
-                                    scan_ewo > 0 and scan_ewo_avg > 0):
-                                new_entry_idx = scan_idx
-                                break
-
-                    if new_entry_idx is not None:
-                        # Delayed entry - reentry conditions met
-                        new_entry_bar = stock_data.iloc[new_entry_idx]
-                        new_entry_time = stock_data.index[new_entry_idx]
-                        new_entry_stock_price = new_entry_bar['close']
-
-                        new_days_to_expiry = (signal['expiration'] - new_entry_time.date()).days if signal['expiration'] else 30
-                        new_entry_option_price = Analysis.estimate_option_price_bs(
-                            stock_price=new_entry_stock_price,
-                            strike=signal['strike'],
-                            option_type=signal['option_type'],
-                            days_to_expiry=new_days_to_expiry
-                        )
-                        new_entry_option_price *= (1 + self.slippage_pct)
-
-                        position = Position(
-                            signal=signal,
-                            entry_price=new_entry_option_price,
-                            entry_time=new_entry_time,
-                            contracts=self.default_contracts
-                        )
-                        position.delay_reason = 'RSI Oversold'
-                        position.original_entry_time = entry_time
-
-                        matrix = TrackingMatrix(position)
-                        self._simulate_position(position, matrix, stock_data, signal, new_entry_idx, new_entry_stock_price)
-
-                        reentry_bar = DD_stock_data.iloc[new_entry_idx]
-                        reentry_rsi = reentry_bar.get('rsi', np.nan)
-                        reentry_ewo = reentry_bar.get('ewo', np.nan)
-                        reentry_ewo_avg = reentry_bar.get('ewo_15min_avg', np.nan)
-                        if DD_scoring_enabled and reentry_score:
-                            f = reentry_score['fulfillments']
-                            print(f"    RSI Oversold delay: entry at {new_entry_time.strftime('%H:%M')} "
-                                  f"(RSI: {DD_rsi:.1f} -> {reentry_rsi:.1f}, EWO: {reentry_ewo:.3f}, EWO Avg: {reentry_ewo_avg:.3f}) "
-                                  f"[Confidence: {reentry_score['confidence']:.1f}% | "
-                                  f"RSI:{f['rsi']:.0f}% EWO:{f['ewo']:.0f}% EWO_avg:{f['ewo_avg']:.0f}% Time:{f['time']:.0f}%]")
-                        else:
-                            reentry_rsi_avg = reentry_bar.get('rsi_10min_avg', np.nan)
-                            print(f"    RSI Oversold delay: entry at {new_entry_time.strftime('%H:%M')} "
-                                  f"(RSI: {DD_rsi:.1f} -> Avg(RSI): {reentry_rsi_avg:.1f}, EWO: {reentry_ewo:.3f}, EWO Avg: {reentry_ewo_avg:.3f})")
-                        return position, matrix
-                    else:
-                        # No reentry found - track data through end of day for analysis
-                        position = Position(
-                            signal=signal,
-                            entry_price=entry_option_price,
-                            entry_time=entry_time,
-                            contracts=self.default_contracts
-                        )
-                        position.delay_reason = 'RSI Oversold'
-                        position.original_entry_time = entry_time
-                        position.close(entry_option_price, entry_time, 'Oversold - No Reentry')
-
-                        matrix = TrackingMatrix(position)
-                        self._simulate_position(position, matrix, stock_data, signal, entry_idx, entry_stock_price)
-
-                        print(f"    RSI Oversold: no reentry found, tracking through EOD")
-                        return position, matrix
-                else:
-                    # DD rejection with delay disabled
-                    DD_position = Position(
-                        signal=signal,
-                        entry_price=entry_option_price,
-                        entry_time=entry_time,
-                        contracts=self.default_contracts
-                    )
-                    DD_position.close(entry_option_price, entry_time, DD_result['DD_reason'])
-                    DD_matrix = TrackingMatrix(DD_position)
-                    print(f"    DD Rejected: {DD_result['DD_details']}")
-                    return DD_position, DD_matrix
-
         # Create position
         position = Position(
             signal=signal,
@@ -1159,16 +882,6 @@ class Backtest:
                                              supertrend_period=supertrend_period,
                                              supertrend_multiplier=supertrend_multiplier)
 
-        # Get stop loss settings from config
-        SL_config = self.config.get('stop_loss', {})
-        SL_enabled = SL_config.get('enabled', True)
-        SL_pct = SL_config.get('stop_loss_pct', 0.30)
-        SL_trailing_trigger_pct = SL_config.get('trailing_trigger_pct', 0.50)
-        SL_trailing_stop_pct = SL_config.get('trailing_stop_pct', 0.30)
-        SL_breakeven_min_minutes = SL_config.get('breakeven_min_minutes', 30)
-        SL_reversal_exit_enabled = SL_config.get('reversal_exit_enabled', True)
-        SL_downtrend_exit_enabled = SL_config.get('downtrend_exit_enabled', True)
-
         # Get Closure - Peak settings from config
         CP_config = self.config.get('closure_peak', {})
         CP_enabled = CP_config.get('enabled', True)
@@ -1180,18 +893,7 @@ class Backtest:
         CP_start_minute = 60 - CP_minutes
         CP_start_time = dt.time(CP_start_hour, CP_start_minute)
 
-        # Initialize stop loss manager
-        SL_manager = StopLoss(
-            entry_price=position.entry_price,
-            stop_loss_pct=SL_pct,
-            trailing_trigger_pct=SL_trailing_trigger_pct,
-            trailing_stop_pct=SL_trailing_stop_pct,
-            breakeven_min_minutes=SL_breakeven_min_minutes,
-            option_type=position.option_type
-        )
-
         max_vwap_ema_avg = np.nan  # Running max of (VWAP+EMA+High)/3
-        ob_signal_price = None  # Track overbought exit price for buy-back opportunity
 
         for i, (timestamp, bar) in enumerate(stock_data.iterrows()):
             stock_price = bar['close']
@@ -1231,35 +933,6 @@ class Backtest:
                 entry_stock_price=entry_stock_price
             )
 
-            # Overbought buy-back: re-enter if Avg(RSI) < 50 and price 15% below signal
-            if ob_signal_price is not None and position.is_closed and not np.isnan(rsi_10min_avg):
-                if rsi_10min_avg < 50 and option_price <= ob_signal_price * 0.85:
-                    reentry_price = option_price * (1 + self.slippage_pct)
-                    position.entry_price = reentry_price
-                    position.entry_time = timestamp
-                    position.is_closed = False
-                    position.exit_price = None
-                    position.exit_time = None
-                    position.exit_reason = None
-                    position.highest_price = reentry_price
-                    position.lowest_price = reentry_price
-                    position.current_price = reentry_price
-                    position.max_stop_loss_price = reentry_price
-                    entry_idx = i
-                    entry_stock_price = stock_price
-                    ob_signal_price = None  # Only one buy-back allowed
-
-                    # Reinitialize stop loss manager for new entry
-                    if SL_enabled:
-                        SL_manager = StopLoss(
-                            entry_price=reentry_price,
-                            stop_loss_pct=SL_pct,
-                            trailing_trigger_pct=SL_trailing_trigger_pct,
-                            trailing_stop_pct=SL_trailing_stop_pct,
-                            breakeven_min_minutes=SL_breakeven_min_minutes,
-                            option_type=position.option_type
-                        )
-
             # Determine holding status
             is_pre_entry = i < entry_idx
             is_post_exit = position.is_closed
@@ -1272,38 +945,13 @@ class Backtest:
             if holding:
                 position.update(timestamp, option_price, stock_price)
 
-                # Update stop loss and check if triggered
-                SL_price = np.nan
-                SL_mode = None
-                SL_triggered = False
-                SL_reversal = False
-                SL_bearish_signal = False
-                SL_downtrend = False
-
-                if SL_enabled:
-                    minutes_held = position.get_minutes_held(timestamp)
-                    true_price = Analysis.true_price(stock_price, stock_high, stock_low)
-                    SL_result = SL_manager.update(
-                        option_price, minutes_held=minutes_held,
-                        true_price=true_price, vwap=vwap, ema=ema_30,
-                        emavwap=emavwap, vwap_ema_avg=vwap_ema_avg
-                    )
-                    SL_price = SL_result['stop_loss']
-                    SL_mode = SL_result['mode']
-                    SL_triggered = SL_result['triggered']
-                    SL_reversal = SL_result['reversal']
-                    SL_bearish_signal = SL_result['bearish_signal']
-                    SL_downtrend = SL_result['downtrend']
-
-                # Record tracking data with stop loss and indicators
+                # Record tracking data with indicators
                 matrix.add_record(
                     timestamp=timestamp,
                     stock_price=stock_price,
                     option_price=option_price,
                     volume=volume,
                     holding=True,
-                    stop_loss=SL_price,
-                    stop_loss_mode=SL_mode,
                     vwap=vwap,
                     ema_30=ema_30,
                     vwap_ema_avg=vwap_ema_avg,
@@ -1318,37 +966,8 @@ class Backtest:
                     supertrend_direction=st_direction
                 )
 
-                # Check for overbought/oversold instant exit at entry bar
-                if i == entry_idx and not position.is_closed and not np.isnan(rsi):
-                    if position.option_type.upper() in ['CALL', 'CALLS', 'C'] and rsi >= 85:
-                        exit_price = option_price * (1 - self.slippage_pct)
-                        position.close(exit_price, timestamp, 'Overbought')
-                        ob_signal_price = option_price  # Track for buy-back opportunity
-                    elif position.option_type.upper() in ['PUT', 'PUTS', 'P'] and rsi <= 15:
-                        exit_price = option_price * (1 - self.slippage_pct)
-                        position.close(exit_price, timestamp, 'Oversold')
-
-                # Check for reversal exit (True Price < VWAP)
-                if SL_enabled and SL_reversal_exit_enabled and SL_reversal and not position.is_closed:
-                    exit_price = option_price * (1 - self.slippage_pct)
-                    exit_reason = self._format_exit_reason('stop_loss_reversal')
-                    position.close(exit_price, timestamp, exit_reason)
-
-                # Check for downtrend exit (True Price & EMA < vwap_ema_avg)
-                elif SL_enabled and SL_downtrend_exit_enabled and SL_downtrend and not position.is_closed:
-                    exit_price = option_price * (1 - self.slippage_pct)
-                    exit_reason = self._format_exit_reason('stop_loss_downtrend')
-                    position.close(exit_price, timestamp, exit_reason)
-
-                # Check for stop loss exit (only if stop loss is enabled)
-                elif SL_enabled and SL_triggered and not position.is_closed:
-                    exit_price = option_price * (1 - self.slippage_pct)
-                    # Map stop loss mode to user-friendly format
-                    exit_reason = self._format_exit_reason(f'stop_loss_{SL_mode}')
-                    position.close(exit_price, timestamp, exit_reason)
-
                 # Closure - Peak: Avg RSI (10min) based exit in last 30 minutes of trading day
-                elif CP_enabled and not position.is_closed and not np.isnan(rsi_10min_avg) and timestamp.time() >= CP_start_time:
+                if CP_enabled and not position.is_closed and not np.isnan(rsi_10min_avg) and timestamp.time() >= CP_start_time:
                     if position.option_type.upper() in ['CALL', 'CALLS', 'C'] and rsi_10min_avg >= CP_rsi_call:
                         exit_price = option_price * (1 - self.slippage_pct)
                         position.close(exit_price, timestamp, 'Closure - Peak')
@@ -1368,8 +987,6 @@ class Backtest:
                     option_price=option_price,
                     volume=volume,
                     holding=False,
-                    stop_loss=np.nan,
-                    stop_loss_mode=None,
                     vwap=vwap,
                     ema_30=ema_30,
                     vwap_ema_avg=vwap_ema_avg,
@@ -1388,45 +1005,6 @@ class Backtest:
         if not position.is_closed:
             exit_price = position.current_price * (1 - self.slippage_pct)
             position.close(exit_price, stock_data.index[-1], 'Closure-Market')
-
-    def _format_exit_reason(self, reason):
-        """
-        Format exit reason to user-friendly display string.
-
-        Mappings:
-        - stop_loss_initial -> "SL - Initial"
-        - stop_loss_breakeven -> "SL - Breakeven"
-        - stop_loss_trailing -> "SL - Trailing"
-        - stop_loss_reversal -> "SL - Reversal"
-        - stop_loss_downtrend -> "SL - DownTrend"
-        - closure_peak -> "Closure - Peak"
-        - market_close -> "Closure-Market"
-        """
-        if reason is None:
-            return 'Unknown'
-
-        # Stop loss exits
-        if reason == 'stop_loss_initial':
-            return 'SL - Initial'
-        elif reason == 'stop_loss_breakeven':
-            return 'SL - Breakeven'
-        elif reason == 'stop_loss_trailing':
-            return 'SL - Trailing'
-        elif reason == 'stop_loss_reversal':
-            return 'SL - Reversal'
-        elif reason == 'stop_loss_downtrend':
-            return 'SL - DownTrend'
-
-        # Closure - Peak
-        elif reason == 'closure_peak':
-            return 'Closure - Peak'
-
-        # Closure-Market
-        elif reason == 'market_close':
-            return 'Closure-Market'
-
-        # Return original if no mapping found
-        return reason
 
     def _compile_results(self):
         """Compile backtest results into DataFrames."""
