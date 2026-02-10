@@ -26,12 +26,8 @@ COLORS = {
     'option': '#FF6D00',
     'entry': '#00C853',
     'exit': '#FF1744',
-    'rsi': '#E91E63',
-    'macd_crossover': '#00BCD4',
-    'vwap': '#8BC34A',
-    'vpoc': '#FF5722',
+    'vwap': '#0D47A1',
     'supertrend': '#9C27B0',
-    'expiration': '#795548',
     'ema_20': '#29B6F6',          # Light Blue
     'ema_30': '#AB47BC',          # Purple
     'vwap_ema_avg': '#FFEB3B',    # Yellow
@@ -40,34 +36,22 @@ COLORS = {
     'trading_range': '#FF1744',   # Red
 }
 
-EXIT_SYMBOLS = {
-    'rsi': 'diamond',
-    'macd_crossover': 'cross',
-    'vwap': 'pentagon',
-    'vpoc': 'hexagon',
-    'supertrend': 'star-triangle-up',
-    'expiration': 'hourglass',
-}
-
-
 def load_data():
     """Load backtest data from pickle file, caching in session state."""
     if 'matrices' in st.session_state and st.session_state.matrices:
-        return st.session_state.matrices, st.session_state.exit_signals
+        return st.session_state.matrices
 
     if not os.path.exists(DATA_PATH):
-        return {}, {}
+        return {}
     try:
         with open(DATA_PATH, 'rb') as f:
             data = pickle.load(f)
         matrices = data.get('matrices', {})
-        exit_signals = data.get('exit_signals', {})
         st.session_state.matrices = matrices
-        st.session_state.exit_signals = exit_signals
-        return matrices, exit_signals
+        return matrices
     except Exception as e:
         st.error(f"Error loading data: {e}")
-        return {}, {}
+        return {}
 
 
 def parse_time(ts):
@@ -134,7 +118,7 @@ def find_entry_exit(df):
     return entry_row, exit_row, opt_col
 
 
-def create_trade_chart(df, trade_label, show_all_exits=False, market_hours_only=False, show_ewo=True, show_rsi=True, show_supertrend=False):
+def create_trade_chart(df, trade_label, market_hours_only=False, show_ewo=True, show_rsi=True, show_supertrend=False):
     """Create dual-axis chart with stock/option prices, error bars, and combined EWO/RSI subplot."""
     df = df.copy()
     df['time'] = df['timestamp'].apply(parse_time)
@@ -190,7 +174,7 @@ def create_trade_chart(df, trade_label, show_all_exits=False, market_hours_only=
                 x=df['time'],
                 y=df['vwap'],
                 name='VWAP',
-                line=dict(color='#FF0000', width=2),
+                line=dict(color='#0D47A1', width=2),
                 hovertemplate='VWAP: $%{y:.2f}<extra></extra>'
             ),
             row=1, col=1, secondary_y=False
@@ -359,31 +343,6 @@ def create_trade_chart(df, trade_label, show_all_exits=False, market_hours_only=
             ),
             row=1, col=1, secondary_y=True
         )
-
-    # Show all exit strategy markers (when toggle is on)
-    if show_all_exits and 'exit_signals_at_time' in df.columns:
-        signal_types = set()
-        for s in df['exit_signals_at_time'].dropna():
-            if s:
-                signal_types.update([x.strip() for x in str(s).split(',') if x.strip()])
-
-        for sig_type in signal_types:
-            mask = df['exit_signals_at_time'].astype(str).str.contains(sig_type, na=False)
-            sig_df = df[mask]
-            if not sig_df.empty:
-                color = COLORS.get(sig_type, '#888888')
-                symbol = EXIT_SYMBOLS.get(sig_type, 'circle')
-                fig.add_trace(
-                    go.Scatter(
-                        x=sig_df['time'],
-                        y=sig_df[opt_col],
-                        mode='markers',
-                        name=sig_type.replace('_', ' ').title(),
-                        marker=dict(symbol=symbol, size=10, color=color, opacity=0.7),
-                        hovertemplate=f'{sig_type.replace("_", " ").title()}<br>$%{{y:.2f}}<extra></extra>'
-                    ),
-                    row=1, col=1, secondary_y=True
-                )
 
     # EWO subplot (row 2) — displayed as histogram bars
     if has_ewo:
@@ -568,6 +527,15 @@ def get_trade_summary(df):
                 contracts = int(df['contracts'].iloc[0]) if 'contracts' in df.columns else 1
                 profit_min = (min_price - entry_price) * contracts * 100
 
+    # Market bias at exit (last holding bar's VWAP assessment)
+    market_bias = 'N/A'
+    if 'market_bias' in df.columns and 'holding' in df.columns:
+        holding_df = df[df['holding'] == True]
+        if not holding_df.empty:
+            last_bias = holding_df['market_bias'].iloc[-1]
+            if pd.notna(last_bias) and last_bias != '':
+                market_bias = last_bias
+
     return {
         'entry': entry_price,
         'exit': exit_price,
@@ -578,7 +546,8 @@ def get_trade_summary(df):
         'min_price': min_price,
         'max_profit_pct': max_profit_pct,
         'min_profit_pct': min_profit_pct,
-        'profit_min': profit_min
+        'profit_min': profit_min,
+        'market_bias': market_bias
     }
 
 
@@ -667,7 +636,7 @@ def get_trade_table(df):
 def main():
     st.title("Trade Dashboard")
 
-    matrices, _ = load_data()
+    matrices = load_data()
 
     if not matrices:
         st.warning("No backtest data found. Run Test.py first.")
@@ -679,7 +648,6 @@ def main():
 
         if st.button("Reload Data"):
             st.session_state.pop('matrices', None)
-            st.session_state.pop('exit_signals', None)
             st.rerun()
 
         trade_list = []
@@ -715,7 +683,6 @@ def main():
 
         st.markdown("---")
         market_hours_only = st.toggle("Market Hours", value=True, help="ON: Full market hours view | OFF: Holding period only")
-        show_all_exits = st.toggle("Show All Exit Signals", value=False)
         show_ewo = st.toggle("Show EWO Graph", value=True)
         show_rsi = st.toggle("Show RSI Graph", value=True)
         show_supertrend = st.toggle("Show Supertrend", value=False, help="Overlay Supertrend indicator on main chart")
@@ -754,7 +721,7 @@ def main():
     df = matrices[pos_id]
 
     # Chart first (no summary above)
-    fig = create_trade_chart(df, trade_label, show_all_exits, market_hours_only, show_ewo, show_rsi, show_supertrend)
+    fig = create_trade_chart(df, trade_label, market_hours_only, show_ewo, show_rsi, show_supertrend)
     if fig:
         st.plotly_chart(fig, use_container_width=True)
     else:
@@ -764,13 +731,13 @@ def main():
     st.subheader("Trade Summary")
     summary = get_trade_summary(df)
 
-    # Row 1: Entry | Exit | P&L | Profit[min] TBD | TBD | TBD | TBD
+    # Row 1: Entry | Exit | P&L | Market | Profit[min] TBD | TBD | TBD
     row1 = st.columns(7)
     row1[0].metric("Entry", f"${summary['entry']:.2f}")
     row1[1].metric("Exit", f"${summary['exit']:.2f}")
     row1[2].metric("P&L", f"{summary['pnl_pct']:+.1f}%")
-    row1[3].metric("Profit[min] TBD", f"${summary['profit_min']:+.2f}")
-    row1[4].metric("TBD", "1")
+    row1[3].metric("Market", summary['market_bias'])
+    row1[4].metric("Profit[min] TBD", f"${summary['profit_min']:+.2f}")
     row1[5].metric("TBD", "1")
     row1[6].metric("TBD", "1")
 
@@ -789,11 +756,11 @@ def main():
     table_df = get_trade_table(df)
     st.dataframe(table_df, use_container_width=True, hide_index=True)
 
-    # Matrix Data section
-    st.subheader("Matrix Data")
+    # Databook section
+    st.subheader("Databook")
 
     # Column order from Config (source of truth)
-    matrix_cols = Config.DATAFRAME_COLUMNS['dashboard_matrix']
+    matrix_cols = Config.DATAFRAME_COLUMNS['dashboard_databook']
 
     # Filter to columns that exist in the dataframe
     available_cols = [col for col in matrix_cols if col in df.columns]
@@ -838,7 +805,7 @@ def main():
 
         st.dataframe(matrix_df, use_container_width=True, hide_index=True)
     else:
-        st.info("No matrix data available for this trade.")
+        st.info("No databook data available for this trade.")
 
 
 if __name__ == "__main__":
