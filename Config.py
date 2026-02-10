@@ -138,7 +138,7 @@ ANALYSIS_CONFIG = {
     'options': {
         'risk_free_rate': 0.05,                    # Annual risk-free rate (5%)
         'default_volatility': 0.30,                # Default implied volatility (30%)
-        'min_option_price': 0.01,                  # Min option price floor
+        'min_option_price': 0.10,                  # Min option price floor
     },
 }
 
@@ -160,11 +160,11 @@ BACKTEST_CONFIG = {
         'stop_loss_pct': 0.27,                     # Max loss from entry (25%)
         'stop_loss_warning_pct': 0.15,             # Warning threshold (15%)
         'profit_target_pct': 1.00,                 # Profit target (100%)
-        'trailing_stop_pct': 0.35,                 # Trailing below highest (20%)
+        'trailing_stop_pct': 0.27,                 # Trailing below highest (20%)
         'time_stop_minutes': 60,                   # Time stop (minutes)
         'breakeven_threshold_pct': None,           # None = auto-calculate as entry/(1-stop_loss_pct)
         'breakeven_min_minutes': 30,               # Min hold before breakeven transition
-        'trailing_trigger_pct': 0.50,              # Start trailing at profit (50%)
+        'trailing_trigger_pct': 0.30,              # Start trailing at profit (50%)
         'reversal_exit_enabled': True,             # Exit when True Price < VWAP (reversal)
         'downtrend_exit_enabled': True,            # Exit when True Price & EMA < vwap_ema_avg (downtrend)
     },
