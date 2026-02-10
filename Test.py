@@ -1166,12 +1166,14 @@ class Backtest:
         SL_trailing_trigger_pct = SL_config.get('trailing_trigger_pct', 0.50)
         SL_trailing_stop_pct = SL_config.get('trailing_stop_pct', 0.30)
         SL_breakeven_min_minutes = SL_config.get('breakeven_min_minutes', 30)
-        SL_reversal_exit_enabled = SL_config.get('reversal_exit_enabled', True)
-        SL_downtrend_exit_enabled = SL_config.get('downtrend_exit_enabled', True)
+        # Get exit strategy toggles from centralized section
+        exit_strat = self.config.get('exit_strategies', {})
+        SL_reversal_exit_enabled = exit_strat.get('reversal_exit_enabled', True)
+        SL_downtrend_exit_enabled = exit_strat.get('downtrend_exit_enabled', True)
+        CP_enabled = exit_strat.get('closure_peak_exit_enabled', True)
 
         # Get Closure - Peak settings from config
         CP_config = self.config.get('closure_peak', {})
-        CP_enabled = CP_config.get('enabled', True)
         CP_rsi_call = CP_config.get('rsi_call_threshold', 87)
         CP_rsi_put = CP_config.get('rsi_put_threshold', 13)
         CP_minutes = CP_config.get('minutes_before_close', 30)

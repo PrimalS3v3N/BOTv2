@@ -151,7 +151,7 @@ Three-phase stop loss system for options contracts (configured via `stop_loss` d
    - Stop only moves up, never down
 
 4. **REVERSAL Exit**: If True Price falls below VWAP, reversal detected → exit as "SL - Reversal"
-   - Enabled via `reversal_exit_enabled: True` in `stop_loss` config
+   - Enabled via `reversal_exit_enabled: True` in `exit_strategies` config
    - Bearish Signal: When EMA falls below VWAP (use to buy a Put in future reversal system)
 
 **Classes:**
