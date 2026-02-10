@@ -26,27 +26,43 @@ COLORS = {
     'option': '#FF6D00',
     'entry': '#00C853',
     'exit': '#FF1744',
+    'stop_loss': '#D50000',
+    'trailing_stop': '#FFAB00',
+    'time_stop': '#7C4DFF',
     'rsi': '#E91E63',
     'macd_crossover': '#00BCD4',
     'vwap': '#8BC34A',
     'vpoc': '#FF5722',
     'supertrend': '#9C27B0',
     'expiration': '#795548',
+    # Stop loss tracking
     'ema_20': '#29B6F6',          # Light Blue
     'ema_30': '#AB47BC',          # Purple
     'vwap_ema_avg': '#FFEB3B',    # Yellow
     'emavwap': '#00E5FF',         # Cyan
+    'stop_loss_line': '#00C853',  # Green (changed from red)
+    'sl_c1': '#FFD54F',           # Amber (conditional trailing)
+    'sl_c2': '#FF8A65',           # Deep Orange (EMA/VWAP bearish)
+    'sl_c3': '#E53935',           # Red (downtrend)
+    'sl_ema': '#FF8A65',          # Same as sl_c2
     # Trading range
     'trading_range': '#FF1744',   # Red
 }
 
 EXIT_SYMBOLS = {
+    'stop_loss': 'x',
+    'trailing_stop': 'triangle-down',
+    'time_stop': 'square',
     'rsi': 'diamond',
     'macd_crossover': 'cross',
     'vwap': 'pentagon',
     'vpoc': 'hexagon',
     'supertrend': 'star-triangle-up',
     'expiration': 'hourglass',
+    'sl_ema': 'triangle-down',
+    'sl_c1': 'circle',
+    'sl_c2': 'triangle-down',
+    'sl_c3': 'diamond',
 }
 
 
@@ -321,6 +337,79 @@ def create_trade_chart(df, trade_label, show_all_exits=False, market_hours_only=
             ),
             row=1, col=1, secondary_y=True
         )
+
+    # Stop Loss line (right y-axis, tracks stop loss price)
+    if 'stop_loss' in df.columns and df['stop_loss'].notna().any():
+        # Create hover text with stop_loss_mode if available
+        if 'stop_loss_mode' in df.columns:
+            hover_text = df.apply(
+                lambda r: f"Stop Loss: ${r['stop_loss']:.2f}<br>Mode: {r['stop_loss_mode']}"
+                if pd.notna(r['stop_loss']) else "", axis=1
+            )
+        else:
+            hover_text = df['stop_loss'].apply(lambda x: f"Stop Loss: ${x:.2f}" if pd.notna(x) else "")
+
+        # Stop Loss line
+        fig.add_trace(
+            go.Scatter(
+                x=df['time'],
+                y=df['stop_loss'],
+                name='Stop Loss',
+                line=dict(color=COLORS['stop_loss_line'], width=1.5, dash='dash'),
+                hovertemplate='%{text}<extra></extra>',
+                text=hover_text
+            ),
+            row=1, col=1, secondary_y=True
+        )
+
+
+    # SL_C1 markers: Conditional trailing active (profit target + VWAP hold)
+    if 'SL_C1' in df.columns and opt_col in df.columns:
+        sl_c1_df = df[df['SL_C1'] == True]
+        if not sl_c1_df.empty:
+            fig.add_trace(
+                go.Scatter(
+                    x=sl_c1_df['time'],
+                    y=sl_c1_df[opt_col],
+                    mode='markers',
+                    name='SL_C1 (Trailing)',
+                    marker=dict(symbol='circle', size=8, color=COLORS['sl_c1'], opacity=0.6),
+                    hovertemplate='SL_C1: Conditional Trailing<br>$%{y:.2f}<extra></extra>'
+                ),
+                row=1, col=1, secondary_y=True
+            )
+
+    # SL_C2 markers: EMA/VWAP bearish condition
+    if 'SL_C2' in df.columns and opt_col in df.columns:
+        sl_c2_df = df[df['SL_C2'] == True]
+        if not sl_c2_df.empty:
+            fig.add_trace(
+                go.Scatter(
+                    x=sl_c2_df['time'],
+                    y=sl_c2_df[opt_col],
+                    mode='markers',
+                    name='SL_C2 (EMA/VWAP)',
+                    marker=dict(symbol='triangle-down', size=8, color=COLORS['sl_c2'], opacity=0.6),
+                    hovertemplate='SL_C2: EMA30>VWAP & Price<EMA30<br>$%{y:.2f}<extra></extra>'
+                ),
+                row=1, col=1, secondary_y=True
+            )
+
+    # SL_C3 markers: DownTrend condition (True Price & EMA below vwap_ema_avg)
+    if 'SL_C3' in df.columns and opt_col in df.columns:
+        sl_c3_df = df[df['SL_C3'] == True]
+        if not sl_c3_df.empty:
+            fig.add_trace(
+                go.Scatter(
+                    x=sl_c3_df['time'],
+                    y=sl_c3_df[opt_col],
+                    mode='markers',
+                    name='SL_C3 (DownTrend)',
+                    marker=dict(symbol='diamond', size=8, color=COLORS['sl_c3'], opacity=0.6),
+                    hovertemplate='SL_C3: DownTrend (TP & EMA < vwap_ema_avg)<br>$%{y:.2f}<extra></extra>'
+                ),
+                row=1, col=1, secondary_y=True
+            )
 
     # Entry marker
     if entry_row is not None:
@@ -801,6 +890,10 @@ def main():
     if available_cols:
         matrix_df = df[available_cols].copy()
 
+        # Calculate sl_cushion (Option_price - Stop_loss) if both columns exist
+        if 'option_price' in df.columns and 'stop_loss' in df.columns:
+            matrix_df['sl_cushion'] = df['option_price'] - df['stop_loss']
+
         # Filter based on toggle:
         # ON (market_hours_only=True): Show full market hours (9:00 AM - 4:00 PM)
         # OFF (market_hours_only=False): Show only holding period (where holding=True)
@@ -823,6 +916,9 @@ def main():
 
         if 'pnl_pct' in matrix_df.columns:
             matrix_df['pnl_pct'] = matrix_df['pnl_pct'].apply(lambda x: f"{x:+.1f}%" if pd.notna(x) else "")
+
+        if 'sl_cushion' in matrix_df.columns:
+            matrix_df['sl_cushion'] = matrix_df['sl_cushion'].apply(lambda x: f"${x:.2f}" if pd.notna(x) else "")
 
         if 'ewo' in matrix_df.columns:
             matrix_df['ewo'] = matrix_df['ewo'].apply(lambda x: f"{x:.3f}" if pd.notna(x) else "")

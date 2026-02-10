@@ -36,7 +36,23 @@ Config.py ───────────────────────�
 | DISCORD_CONFIG | Discord bot token, channel ID, API settings |
 | RISK_CONFIG | Position sizing, instrument defaults, stop loss |
 | DATA_CONFIG | Data fetching parameters |
-| BACKTEST_CONFIG | Backtesting parameters, closure exit settings |
+| BACKTEST_CONFIG | Backtesting parameters, stop loss settings |
+
+**Stop Loss Configuration:**
+All stop loss settings are consolidated into a `stop_loss` nested structure:
+```python
+'stop_loss': {
+    'enabled': True,
+    'stop_loss_pct': 0.27,              # Max loss from entry
+    'trailing_stop_pct': 0.27,          # Trailing below highest
+    'breakeven_threshold_pct': None,    # Auto-calculate
+    'breakeven_min_minutes': 30,        # Min hold before breakeven
+    'trailing_trigger_pct': 0.30,       # Start trailing at profit
+    'reversal_exit_enabled': True,      # Exit when True Price < VWAP
+    'downtrend_exit_enabled': True,     # Exit when True Price & EMA < vwap_ema_avg
+}
+```
+This structure exists in `BACKTEST_CONFIG` (backtesting) as `stop_loss`.
 
 ---
 
@@ -111,7 +127,34 @@ Config.py ───────────────────────�
 ### Strategy.py
 **Goal:** Logic for strategies. Process inputs from Data & Analysis, output decision logic.
 
-**Status:** Clean slate (exit strategies removed for rebuild)
+**Status:** Active
+
+**Implemented Strategies:**
+- StopLoss (3-phase exit strategy)
+
+**StopLoss:**
+Three-phase stop loss system for options contracts (configured via `stop_loss` dict):
+
+1. **INITIAL Phase**: Fixed stop loss at `entry_price × (1 - stop_loss_pct)`
+   - Default: 27% below entry (`stop_loss_pct: 0.27`)
+
+2. **BREAKEVEN Phase**: When price rises above threshold, move stop to entry price
+   - Threshold = `entry_price / (1 - stop_loss_pct)` (auto-calculated if `breakeven_threshold_pct: None`)
+   - **Requires minimum `breakeven_min_minutes` (30)** before transitioning
+
+3. **TRAILING Phase**: When profit reaches `trailing_trigger_pct` (30%), trail at `trailing_stop_pct` (27%) below highest price
+   - Only uses price highs AFTER entry (not before)
+   - Stop only moves up, never down
+
+4. **REVERSAL Exit**: If True Price falls below VWAP, reversal detected → exit as "SL - Reversal"
+   - Enabled via `reversal_exit_enabled: True` in `stop_loss` config
+
+5. **DOWNTREND Exit**: If True Price & EMA both below vwap_ema_avg → exit as "SL - DownTrend"
+   - Enabled via `downtrend_exit_enabled: True` in `stop_loss` config
+
+**Classes:**
+- `StopLoss` - Stateful stop loss manager
+- `check_stop_loss()` - Stateless function for backtesting
 
 **Rules:**
 - **ALL trading logic and decision-making goes here** - no exceptions
@@ -149,12 +192,16 @@ Config.py ───────────────────────�
 - Technical indicators (EMA_30, VWAP, EWO, RSI, Supertrend) in tracking data
 
 **Exit Strategies:**
+- StopLoss (3-phase: initial → breakeven → trailing)
+- SL - Reversal (True Price < VWAP)
+- SL - DownTrend (True Price & EMA < vwap_ema_avg)
 - Closure - Peak (Avg RSI based exit in last 30 minutes of trading day)
 - Closure-Market (market close exit, default fallback)
 
 **Tracking Matrix Columns:**
 - timestamp, stock_price, stock_high, stock_low, option_price, volume
 - holding, entry_price, pnl, pnl_pct
+- stop_loss, stop_loss_mode (initial/breakeven/trailing)
 - vwap, ema_30, ewo, rsi
 
 **Rules:**
@@ -180,6 +227,7 @@ Config.py ───────────────────────�
 - Option price (orange line, right axis)
 - VWAP (green dashed line, left axis)
 - EMA 30 (purple dotted line, left axis)
+- Stop Loss (green dashed line, right axis)
 - Entry/Exit markers with annotations
 - EWO subplot below main chart (with positive/negative fill)
 
@@ -288,7 +336,7 @@ These rules are mandatory. All code changes must respect module boundaries.
 | Dashboard.py | Active (full visualization) |
 | Data.py | Placeholder |
 | Analysis.py | Active (EMA, VWAP, EWO, ATR, RSI, Black-Scholes) |
-| Strategy.py | Clean slate (exit strategies removed for rebuild) |
+| Strategy.py | Active (StopLoss) |
 | Orders.py | Placeholder |
 
 ---
