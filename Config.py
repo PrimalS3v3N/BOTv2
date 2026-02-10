@@ -54,12 +54,12 @@ DISCORD_CONFIG = {
     'test_message_limit': 100,                     # Messages per request (test mode)
     'alert_marker': '<a:RedAlert:759583962237763595>',  # Discord alert emoji ID
     'rate_limit': {
-        'min_delay': 2.0,                          # Min seconds between requests
-        'max_delay': 5.0,                          # Max seconds between requests
-        'batch_size': 50,                          # Messages per request
+        'min_delay': .5,                          # Min seconds between requests
+        'max_delay': 1.5,                          # Max seconds between requests
+        'batch_size': 75,                          # Messages per request
         'long_pause_chance': 0.15,                 # Chance of longer pause (15%)
-        'long_pause_min': 8.0,                     # Long pause min (seconds)
-        'long_pause_max': 15.0,                    # Long pause max (seconds)
+        'long_pause_min': 1.0,                     # Long pause min (seconds)
+        'long_pause_max': 2.0,                    # Long pause max (seconds)
     },
     'spoof_browser': True,                         # Enable browser spoofing
     'browser_config': {
@@ -157,15 +157,16 @@ BACKTEST_CONFIG = {
     # Stop Loss - three phases: initial -> breakeven -> trailing
     'stop_loss': {
         'enabled': True,
-        'stop_loss_pct': 0.25,                     # Max loss from entry (25%)
+        'stop_loss_pct': 0.27,                     # Max loss from entry (25%)
         'stop_loss_warning_pct': 0.15,             # Warning threshold (15%)
         'profit_target_pct': 1.00,                 # Profit target (100%)
-        'trailing_stop_pct': 0.20,                 # Trailing below highest (20%)
+        'trailing_stop_pct': 0.35,                 # Trailing below highest (20%)
         'time_stop_minutes': 60,                   # Time stop (minutes)
         'breakeven_threshold_pct': None,           # None = auto-calculate as entry/(1-stop_loss_pct)
         'breakeven_min_minutes': 30,               # Min hold before breakeven transition
         'trailing_trigger_pct': 0.50,              # Start trailing at profit (50%)
         'reversal_exit_enabled': True,             # Exit when True Price < VWAP (reversal)
+        'downtrend_exit_enabled': True,            # Exit when True Price & EMA < vwap_ema_avg (downtrend)
     },
 
     # Technical indicators for backtest
@@ -196,52 +197,6 @@ BACKTEST_CONFIG = {
         'rsi_put_threshold': 15,               # Sell PUT contracts when Avg RSI (10min) <= this
         'minutes_before_close': 30,            # Activate in last N minutes (15:30+)
     },
-
-    # --- Unused backtest settings (commented out for review) ---
-    # 'position_size_pct': 0.02,                   # 2% per trade
-    # 'max_positions': 5,                          # Max concurrent positions
-    # 'commission_per_trade': 1.0,                 # $1 per trade
-    # 'candle_interval': '1m',                     # Candle interval
-    # 'use_simulated_fills': True,                 # Use simulated fills
-    # 'instrument_type': 'option',                 # Instrument type
-    # 'exit_strategies': {                         # Exit strategy toggles
-    #     'use_stop_loss': True,
-    #     'use_sl_ema': False,
-    #     'use_profit_target': True,
-    #     'use_trailing_stop': False,
-    #     'use_peak_exit': False,
-    #     'use_time_stop': False,
-    #     'use_expiration_stop': False,
-    #     'use_discord_signal': False,
-    #     'use_end_of_day': False,
-    #     'use_max_hold_days': False,
-    #     'use_rsi': False,
-    #     'use_macd': False,
-    #     'use_vwap': False,
-    #     'use_vpoc': False,
-    #     'use_supertrend': False,
-    # },
-    # 'indicator_settings': {                      # Options-specific indicator overrides
-    #     'rsi_period': 14,
-    #     'rsi_overbought': 80,
-    #     'rsi_oversold': 20,
-    #     'macd_fast': 12,
-    #     'macd_slow': 26,
-    #     'macd_signal': 9,
-    #     'vwap_threshold_pct': 0.02,
-    #     'vpoc_threshold_pct': 0.03,
-    #     'supertrend_period': 10,
-    #     'supertrend_multiplier': 3.0,
-    # },
-    # 'swing_trade': {                             # Swing trading settings
-    #     'enabled': False,
-    #     'allow_overnight_holds': False,
-    #     'max_hold_days': 5,
-    #     'use_end_of_day_exit': False,
-    #     'eod_exit_time': '15:45',
-    # },
-    # 'auto_export_matrices': False,               # Auto-export matrices after backtest
-    # 'export_matrices_dir': 'Data_BT',            # Export directory
 }
 
 
@@ -295,151 +250,9 @@ DATAFRAME_COLUMNS = {
         'true_price', 'option_price', 'pnl_pct',
         'stop_loss', 'stop_loss_mode', 'sl_cushion',
         'vwap', 'ema_20', 'ema_30', 'vwap_ema_avg', 'emavwap', 'ewo', 'ewo_15min_avg', 'rsi', 'rsi_10min_avg',
-        'SL_C1', 'SL_C2',
+        'SL_C1', 'SL_C2', 'SL_C3',
     ],
 }
-
-
-# =============================================================================
-# UNUSED MODULES - Commented out for review
-# =============================================================================
-# Settings defined in Alpha.MD but not yet used by any active script.
-# Uncomment when their corresponding modules are implemented.
-
-# TRADING_MODE = os.getenv('TRADING_MODE', 'paper')  # 'paper' or 'live'
-
-# --- Credentials (Webull.py) ---
-# CREDENTIALS_CONFIG = {
-#     'email': os.getenv('WEBULL_EMAIL', ''),
-#     'password': os.getenv('WEBULL_PASSWORD', ''),
-#     'device_id': os.getenv('WEBULL_DEVICE_ID', ''),
-#     'trading_pin': os.getenv('WEBULL_TRADING_PIN', ''),
-# }
-
-# --- Market Hours (Data.py, Main.py) ---
-# MARKET_CONFIG = {
-#     'market_hours_start': 9.5,                   # 9:30 AM ET
-#     'market_hours_end': 16.0,                    # 4:00 PM ET
-#     'trading_days': [0, 1, 2, 3, 4],             # Mon-Fri
-#     'enable_premarket': False,
-#     'premarket_start': 4.0,                      # 4:00 AM ET
-#     'enable_afterhours': False,
-#     'afterhours_end': 20.0,                      # 8:00 PM ET
-#     'timezone': 'America/New_York',
-# }
-
-# --- Paper Trading (PaperTrading.py) ---
-# PAPER_CONFIG = {
-#     'initial_balance': 10000.00,
-#     'state_file': 'paper_trading_state.json',
-#     'simulated_slippage_pct': 0.001,             # 0.1% slippage
-#     'simulated_fill_delay_ms': 100,              # Fill delay (ms)
-#     'simulated_spread_pct': 0.0001,              # 0.01% bid/ask spread
-#     'use_real_prices': True,
-# }
-
-# --- Risk Management (Strategy.py, Main.py) ---
-# RISK_CONFIG = {
-#     'max_position_size_pct': 0.02,               # Max 2% per trade
-#     'max_daily_loss_pct': 0.05,                  # Stop at 5% daily loss
-#     'max_concurrent_positions': 5,
-#     'instrument_type': 'stock',
-#     'stock_defaults': {
-#         'stop_loss_pct': 0.02,
-#         'profit_target_pct': 0.05,
-#         'trailing_stop_pct': 0.05,
-#         'time_stop_minutes': None,
-#         'use_trailing_stop': True,
-#         'use_profit_target': True,
-#         'use_time_stop': False,
-#         'use_technical_stop': True,
-#         'use_expiration_stop': False,
-#     },
-#     'option_defaults': {
-#         'profit_target_pct': 1.00,
-#         'use_profit_target': True,
-#         'use_technical_stop': True,
-#         'use_expiration_stop': True,
-#         'stop_loss': {
-#             'enabled': True,
-#             'stop_loss_pct': 0.35,
-#             'stop_loss_warning_pct': 0.15,
-#             'trailing_stop_pct': 0.20,
-#             'time_stop_minutes': 60,
-#             'breakeven_threshold_pct': None,
-#             'breakeven_min_minutes': 30,
-#             'trailing_trigger_pct': 0.50,
-#         },
-#     },
-#     'atr_multiplier': 2.0,
-#     'reward_ratio': 2.0,
-# }
-
-# --- Contract Limits (Signal.py, Strategy.py) ---
-# CONTRACT_LIMITS_CONFIG = {
-#     'max_contract_price': 10.00,                 # Max price per contract ($10)
-#     'max_contract_capital': 1000.00,             # Max total capital per order ($1000)
-#     'enforce_limits': True,
-# }
-
-# --- Entry Conditions (Strategy.py, Main.py) ---
-# ENTRY_CONFIG = {
-#     'min_entry_confidence': 30,                  # Confidence threshold (-100 to 100)
-#     'require_volume_confirmation': True,
-#     'volume_multiplier': 1.2,                    # Volume must be 1.2x average
-#     'require_trend_confirmation': True,
-#     'allow_countertrend_entries': False,
-#     'max_entry_price_range_pct': 0.02,           # Entry within 2% of signal price
-# }
-
-# --- Exit Conditions (Strategy.py, Test.py) ---
-# EXIT_CONFIG = {
-#     'use_stop_loss': True,
-#     'use_profit_target': True,
-#     'use_trailing_stop': True,
-#     'use_time_stop': False,
-#     'use_technical_stop': True,
-#     'use_expiration_stop': False,
-#     'use_discord_signal': True,
-#     'exit_on_opposite_signal': True,
-#     'use_rsi_exit': True,
-#     'use_macd_exit': True,
-#     'use_vwap_exit': True,
-#     'use_vpoc_exit': True,
-#     'use_supertrend_exit': True,
-# }
-
-# --- Order Execution (Orders.py, Main.py) ---
-# ORDER_CONFIG = {
-#     'order_type': 'market',                      # 'market' or 'limit'
-#     'limit_price_offset_pct': 0.01,              # 1% offset for limit orders
-#     'check_order_status_interval': 5,            # Check every 5 seconds
-#     'order_timeout_seconds': 300,                # Cancel after 5 minutes
-#     'allow_partial_fills': True,
-# }
-
-# --- System/Logging (Main.py, Manager.py) ---
-# SYSTEM_CONFIG = {
-#     'enable_performance_tracking': True,
-#     'log_level': 'INFO',                         # DEBUG, INFO, WARNING, ERROR
-#     'max_log_file_size_mb': 100,
-#     'keep_old_logs_days': 30,
-#     'enable_position_logging': True,
-#     'enable_trade_logging': True,
-#     'position_log_cleanup_days': 30,
-#     'cycle_sleep_ms': 1000,                      # Sleep between cycles
-#     'min_cycle_time_ms': 500,                    # Min cycle duration
-# }
-
-# --- Alerts/Notifications (Main.py, Manager.py) ---
-# ALERT_CONFIG = {
-#     'enable_position_alerts': True,
-#     'enable_loss_alerts': True,
-#     'enable_profit_alerts': True,
-#     'alert_webhook_url': os.getenv('ALERT_WEBHOOK_URL', ''),
-#     'large_loss_threshold': 100,                 # Alert if loss > $100
-#     'large_profit_threshold': 500,               # Alert if profit > $500
-# }
 
 
 # =============================================================================
@@ -461,13 +274,6 @@ def get_setting(section, key, default=None):
     """Get individual configuration setting."""
     config = get_config(section)
     return config.get(key, default)
-
-
-# def get_risk_defaults(instrument_type='stock'):
-#     """Get risk management defaults for instrument type."""
-#     if instrument_type == 'option':
-#         return RISK_CONFIG['option_defaults'].copy()
-#     return RISK_CONFIG['stock_defaults'].copy()
 
 
 def load_config_json(config_path='config.json'):
@@ -533,20 +339,3 @@ def validate_and_report():
         print("[OK] Configuration valid (with warnings above)\n")
 
     return True
-
-
-# def print_config_summary():
-#     """Print a summary of current configuration to console."""
-#     print("\n" + "=" * 60)
-#     print("TRADING BOT CONFIGURATION SUMMARY")
-#     print("=" * 60)
-#     print(f"\nDISCORD:")
-#     print(f"  Token Set: {bool(DISCORD_CONFIG.get('token'))}")
-#     print(f"  Channel: {DISCORD_CONFIG.get('channel_id')}")
-#     print(f"\nANALYSIS:")
-#     print(f"  Min Bars Required: {ANALYSIS_CONFIG['min_bars_required']}")
-#     print(f"  RSI Period: {ANALYSIS_CONFIG['rsi_period']}")
-#     print(f"\nBACKTEST:")
-#     print(f"  Lookback Days: {BACKTEST_CONFIG['lookback_days']}")
-#     print(f"  Initial Capital: ${BACKTEST_CONFIG['initial_capital']:,.2f}")
-#     print("=" * 60 + "\n")

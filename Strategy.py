@@ -31,6 +31,10 @@ class StopLoss:
     Reversal detection is direction-aware:
     - CALL: reversal when true_price < VWAP OR true_price < EMAVWAP (stock dropping = bad for calls)
     - PUT:  reversal when true_price > VWAP OR true_price > EMAVWAP (stock rising = bad for puts)
+
+    Downtrend detection is direction-aware:
+    - CALL: downtrend when true_price < vwap_ema_avg AND ema < vwap_ema_avg
+    - PUT:  downtrend when true_price > vwap_ema_avg AND ema > vwap_ema_avg
     """
 
     # Stop loss modes
@@ -74,7 +78,8 @@ class StopLoss:
         """Calculate initial stop loss price."""
         return self.entry_price * (1.0 - self.stop_loss_pct)
 
-    def update(self, current_price, minutes_held=0, true_price=None, vwap=None, ema=None, emavwap=None):
+    def update(self, current_price, minutes_held=0, true_price=None, vwap=None, ema=None,
+               emavwap=None, vwap_ema_avg=None):
         """
         Update stop loss based on current price and time held.
 
@@ -85,6 +90,7 @@ class StopLoss:
             vwap: Current VWAP value
             ema: Current EMA value
             emavwap: Current EMAVWAP value ((EMA + VWAP) / 2)
+            vwap_ema_avg: Current VWAP/EMA average value
 
         Returns:
             dict with:
@@ -96,6 +102,8 @@ class StopLoss:
                              PUT: true_price > VWAP or true_price > EMAVWAP)
                 - bearish_signal: True if EMA crossed VWAP against the position
                             (CALL: EMA < VWAP, PUT: EMA > VWAP)
+                - downtrend: True if True Price and EMA are both below vwap_ema_avg
+                            (CALL: both below, PUT: both above)
         """
         # Track highest price since entry (for trailing stop)
         if current_price > self.highest_price_since_entry:
@@ -153,6 +161,17 @@ class StopLoss:
                 else:
                     bearish_signal = ema < vwap
 
+        # Downtrend detection: True Price AND EMA both below vwap_ema_avg
+        # CALL: both below vwap_ema_avg (downtrend = bad for calls)
+        # PUT:  both above vwap_ema_avg (uptrend = bad for puts)
+        downtrend = False
+        if true_price is not None and ema is not None and vwap_ema_avg is not None:
+            if not np.isnan(true_price) and not np.isnan(ema) and not np.isnan(vwap_ema_avg):
+                if self.is_put:
+                    downtrend = true_price > vwap_ema_avg and ema > vwap_ema_avg
+                else:
+                    downtrend = true_price < vwap_ema_avg and ema < vwap_ema_avg
+
         return {
             'stop_loss': self.stop_loss_price,
             'mode': self.mode,
@@ -161,7 +180,8 @@ class StopLoss:
             'breakeven_threshold': self.breakeven_threshold,
             'trailing_trigger': self.trailing_trigger,
             'reversal': reversal,
-            'bearish_signal': bearish_signal
+            'bearish_signal': bearish_signal,
+            'downtrend': downtrend
         }
 
     def get_state(self):

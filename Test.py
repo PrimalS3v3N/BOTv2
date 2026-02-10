@@ -1096,6 +1096,7 @@ class Backtest:
         SL_trailing_stop_pct = SL_config.get('trailing_stop_pct', 0.30)
         SL_breakeven_min_minutes = SL_config.get('breakeven_min_minutes', 30)
         SL_reversal_exit_enabled = SL_config.get('reversal_exit_enabled', True)
+        SL_downtrend_exit_enabled = SL_config.get('downtrend_exit_enabled', True)
 
         # Get Closure - Peak settings from config
         CP_config = self.config.get('closure_peak', {})
@@ -1204,19 +1205,22 @@ class Backtest:
                 SL_triggered = False
                 SL_reversal = False
                 SL_bearish_signal = False
+                SL_downtrend = False
 
                 if SL_enabled:
                     minutes_held = position.get_minutes_held(timestamp)
                     true_price = Analysis.true_price(stock_price, stock_high, stock_low)
                     SL_result = SL_manager.update(
                         option_price, minutes_held=minutes_held,
-                        true_price=true_price, vwap=vwap, ema=ema_30, emavwap=emavwap
+                        true_price=true_price, vwap=vwap, ema=ema_30,
+                        emavwap=emavwap, vwap_ema_avg=vwap_ema_avg
                     )
                     SL_price = SL_result['stop_loss']
                     SL_mode = SL_result['mode']
                     SL_triggered = SL_result['triggered']
                     SL_reversal = SL_result['reversal']
                     SL_bearish_signal = SL_result['bearish_signal']
+                    SL_downtrend = SL_result['downtrend']
 
                 # Record tracking data with stop loss and indicators
                 matrix.add_record(
@@ -1253,6 +1257,12 @@ class Backtest:
                 if SL_enabled and SL_reversal_exit_enabled and SL_reversal and not position.is_closed:
                     exit_price = option_price * (1 - self.slippage_pct)
                     exit_reason = self._format_exit_reason('stop_loss_reversal')
+                    position.close(exit_price, timestamp, exit_reason)
+
+                # Check for downtrend exit (True Price & EMA < vwap_ema_avg)
+                elif SL_enabled and SL_downtrend_exit_enabled and SL_downtrend and not position.is_closed:
+                    exit_price = option_price * (1 - self.slippage_pct)
+                    exit_reason = self._format_exit_reason('stop_loss_downtrend')
                     position.close(exit_price, timestamp, exit_reason)
 
                 # Check for stop loss exit (only if stop loss is enabled)
@@ -1311,6 +1321,7 @@ class Backtest:
         - stop_loss_breakeven -> "SL - Breakeven"
         - stop_loss_trailing -> "SL - Trailing"
         - stop_loss_reversal -> "SL - Reversal"
+        - stop_loss_downtrend -> "SL - DownTrend"
         - closure_peak -> "Closure - Peak"
         - market_close -> "Closure-Market"
         """
@@ -1326,6 +1337,8 @@ class Backtest:
             return 'SL - Trailing'
         elif reason == 'stop_loss_reversal':
             return 'SL - Reversal'
+        elif reason == 'stop_loss_downtrend':
+            return 'SL - DownTrend'
 
         # Closure - Peak
         elif reason == 'closure_peak':

@@ -43,6 +43,7 @@ COLORS = {
     'stop_loss_line': '#00C853',  # Green (changed from red)
     'sl_c1': '#FFD54F',           # Amber (conditional trailing)
     'sl_c2': '#FF8A65',           # Deep Orange (EMA/VWAP bearish)
+    'sl_c3': '#E53935',           # Red (downtrend)
     'sl_ema': '#FF8A65',          # Same as sl_c2
     # Trading range
     'trading_range': '#FF1744',   # Red
@@ -61,6 +62,7 @@ EXIT_SYMBOLS = {
     'sl_ema': 'triangle-down',
     'sl_c1': 'circle',
     'sl_c2': 'triangle-down',
+    'sl_c3': 'diamond',
 }
 
 
@@ -345,6 +347,22 @@ def create_trade_chart(df, trade_label, show_all_exits=False, market_hours_only=
                     name='SL_C2 (EMA/VWAP)',
                     marker=dict(symbol='triangle-down', size=8, color=COLORS['sl_c2'], opacity=0.6),
                     hovertemplate='SL_C2: EMA30>VWAP & Price<EMA30<br>$%{y:.2f}<extra></extra>'
+                ),
+                row=1, col=1, secondary_y=True
+            )
+
+    # SL_C3 markers: DownTrend condition (True Price & EMA below vwap_ema_avg)
+    if 'SL_C3' in df.columns and opt_col in df.columns:
+        sl_c3_df = df[df['SL_C3'] == True]
+        if not sl_c3_df.empty:
+            fig.add_trace(
+                go.Scatter(
+                    x=sl_c3_df['time'],
+                    y=sl_c3_df[opt_col],
+                    mode='markers',
+                    name='SL_C3 (DownTrend)',
+                    marker=dict(symbol='diamond', size=8, color=COLORS['sl_c3'], opacity=0.6),
+                    hovertemplate='SL_C3: DownTrend (TP & EMA < vwap_ema_avg)<br>$%{y:.2f}<extra></extra>'
                 ),
                 row=1, col=1, secondary_y=True
             )
