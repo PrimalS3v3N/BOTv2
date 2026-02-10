@@ -48,8 +48,6 @@ All stop loss settings are consolidated into a `stop_loss` nested structure:
     'breakeven_threshold_pct': None,    # Auto-calculate
     'breakeven_min_minutes': 30,        # Min hold before breakeven
     'trailing_trigger_pct': 0.30,       # Start trailing at profit
-    'reversal_exit_enabled': True,      # Exit when True Price < VWAP
-    'downtrend_exit_enabled': True,     # Exit when True Price & EMA < vwap_ema_avg
 }
 ```
 This structure exists in `BACKTEST_CONFIG` (backtesting) as `stop_loss`.
@@ -146,12 +144,6 @@ Three-phase stop loss system for options contracts (configured via `stop_loss` d
    - Only uses price highs AFTER entry (not before)
    - Stop only moves up, never down
 
-4. **REVERSAL Exit**: If True Price falls below VWAP, reversal detected → exit as "SL - Reversal"
-   - Enabled via `reversal_exit_enabled: True` in `stop_loss` config
-
-5. **DOWNTREND Exit**: If True Price & EMA both below vwap_ema_avg → exit as "SL - DownTrend"
-   - Enabled via `downtrend_exit_enabled: True` in `stop_loss` config
-
 **Classes:**
 - `StopLoss` - Stateful stop loss manager
 - `check_stop_loss()` - Stateless function for backtesting
@@ -193,8 +185,6 @@ Three-phase stop loss system for options contracts (configured via `stop_loss` d
 
 **Exit Strategies:**
 - StopLoss (3-phase: initial → breakeven → trailing)
-- SL - Reversal (True Price < VWAP)
-- SL - DownTrend (True Price & EMA < vwap_ema_avg)
 - Closure - Peak (Avg RSI based exit in last 30 minutes of trading day)
 - Closure-Market (market close exit, default fallback)
 
