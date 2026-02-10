@@ -166,6 +166,7 @@ BACKTEST_CONFIG = {
         'breakeven_min_minutes': 30,               # Min hold before breakeven transition
         'trailing_trigger_pct': 0.50,              # Start trailing at profit (50%)
         'reversal_exit_enabled': True,             # Exit when True Price < VWAP (reversal)
+        'downtrend_exit_enabled': True,            # Exit when True Price & EMA < vwap_ema_avg (downtrend)
     },
 
     # Technical indicators for backtest
@@ -249,7 +250,7 @@ DATAFRAME_COLUMNS = {
         'true_price', 'option_price', 'pnl_pct',
         'stop_loss', 'stop_loss_mode', 'sl_cushion',
         'vwap', 'ema_20', 'ema_30', 'vwap_ema_avg', 'emavwap', 'ewo', 'ewo_15min_avg', 'rsi', 'rsi_10min_avg',
-        'SL_C1', 'SL_C2',
+        'SL_C1', 'SL_C2', 'SL_C3',
     ],
 }
 
