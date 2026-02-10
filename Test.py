@@ -1119,6 +1119,7 @@ class Backtest:
         )
 
         max_vwap_ema_avg = np.nan  # Running max of (VWAP+EMA+High)/3
+        ob_signal_price = None  # Track overbought exit price for buy-back opportunity
 
         for i, (timestamp, bar) in enumerate(stock_data.iterrows()):
             stock_price = bar['close']
@@ -1156,6 +1157,35 @@ class Backtest:
                 entry_stock_price=entry_stock_price
             )
 
+            # Overbought buy-back: re-enter if Avg(RSI) < 50 and price 15% below signal
+            if ob_signal_price is not None and position.is_closed and not np.isnan(rsi_10min_avg):
+                if rsi_10min_avg < 50 and option_price <= ob_signal_price * 0.85:
+                    reentry_price = option_price * (1 + self.slippage_pct)
+                    position.entry_price = reentry_price
+                    position.entry_time = timestamp
+                    position.is_closed = False
+                    position.exit_price = None
+                    position.exit_time = None
+                    position.exit_reason = None
+                    position.highest_price = reentry_price
+                    position.lowest_price = reentry_price
+                    position.current_price = reentry_price
+                    position.max_stop_loss_price = reentry_price
+                    entry_idx = i
+                    entry_stock_price = stock_price
+                    ob_signal_price = None  # Only one buy-back allowed
+
+                    # Reinitialize stop loss manager for new entry
+                    if SL_enabled:
+                        SL_manager = StopLoss(
+                            entry_price=reentry_price,
+                            stop_loss_pct=SL_pct,
+                            trailing_trigger_pct=SL_trailing_trigger_pct,
+                            trailing_stop_pct=SL_trailing_stop_pct,
+                            breakeven_min_minutes=SL_breakeven_min_minutes,
+                            option_type=position.option_type
+                        )
+
             # Determine holding status
             is_pre_entry = i < entry_idx
             is_post_exit = position.is_closed
@@ -1180,7 +1210,7 @@ class Backtest:
                     true_price = Analysis.true_price(stock_price, stock_high, stock_low)
                     SL_result = SL_manager.update(
                         option_price, minutes_held=minutes_held,
-                        true_price=true_price, vwap=vwap, ema=ema_30
+                        true_price=true_price, vwap=vwap, ema=ema_30, emavwap=emavwap
                     )
                     SL_price = SL_result['stop_loss']
                     SL_mode = SL_result['mode']
@@ -1214,6 +1244,7 @@ class Backtest:
                     if position.option_type.upper() in ['CALL', 'CALLS', 'C'] and rsi >= 85:
                         exit_price = option_price * (1 - self.slippage_pct)
                         position.close(exit_price, timestamp, 'Overbought')
+                        ob_signal_price = option_price  # Track for buy-back opportunity
                     elif position.option_type.upper() in ['PUT', 'PUTS', 'P'] and rsi <= 15:
                         exit_price = option_price * (1 - self.slippage_pct)
                         position.close(exit_price, timestamp, 'Oversold')

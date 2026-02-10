@@ -29,8 +29,8 @@ class StopLoss:
        at 30% below the highest price since entry.
 
     Reversal detection is direction-aware:
-    - CALL: reversal when true_price < VWAP (stock dropping = bad for calls)
-    - PUT:  reversal when true_price > VWAP (stock rising = bad for puts)
+    - CALL: reversal when true_price < VWAP OR true_price < EMAVWAP (stock dropping = bad for calls)
+    - PUT:  reversal when true_price > VWAP OR true_price > EMAVWAP (stock rising = bad for puts)
     """
 
     # Stop loss modes
@@ -74,7 +74,7 @@ class StopLoss:
         """Calculate initial stop loss price."""
         return self.entry_price * (1.0 - self.stop_loss_pct)
 
-    def update(self, current_price, minutes_held=0, true_price=None, vwap=None, ema=None):
+    def update(self, current_price, minutes_held=0, true_price=None, vwap=None, ema=None, emavwap=None):
         """
         Update stop loss based on current price and time held.
 
@@ -84,14 +84,16 @@ class StopLoss:
             true_price: True Price of the stock (avg of high, low, close)
             vwap: Current VWAP value
             ema: Current EMA value
+            emavwap: Current EMAVWAP value ((EMA + VWAP) / 2)
 
         Returns:
             dict with:
                 - stop_loss: Current stop loss price
                 - mode: Current stop loss mode
                 - triggered: True if stop loss was hit
-                - reversal: True if True Price crossed VWAP against the position
-                            (CALL: true_price < VWAP, PUT: true_price > VWAP)
+                - reversal: True if True Price crossed VWAP or EMAVWAP against the position
+                            (CALL: true_price < VWAP or true_price < EMAVWAP,
+                             PUT: true_price > VWAP or true_price > EMAVWAP)
                 - bearish_signal: True if EMA crossed VWAP against the position
                             (CALL: EMA < VWAP, PUT: EMA > VWAP)
         """
@@ -123,9 +125,9 @@ class StopLoss:
         # Check if stop loss triggered
         triggered = current_price <= self.stop_loss_price
 
-        # Reversal detection: True Price crosses VWAP against the position
-        # CALL: true_price < VWAP means stock dropping (bad for calls)
-        # PUT:  true_price > VWAP means stock rising (bad for puts)
+        # Reversal detection: True Price crosses VWAP or EMAVWAP against the position
+        # CALL: true_price < VWAP or true_price < EMAVWAP (stock dropping = bad for calls)
+        # PUT:  true_price > VWAP or true_price > EMAVWAP (stock rising = bad for puts)
         reversal = False
         if true_price is not None and vwap is not None:
             if not np.isnan(true_price) and not np.isnan(vwap):
@@ -133,6 +135,12 @@ class StopLoss:
                     reversal = true_price > vwap
                 else:
                     reversal = true_price < vwap
+        if not reversal and true_price is not None and emavwap is not None:
+            if not np.isnan(true_price) and not np.isnan(emavwap):
+                if self.is_put:
+                    reversal = true_price > emavwap
+                else:
+                    reversal = true_price < emavwap
 
         # Adverse signal: EMA crosses VWAP against the position
         # CALL: EMA < VWAP (bearish for calls)
