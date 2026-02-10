@@ -535,15 +535,18 @@ def create_trade_chart(df, trade_label, show_all_exits=False, market_hours_only=
                     row=1, col=1, secondary_y=True
                 )
 
-    # EWO subplot (row 2)
+    # EWO subplot (row 2) — displayed as histogram bars
     if has_ewo:
-        # EWO line
+        # Color each bar green (positive) or red (negative)
+        ewo_colors = ['rgba(0, 200, 83, 0.7)' if v >= 0 else 'rgba(255, 23, 68, 0.7)'
+                       for v in df['ewo']]
+
         fig.add_trace(
-            go.Scatter(
+            go.Bar(
                 x=df['time'],
                 y=df['ewo'],
                 name='EWO',
-                line=dict(color='#00BCD4', width=1.5),
+                marker_color=ewo_colors,
                 hovertemplate='EWO: %{y:.3f}<extra></extra>'
             ),
             row=2, col=1
@@ -564,32 +567,6 @@ def create_trade_chart(df, trade_label, show_all_exits=False, market_hours_only=
 
         # Zero line for EWO
         fig.add_hline(y=0, line_dash="dash", line_color="gray", line_width=1, row=2, col=1)
-
-        # Color fill for positive/negative EWO
-        fig.add_trace(
-            go.Scatter(
-                x=df['time'],
-                y=df['ewo'].clip(lower=0),
-                fill='tozeroy',
-                fillcolor='rgba(0, 200, 83, 0.3)',
-                line=dict(width=0),
-                showlegend=False,
-                hoverinfo='skip'
-            ),
-            row=2, col=1
-        )
-        fig.add_trace(
-            go.Scatter(
-                x=df['time'],
-                y=df['ewo'].clip(upper=0),
-                fill='tozeroy',
-                fillcolor='rgba(255, 23, 68, 0.3)',
-                line=dict(width=0),
-                showlegend=False,
-                hoverinfo='skip'
-            ),
-            row=2, col=1
-        )
 
     # RSI on row 2 (secondary y-axis when sharing with EWO, primary when alone)
     if has_rsi:
