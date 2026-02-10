@@ -26,43 +26,27 @@ COLORS = {
     'option': '#FF6D00',
     'entry': '#00C853',
     'exit': '#FF1744',
-    'stop_loss': '#D50000',
-    'trailing_stop': '#FFAB00',
-    'time_stop': '#7C4DFF',
     'rsi': '#E91E63',
     'macd_crossover': '#00BCD4',
     'vwap': '#8BC34A',
     'vpoc': '#FF5722',
     'supertrend': '#9C27B0',
     'expiration': '#795548',
-    # Stop loss tracking
     'ema_20': '#29B6F6',          # Light Blue
     'ema_30': '#AB47BC',          # Purple
     'vwap_ema_avg': '#FFEB3B',    # Yellow
     'emavwap': '#00E5FF',         # Cyan
-    'stop_loss_line': '#00C853',  # Green (changed from red)
-    'sl_c1': '#FFD54F',           # Amber (conditional trailing)
-    'sl_c2': '#FF8A65',           # Deep Orange (EMA/VWAP bearish)
-    'sl_c3': '#E53935',           # Red (downtrend)
-    'sl_ema': '#FF8A65',          # Same as sl_c2
     # Trading range
     'trading_range': '#FF1744',   # Red
 }
 
 EXIT_SYMBOLS = {
-    'stop_loss': 'x',
-    'trailing_stop': 'triangle-down',
-    'time_stop': 'square',
     'rsi': 'diamond',
     'macd_crossover': 'cross',
     'vwap': 'pentagon',
     'vpoc': 'hexagon',
     'supertrend': 'star-triangle-up',
     'expiration': 'hourglass',
-    'sl_ema': 'triangle-down',
-    'sl_c1': 'circle',
-    'sl_c2': 'triangle-down',
-    'sl_c3': 'diamond',
 }
 
 
@@ -150,12 +134,8 @@ def find_entry_exit(df):
     return entry_row, exit_row, opt_col
 
 
-def create_trade_chart(df, trade_label, show_all_exits=False, market_hours_only=False, show_ewo=True, show_rsi=True, show_supertrend=False, delay_info=None):
-    """Create dual-axis chart with stock/option prices, error bars, and combined EWO/RSI subplot.
-
-    Args:
-        delay_info: dict with 'delay_reason', 'original_entry_time' if trade was delayed, else None.
-    """
+def create_trade_chart(df, trade_label, show_all_exits=False, market_hours_only=False, show_ewo=True, show_rsi=True, show_supertrend=False):
+    """Create dual-axis chart with stock/option prices, error bars, and combined EWO/RSI subplot."""
     df = df.copy()
     df['time'] = df['timestamp'].apply(parse_time)
     df = df.dropna(subset=['time'])
@@ -342,79 +322,6 @@ def create_trade_chart(df, trade_label, show_all_exits=False, market_hours_only=
             row=1, col=1, secondary_y=True
         )
 
-    # Stop Loss line (right y-axis, tracks stop loss price)
-    if 'stop_loss' in df.columns and df['stop_loss'].notna().any():
-        # Create hover text with stop_loss_mode if available
-        if 'stop_loss_mode' in df.columns:
-            hover_text = df.apply(
-                lambda r: f"Stop Loss: ${r['stop_loss']:.2f}<br>Mode: {r['stop_loss_mode']}"
-                if pd.notna(r['stop_loss']) else "", axis=1
-            )
-        else:
-            hover_text = df['stop_loss'].apply(lambda x: f"Stop Loss: ${x:.2f}" if pd.notna(x) else "")
-
-        # Stop Loss line
-        fig.add_trace(
-            go.Scatter(
-                x=df['time'],
-                y=df['stop_loss'],
-                name='Stop Loss',
-                line=dict(color=COLORS['stop_loss_line'], width=1.5, dash='dash'),
-                hovertemplate='%{text}<extra></extra>',
-                text=hover_text
-            ),
-            row=1, col=1, secondary_y=True
-        )
-
-
-    # SL_C1 markers: Conditional trailing active (profit target + VWAP hold)
-    if 'SL_C1' in df.columns and opt_col in df.columns:
-        sl_c1_df = df[df['SL_C1'] == True]
-        if not sl_c1_df.empty:
-            fig.add_trace(
-                go.Scatter(
-                    x=sl_c1_df['time'],
-                    y=sl_c1_df[opt_col],
-                    mode='markers',
-                    name='SL_C1 (Trailing)',
-                    marker=dict(symbol='circle', size=8, color=COLORS['sl_c1'], opacity=0.6),
-                    hovertemplate='SL_C1: Conditional Trailing<br>$%{y:.2f}<extra></extra>'
-                ),
-                row=1, col=1, secondary_y=True
-            )
-
-    # SL_C2 markers: EMA/VWAP bearish condition
-    if 'SL_C2' in df.columns and opt_col in df.columns:
-        sl_c2_df = df[df['SL_C2'] == True]
-        if not sl_c2_df.empty:
-            fig.add_trace(
-                go.Scatter(
-                    x=sl_c2_df['time'],
-                    y=sl_c2_df[opt_col],
-                    mode='markers',
-                    name='SL_C2 (EMA/VWAP)',
-                    marker=dict(symbol='triangle-down', size=8, color=COLORS['sl_c2'], opacity=0.6),
-                    hovertemplate='SL_C2: EMA30>VWAP & Price<EMA30<br>$%{y:.2f}<extra></extra>'
-                ),
-                row=1, col=1, secondary_y=True
-            )
-
-    # SL_C3 markers: DownTrend condition (True Price & EMA below vwap_ema_avg)
-    if 'SL_C3' in df.columns and opt_col in df.columns:
-        sl_c3_df = df[df['SL_C3'] == True]
-        if not sl_c3_df.empty:
-            fig.add_trace(
-                go.Scatter(
-                    x=sl_c3_df['time'],
-                    y=sl_c3_df[opt_col],
-                    mode='markers',
-                    name='SL_C3 (DownTrend)',
-                    marker=dict(symbol='diamond', size=8, color=COLORS['sl_c3'], opacity=0.6),
-                    hovertemplate='SL_C3: DownTrend (TP & EMA < vwap_ema_avg)<br>$%{y:.2f}<extra></extra>'
-                ),
-                row=1, col=1, secondary_y=True
-            )
-
     # Entry marker
     if entry_row is not None:
         entry_time = parse_time(entry_row['timestamp'])
@@ -451,63 +358,6 @@ def create_trade_chart(df, trade_label, show_all_exits=False, market_hours_only=
                 hovertemplate=f'EXIT: {exit_reason}<br>$%{{y:.2f}}<extra></extra>'
             ),
             row=1, col=1, secondary_y=True
-        )
-
-    # Delay markers (RSI Overbought/Oversold purchase delay)
-    if delay_info and delay_info.get('original_entry_time') and entry_row is not None:
-        original_time = parse_time(delay_info['original_entry_time'])
-        actual_entry_time = parse_time(entry_row['timestamp'])
-        is_oversold = delay_info.get('delay_reason') == 'RSI Oversold'
-        signal_label = 'OS Signal' if is_oversold else 'OB Signal'
-        signal_name = 'Signal (Oversold)' if is_oversold else 'Signal (Overbought)'
-
-        if original_time and actual_entry_time and original_time != actual_entry_time:
-            # Find option price at original signal time for marker placement
-            original_mask = df['time'] == original_time
-            if original_mask.any():
-                orig_opt_price = df.loc[original_mask, opt_col].iloc[0]
-            else:
-                orig_opt_price = entry_row[opt_col] if opt_col in entry_row else 0
-
-            # Original signal marker (diamond)
-            fig.add_trace(
-                go.Scatter(
-                    x=[original_time],
-                    y=[orig_opt_price],
-                    mode='markers+text',
-                    name=signal_name,
-                    marker=dict(symbol='diamond', size=16, color='#FF9800',
-                                line=dict(color='white', width=2)),
-                    text=[signal_label],
-                    textposition='bottom center',
-                    textfont=dict(size=9, color='#FF9800'),
-                    hovertemplate=f'{signal_name}<br>$%{{y:.2f}}<extra></extra>'
-                ),
-                row=1, col=1, secondary_y=True
-            )
-
-            # Shaded delay region between original signal and actual entry
-            fig.add_vrect(
-                x0=original_time, x1=actual_entry_time,
-                fillcolor='rgba(255, 152, 0, 0.1)',
-                line=dict(color='rgba(255, 152, 0, 0.4)', width=1, dash='dot'),
-                row=1, col=1
-            )
-
-    # RSI reentry threshold line for delayed trades
-    if delay_info and delay_info.get('delay_reason') and has_rsi:
-        is_oversold = delay_info.get('delay_reason') == 'RSI Oversold'
-        rsi_reentry = 70 if is_oversold else 30
-        time_range = [df['time'].iloc[0], df['time'].iloc[-1]]
-        fig.add_trace(
-            go.Scatter(
-                x=time_range, y=[rsi_reentry, rsi_reentry],
-                mode='lines',
-                name=f'RSI Reentry ({rsi_reentry})',
-                line=dict(color='rgba(255, 152, 0, 0.9)', width=1.5, dash='dashdot'),
-                hovertemplate=f'RSI Reentry: {rsi_reentry}<extra></extra>'
-            ),
-            row=2, col=1, secondary_y=rsi_secondary
         )
 
     # Show all exit strategy markers (when toggle is on)
@@ -761,14 +611,6 @@ def get_trade_table(df):
         table_data['Metric'].append('Contracts')
         table_data['Value'].append(str(int(df['contracts'].iloc[0])))
 
-    # Delay info (if applicable)
-    if 'delay_reason' in df.columns and df['delay_reason'].notna().any():
-        table_data['Metric'].append('Delay Reason')
-        table_data['Value'].append(str(df['delay_reason'].iloc[0]))
-        if 'original_entry_time' in df.columns and pd.notna(df['original_entry_time'].iloc[0]):
-            table_data['Metric'].append('Original Signal Time')
-            table_data['Value'].append(str(df['original_entry_time'].iloc[0]))
-
     # Entry info
     if entry_row is not None:
         table_data['Metric'].append('Entry Time')
@@ -852,22 +694,11 @@ def main():
             cp = opt_type[0].upper() if opt_type else '?'
             label = f"{ticker} : {strike:.0f} : {cp}"
 
-            # Detect delayed trades and no-reentry trades
-            delay_reason = None
-            exit_reason_val = df['exit_reason'].iloc[0] if 'exit_reason' in df.columns else None
-
-            if 'delay_reason' in df.columns and df['delay_reason'].notna().any():
-                delay_reason = df['delay_reason'].iloc[0]
-                if exit_reason_val in ('Overbought - No Reentry', 'Oversold - No Reentry'):
-                    label = f"{label} [NO-RE]"
-                else:
-                    label = f"{label} [RSI-D]"
-
             # Calculate P&L for sorting
             summary = get_trade_summary(df)
             pnl = summary['pnl_pct']
 
-            trade_list.append((label, pos_id, pnl, delay_reason))
+            trade_list.append((label, pos_id, pnl))
 
         # Sort by P&L descending (winners first, losers last)
         trade_list.sort(key=lambda x: x[2], reverse=True)
@@ -919,19 +750,11 @@ def main():
         st.caption(f"{len(matrices)} trades loaded")
 
     # Display selected trade
-    trade_label, pos_id, _, _ = trade_list[selected_idx]
+    trade_label, pos_id, _ = trade_list[selected_idx]
     df = matrices[pos_id]
 
-    # Build delay info for chart markers
-    delay_info = None
-    if 'delay_reason' in df.columns and df['delay_reason'].notna().any():
-        delay_info = {
-            'delay_reason': df['delay_reason'].iloc[0],
-            'original_entry_time': df['original_entry_time'].iloc[0] if 'original_entry_time' in df.columns else None,
-        }
-
     # Chart first (no summary above)
-    fig = create_trade_chart(df, trade_label, show_all_exits, market_hours_only, show_ewo, show_rsi, show_supertrend, delay_info)
+    fig = create_trade_chart(df, trade_label, show_all_exits, market_hours_only, show_ewo, show_rsi, show_supertrend)
     if fig:
         st.plotly_chart(fig, use_container_width=True)
     else:
@@ -941,27 +764,14 @@ def main():
     st.subheader("Trade Summary")
     summary = get_trade_summary(df)
 
-    # Determine delay info for summary display
-    has_delay = 'delay_reason' in df.columns and df['delay_reason'].notna().any()
-    delay_reason_val = df['delay_reason'].iloc[0] if has_delay else None
-    original_entry_time_val = df['original_entry_time'].iloc[0] if has_delay and 'original_entry_time' in df.columns else None
-
-    # Calculate delay duration
-    delay_minutes = 0
-    if has_delay and original_entry_time_val is not None and 'entry_time' in df.columns:
-        orig_t = parse_time(original_entry_time_val)
-        actual_t = parse_time(df['entry_time'].iloc[0])
-        if orig_t and actual_t and actual_t > orig_t:
-            delay_minutes = (actual_t - orig_t).total_seconds() / 60
-
-    # Row 1: Entry | Exit | P&L | Profit[min] TBD | Delay Reason | Delay (min) | TBD
+    # Row 1: Entry | Exit | P&L | Profit[min] TBD | TBD | TBD | TBD
     row1 = st.columns(7)
     row1[0].metric("Entry", f"${summary['entry']:.2f}")
     row1[1].metric("Exit", f"${summary['exit']:.2f}")
     row1[2].metric("P&L", f"{summary['pnl_pct']:+.1f}%")
     row1[3].metric("Profit[min] TBD", f"${summary['profit_min']:+.2f}")
-    row1[4].metric("Delay Reason", delay_reason_val or "None")
-    row1[5].metric("Delay (min)", f"{delay_minutes:.0f}" if delay_minutes > 0 else "0")
+    row1[4].metric("TBD", "1")
+    row1[5].metric("TBD", "1")
     row1[6].metric("TBD", "1")
 
     # Row 2: Min Profit | Exit Reason | Max Profit | TBD | TBD | TBD | TBD
@@ -991,10 +801,6 @@ def main():
     if available_cols:
         matrix_df = df[available_cols].copy()
 
-        # Calculate sl_cushion (Option_price - Stop_loss) if both columns exist
-        if 'option_price' in df.columns and 'stop_loss' in df.columns:
-            matrix_df['sl_cushion'] = df['option_price'] - df['stop_loss']
-
         # Filter based on toggle:
         # ON (market_hours_only=True): Show full market hours (9:00 AM - 4:00 PM)
         # OFF (market_hours_only=False): Show only holding period (where holding=True)
@@ -1017,9 +823,6 @@ def main():
 
         if 'pnl_pct' in matrix_df.columns:
             matrix_df['pnl_pct'] = matrix_df['pnl_pct'].apply(lambda x: f"{x:+.1f}%" if pd.notna(x) else "")
-
-        if 'sl_cushion' in matrix_df.columns:
-            matrix_df['sl_cushion'] = matrix_df['sl_cushion'].apply(lambda x: f"${x:.2f}" if pd.notna(x) else "")
 
         if 'ewo' in matrix_df.columns:
             matrix_df['ewo'] = matrix_df['ewo'].apply(lambda x: f"{x:.3f}" if pd.notna(x) else "")

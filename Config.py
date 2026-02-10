@@ -154,21 +154,6 @@ BACKTEST_CONFIG = {
     'slippage_pct': 0.001,                         # Slippage per fill (0.1%)
     'commission_per_contract': 0.65,               # Per-contract commission
 
-    # Stop Loss - three phases: initial -> breakeven -> trailing
-    'stop_loss': {
-        'enabled': True,
-        'stop_loss_pct': 0.27,                     # Max loss from entry (25%)
-        'stop_loss_warning_pct': 0.15,             # Warning threshold (15%)
-        'profit_target_pct': 1.00,                 # Profit target (100%)
-        'trailing_stop_pct': 0.27,                 # Trailing below highest (20%)
-        'time_stop_minutes': 60,                   # Time stop (minutes)
-        'breakeven_threshold_pct': None,           # None = auto-calculate as entry/(1-stop_loss_pct)
-        'breakeven_min_minutes': 30,               # Min hold before breakeven transition
-        'trailing_trigger_pct': 0.30,              # Start trailing at profit (50%)
-        'reversal_exit_enabled': True,             # Exit when True Price < VWAP (reversal)
-        'downtrend_exit_enabled': True,            # Exit when True Price & EMA < vwap_ema_avg (downtrend)
-    },
-
     # Technical indicators for backtest
     'indicators': {
         'ema_period': 25,                          # EMA period (bars)
@@ -178,84 +163,6 @@ BACKTEST_CONFIG = {
         'rsi_oversold': 30,                        # RSI oversold threshold
         'supertrend_period': 10,                   # Supertrend ATR period (bars)
         'supertrend_multiplier': 3.0,              # Supertrend ATR multiplier
-    },
-
-    # Due Diligence - pre-entry checks on indicators before buying
-    'due_diligence': {
-        'enabled': True,
-        'DD_rsi_overbought': 85,               # Don't buy CALL if RSI above this
-        'DD_rsi_oversold': 15,                  # Don't buy PUT if RSI below this
-        'lookback_bars': 15,                    # Look back N bars before entry to detect recent overbought/oversold
-        'delay_on_overbought': True,            # Delay purchase instead of rejecting when overbought
-        'rsi_reentry_threshold': 30,            # Buy when Avg(RSI) drops to/below this level after overbought (+ EWO & EWO avg negative)
-        'delay_on_oversold': True,              # Delay purchase instead of rejecting when oversold
-        'rsi_reentry_threshold_oversold': 70,   # Buy when Avg(RSI) rises to/above this level after oversold (+ EWO & EWO avg positive)
-
-        # Fulfillment-based adaptive reentry scoring
-        # Replaces the binary triple-AND gate (rsi_avg <= 30 AND ewo < 0 AND ewo_avg < 0)
-        # Each indicator earns a fulfillment %: 0% (no progress) → 100% (target met) → cap (overflow)
-        # Weighted average of all fulfillments >= 100% triggers entry
-        'reentry_scoring': {
-            'enabled': True,                    # False = use old binary AND logic
-            'confidence_threshold': 100,        # Weighted avg must reach this %
-            'safety_floor': 20,                 # Min fulfillment per component (%)
-
-            # CALL overbought reentry indicator settings
-            'call': {
-                'rsi': {
-                    'zero_ref': 85,             # 0% fulfillment (overbought level)
-                    'target': 30,               # 100% fulfillment
-                    'overflow_cap': 130,        # Max fulfillment %
-                    'weight': 1.5,              # Averaging weight (highest — fastest reactor)
-                },
-                'ewo': {
-                    'zero_ref': 0.5,            # 0% fulfillment (strongly positive momentum)
-                    'target': 0,                # 100% fulfillment (momentum crossed negative)
-                    'overflow_cap': 130,        # Max fulfillment %
-                    'weight': 1.0,              # Averaging weight
-                },
-                'ewo_avg': {
-                    'zero_ref': 0.5,            # 0% fulfillment
-                    'target': 0,                # 100% fulfillment
-                    'overflow_cap': 120,        # Lower cap — lags most
-                    'weight': 0.5,              # Lowest weight — least responsive
-                },
-                'time_minutes': {
-                    'zero_ref': 0,              # 0% fulfillment (just rejected)
-                    'target': 15,               # 100% fulfillment (15 min cooldown)
-                    'overflow_cap': 115,        # Max fulfillment %
-                    'weight': 1.0,              # Averaging weight
-                },
-            },
-
-            # PUT oversold reentry indicator settings (mirror of CALL)
-            'put': {
-                'rsi': {
-                    'zero_ref': 15,             # 0% fulfillment (oversold level)
-                    'target': 70,               # 100% fulfillment
-                    'overflow_cap': 130,
-                    'weight': 1.5,
-                },
-                'ewo': {
-                    'zero_ref': -0.5,           # 0% fulfillment (strongly negative momentum)
-                    'target': 0,                # 100% fulfillment (momentum crossed positive)
-                    'overflow_cap': 130,
-                    'weight': 1.0,
-                },
-                'ewo_avg': {
-                    'zero_ref': -0.5,
-                    'target': 0,
-                    'overflow_cap': 120,
-                    'weight': 0.5,
-                },
-                'time_minutes': {
-                    'zero_ref': 0,
-                    'target': 15,
-                    'overflow_cap': 115,
-                    'weight': 1.0,
-                },
-            },
-        },
     },
 
     # Closure - Peak: Avg RSI (10min) based exit in last 30 minutes of trading day
@@ -293,7 +200,6 @@ DATAFRAME_COLUMNS = {
         'contracts', 'highest_price', 'lowest_price',
         'pnl', 'pnl_pct', 'minutes_held',
         'max_price_to_eod', 'max_stop_loss_price', 'profit_min',
-        'delay_reason', 'original_entry_time',
     ],
 
     # Per-bar tracking data from TrackingMatrix (Test.py)
@@ -301,7 +207,6 @@ DATAFRAME_COLUMNS = {
         'timestamp', 'stock_price', 'stock_high', 'stock_low', 'true_price', 'atr',
         'option_price', 'volume', 'holding', 'entry_price',
         'pnl', 'pnl_pct', 'highest_price', 'lowest_price', 'minutes_held',
-        'stop_loss', 'stop_loss_mode',
         'vwap', 'ema_30', 'vwap_ema_avg', 'emavwap', 'ewo', 'ewo_15min_avg', 'rsi', 'rsi_10min_avg',
         'supertrend', 'supertrend_direction',
     ],
@@ -310,17 +215,14 @@ DATAFRAME_COLUMNS = {
     'tracking_matrix_metadata': [
         'trade_label', 'ticker', 'strike', 'option_type', 'expiration',
         'contracts', 'entry_time', 'exit_time', 'exit_reason',
-        'delay_reason', 'original_entry_time',
     ],
 
     # Dashboard matrix display columns (Dashboard.py)
     'dashboard_matrix': [
         'timestamp', 'holding', 'stock_price', 'stock_high', 'stock_low',
         'true_price', 'option_price', 'pnl_pct',
-        'stop_loss', 'stop_loss_mode', 'sl_cushion',
         'vwap', 'ema_20', 'ema_30', 'vwap_ema_avg', 'emavwap', 'ewo', 'ewo_15min_avg', 'rsi', 'rsi_10min_avg',
         'supertrend', 'supertrend_direction',
-        'SL_C1', 'SL_C2', 'SL_C3',
     ],
 }
 
