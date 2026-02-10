@@ -229,15 +229,15 @@ def create_trade_chart(df, trade_label, show_all_exits=False, market_hours_only=
             row=1, col=1, secondary_y=False
         )
 
-    # VWAP-EMA Average (left y-axis) - yellow
+    # Profit (left y-axis) - yellow
     if 'vwap_ema_avg' in df.columns and df['vwap_ema_avg'].notna().any():
         fig.add_trace(
             go.Scatter(
                 x=df['time'],
                 y=df['vwap_ema_avg'],
-                name='(VWAP+EMA+High)/3',
+                name='Profit',
                 line=dict(color='#FFEB3B', width=1.5, dash='dashdot'),
-                hovertemplate='(VWAP+EMA+High)/3: $%{y:.2f}<extra></extra>'
+                hovertemplate='Profit: $%{y:.2f}<extra></extra>'
             ),
             row=1, col=1, secondary_y=False
         )
