@@ -1118,6 +1118,8 @@ class Backtest:
             option_type=position.option_type
         )
 
+        max_vwap_ema_avg = np.nan  # Running max of (VWAP+EMA+High)/3
+
         for i, (timestamp, bar) in enumerate(stock_data.iterrows()):
             stock_price = bar['close']
             stock_high = bar.get('high', stock_price)
@@ -1127,7 +1129,15 @@ class Backtest:
             # Get indicator values for this bar
             vwap = bar.get('vwap', np.nan)
             ema_30 = bar.get('ema_30', np.nan)
-            vwap_ema_avg = bar.get('vwap_ema_avg', np.nan)
+            current_vwap_ema_avg = bar.get('vwap_ema_avg', np.nan)
+
+            # Track running max of (VWAP+EMA+High)/3
+            if not np.isnan(current_vwap_ema_avg):
+                if np.isnan(max_vwap_ema_avg):
+                    max_vwap_ema_avg = current_vwap_ema_avg
+                else:
+                    max_vwap_ema_avg = max(max_vwap_ema_avg, current_vwap_ema_avg)
+            vwap_ema_avg = max_vwap_ema_avg
             emavwap = bar.get('emavwap', np.nan)
             ewo = bar.get('ewo', np.nan)
             ewo_15min_avg = bar.get('ewo_15min_avg', np.nan)
