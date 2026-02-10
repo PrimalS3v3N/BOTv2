@@ -352,10 +352,19 @@ These rules are mandatory. All code changes must respect module boundaries.
 **File:** `Test.py:1257`
 **Observed:** 2026-02-09 11:24
 
+**How to identify in data:** Single row with `holding=TRUE`, `pnl_pct=+0.0%`,
+`stop_loss_mode=initial`. All surrounding rows are `FALSE`. The exit reason in the positions
+table will show `SL - Reversal`. Check: is `True Price < VWAP` (CALL) or `True Price > VWAP`
+(PUT) at the entry bar? True Price = (high + low + close) / 3.
+
 **Problem:** The reversal exit (`SL - Reversal`) has no guard for the entry bar. It runs on
 every bar including `i == entry_idx`, so if `True Price < VWAP` (CALL) or `True Price > VWAP`
 (PUT) is already true at entry, the position opens and immediately closes on the same candle
 with ~0% PnL.
+
+**Code path:** `Test.py` → `_simulate_position()` loop → StopLoss.update() sets
+`reversal=True` (Strategy.py:139-151) → exit check at line 1257 fires with no `i > entry_idx`
+guard → position.close() on same bar.
 
 **Example:** At 11:24, True Price $1000.95 < VWAP $1001.15 → instant reversal exit.
 RSI was 32.8 (DD check passed fine), but the VWAP relationship was never checked pre-entry.
@@ -373,9 +382,17 @@ RSI was 32.8 (DD check passed fine), but the VWAP relationship was never checked
 **File:** `Test.py:1263`
 **Observed:** 2026-02-09 09:56
 
+**How to identify in data:** Same pattern as BUG-001 (single `TRUE` row, `+0.0%`, `initial`)
+but exit reason is `SL - DownTrend`. Check: is `True Price < vwap_ema_avg AND EMA <
+vwap_ema_avg` (CALL) or the inverse (PUT) at the entry bar?
+
 **Problem:** Same structural bug as BUG-001 but for the downtrend exit (`SL - DownTrend`).
 The downtrend check also has no `i > entry_idx` guard, so if `True Price < vwap_ema_avg AND
 EMA < vwap_ema_avg` is already true at entry, the position is immediately closed.
+
+**Code path:** `Test.py` → `_simulate_position()` loop → StopLoss.update() sets
+`downtrend=True` (Strategy.py:164-173) → exit check at line 1263 fires with no `i > entry_idx`
+guard → position.close() on same bar.
 
 **Example:** At 09:56, True Price $690.58 < vwap_ema_avg $690.78, AND EMA $690.50 <
 vwap_ema_avg $690.78 → instant downtrend exit. RSI was 51.1 (perfectly neutral).
@@ -393,26 +410,124 @@ vwap_ema_avg $690.78 → instant downtrend exit. RSI was 51.1 (perfectly neutral
 **File:** `Test.py:922-924`
 **Observed:** 2026-02-10 09:42
 
+**How to identify in data:** ALL rows show `holding=FALSE` for the entire day. The positions
+table will show exit reason `Overbought - No Reentry`. Look for a period where raw RSI dropped
+well below 30 but RSI_10min_avg stayed above 30, meaning the averages never caught up to the
+actual pullback.
+
 **Problem:** When DD rejects a CALL entry as overbought, the reentry scan requires ALL THREE
 conditions simultaneously: `rsi_10min_avg <= 30 AND ewo < 0 AND ewo_15min_avg < 0`. The use
 of lagging averaged indicators (10min RSI avg, 15min EWO avg) makes this triple-AND condition
 nearly impossible to satisfy during V-shaped recoveries, causing missed profitable entries.
+
+**Code path:** `Test.py` → `_process_signal()` → DD check fails (RSI > 85) → scan loop at
+line 910 → checks triple-AND at line 922-924 → condition never met → falls through to
+line 961 → `Overbought - No Reentry`.
 
 **Example:** Signal at 09:30 with RSI 91.9 (correctly rejected). At 09:42, raw RSI was 24.2
 (excellent CALL entry), but RSI_10min_avg was 41.0 (still > 30 threshold) and EWO_15min_avg
 was 0.088 (still > 0). The triple condition was NEVER met. Stock recovered from $693.66 to
 $696+ by 09:58 — missed >100% option move.
 
-**Root Cause:** 10-minute RSI average lags too far behind instantaneous RSI during rapid
-reversals. Combined with 15-minute EWO average requirement, the reentry window is nearly
-unreachable.
+**Bar-by-bar near misses (showing why triple-AND fails):**
+| Time  | RSI  | RSI_avg | EWO    | EWO_avg | RSI_avg<=30? | EWO<0? | EWO_avg<0? |
+|-------|------|---------|--------|---------|--------------|--------|------------|
+| 09:42 | 24.2 | 41.0    | -0.446 | 0.088   | NO (41>30)   | YES    | NO         |
+| 09:43 | 31.6 | 37.4    | -0.488 | 0.050   | NO (37>30)   | YES    | NO         |
+| 09:44 | 37.8 | 34.3    | -0.468 | 0.012   | NO (34>30)   | YES    | NO         |
+| 09:45 | 36.1 | 32.2    | -0.464 | -0.035  | NO (32>30)   | YES    | YES        |
+| 09:46 | 41.4 | 32.6    | -0.423 | -0.088  | NO (33>30)   | YES    | YES        |
 
-**Fix Options:**
-1. Use instantaneous RSI instead of rsi_10min_avg for reentry check
-2. Relax threshold (e.g., rsi_avg <= 40 instead of <= 30)
-3. Use OR logic instead of AND for the three conditions
-4. Reduce averaging windows (e.g., 5min RSI avg instead of 10min)
-5. Drop the ewo_15min_avg requirement (keep only rsi_avg + ewo)
+RSI_avg bottomed at 32.2 (never reached <=30). By the time EWO_avg went negative, the
+opportunity was gone.
+
+**Root Cause:** The triple-AND with lagging averages is a binary gate that doesn't account
+for signal strength. A raw RSI of 24.2 is a very strong pullback signal, but it gets zero
+credit because the 10-minute average hasn't caught up. The system needs to weigh HOW MUCH
+conditions are met, not just IF they are met.
+
+**Design: Replace Binary Gate with Confidence Score (see below)**
+
+---
+
+### DESIGN: Adaptive Reentry Scoring System (BUG-003 Fix)
+
+**Goal:** Replace the binary triple-AND gate with a weighted confidence score that lets strong
+signals compensate for lagging indicators. The system should self-adjust: a deep RSI pullback
+can overcome a slightly positive EWO average, and time elapsed since rejection adds confidence
+that the overbought condition has cooled.
+
+**Current system (binary):**
+```
+IF rsi_10min_avg <= 30 AND ewo < 0 AND ewo_15min_avg < 0 → ENTER
+ELSE → SKIP
+```
+
+**Proposed system (weighted score):**
+```
+score = (w_rsi * rsi_score) + (w_ewo * ewo_score) + (w_ewo_avg * ewo_avg_score) + (w_time * time_score)
+IF score >= confidence_threshold → ENTER
+```
+
+**Component scoring (CALL overbought reentry):**
+
+| Component | What it measures | Score formula | Range |
+|-----------|-----------------|---------------|-------|
+| RSI pullback | How far RSI dropped from overbought | `(85 - raw_rsi) / 85` clamped to [0, 1] | 0-1 |
+| EWO direction | Is momentum shifting? | `1.0 if ewo < 0, else max(0, 1 - ewo/0.5)` | 0-1 |
+| EWO avg trend | Has avg momentum shifted? | `1.0 if ewo_avg < 0, else max(0, 1 - ewo_avg/0.5)` | 0-1 |
+| Time decay | How long since rejection? | `min(minutes_elapsed / 20, 1.0)` | 0-1 |
+
+**Default weights (configurable in Config.py):**
+```python
+'reentry_scoring': {
+    'enabled': True,
+    'weight_rsi': 0.40,          # RSI pullback depth (most important)
+    'weight_ewo': 0.25,          # EWO direction
+    'weight_ewo_avg': 0.15,      # EWO average (least important, lags most)
+    'weight_time': 0.20,         # Time elapsed since rejection
+    'confidence_threshold': 0.60, # Minimum score to enter
+    'min_rsi_raw': 40,           # Safety: raw RSI must be below this regardless of score
+}
+```
+
+**09:42 example with scoring:**
+```
+rsi_score    = (85 - 24.2) / 85           = 0.715
+ewo_score    = 1.0  (ewo = -0.446 < 0)    = 1.000
+ewo_avg_score = max(0, 1 - 0.088/0.5)     = 0.824
+time_score   = min(12/20, 1.0)            = 0.600
+
+score = (0.40 * 0.715) + (0.25 * 1.0) + (0.15 * 0.824) + (0.20 * 0.6)
+      = 0.286 + 0.250 + 0.124 + 0.120
+      = 0.780
+
+0.780 >= 0.60 → ENTER ✓
+raw RSI 24.2 < 40 → safety check passes ✓
+```
+
+The strong RSI pullback (0.715) and EWO direction (1.0) overcome the lagging EWO average.
+
+**PUT oversold reentry (mirror logic):**
+Same structure but inverted: RSI rising from oversold, EWO positive, etc.
+```
+rsi_score = (raw_rsi - 15) / 85  (how far RSI rose from oversold)
+ewo_score = 1.0 if ewo > 0
+ewo_avg_score = 1.0 if ewo_avg > 0
+```
+
+**Where this lives in the codebase:**
+- Scoring logic: `Strategy.py` (new function `score_reentry_confidence()`)
+- Config: `Config.py` under `due_diligence.reentry_scoring`
+- Caller: `Test.py:910-926` (replace the triple-AND scan with scoring call)
+
+**Advantages over current system:**
+1. No missed V-shaped recoveries — strong pullbacks score high even with lagging averages
+2. Self-adjusting — each component contributes proportionally, no single indicator can veto
+3. Time decay adds urgency — the longer we wait, the more likely overbought has cooled
+4. Safety rail — `min_rsi_raw` prevents entering if RSI hasn't actually pulled back
+5. Fully configurable — all weights/thresholds in Config.py, easy to tune via backtesting
+6. Backwards compatible — set `enabled: False` to keep the old binary logic
 
 ---
 
