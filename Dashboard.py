@@ -935,10 +935,6 @@ def main():
             matrix_df = matrix_df[df['holding'] == True]
 
         # Format price columns as $X.XX
-        for col in ['stock_price', 'stock_high', 'stock_low', 'true_price', 'option_price',
-                     'entry_price', 'highest_price', 'lowest_price', 'trailing_stop_price',
-                     'vwap', 'ema_30', 'vwap_ema_avg', 'emavwap', 'supertrend']:
-        # Format numeric columns
         for col in ['stock_price', 'stock_high', 'stock_low', 'true_price', 'option_price', 'stop_loss', 'vwap', 'ema_20', 'ema_30', 'vwap_ema_avg', 'emavwap', 'supertrend', 'ichimoku_tenkan', 'ichimoku_kijun', 'ichimoku_senkou_a', 'ichimoku_senkou_b']:
             if col in matrix_df.columns:
                 matrix_df[col] = matrix_df[col].apply(lambda x: f"${x:.2f}" if pd.notna(x) else "")
