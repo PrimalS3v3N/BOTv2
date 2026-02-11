@@ -106,6 +106,10 @@ DISCORD_CONFIG = {
 # DATA MODULE (Data.py, Test.py)
 # =============================================================================
 
+# Index symbols that are valid option underlyings but not tradeable stocks on Robinhood.
+# Robinhood's /quotes/ endpoint returns 404 for these, so we skip API validation.
+INDEX_SYMBOLS = {'SPX', 'NDX', 'RUT', 'DJX', 'VIX', 'XSP', 'OEX'}
+
 DATA_CONFIG = {
     'cache_ttl': 60,                               # Cache TTL (seconds)
     'max_quote_history': 1000,                     # Max quotes in memory
