@@ -919,6 +919,10 @@ class Backtest:
         tp_strategy = Strategy.TakeProfitMilestones(self.config.get('take_profit_milestones', {}))
         tp_tracker = tp_strategy.create_tracker(position.entry_price)
 
+        # Get Momentum Peak settings from config
+        mp_strategy = Strategy.MomentumPeak(self.config.get('momentum_peak', {}))
+        mp_detector = mp_strategy.create_detector()
+
         # Get Closure - Peak settings from config
         CP_config = self.config.get('closure_peak', {})
         CP_enabled = CP_config.get('enabled', True)
@@ -1016,6 +1020,13 @@ class Backtest:
                     trailing_stop_price=cur_trailing_price,
                 )
 
+                # Update momentum peak detector
+                mp_exit = False
+                mp_reason = None
+                if mp_detector and not position.is_closed:
+                    mp_pnl = position.get_pnl_pct(option_price)
+                    mp_exit, mp_reason = mp_detector.update(mp_pnl, rsi, rsi_10min_avg, ewo)
+
                 # Take Profit - Milestones: trailing stop triggered
                 if tp_exit and not position.is_closed:
                     # Fill at the trailing stop price, not the current bar price.
@@ -1023,6 +1034,11 @@ class Backtest:
                     # would fill at whatever the bar gapped down to, understating profits.
                     exit_price = tp_tracker.trailing_exit_price * (1 - self.slippage_pct)
                     position.close(exit_price, timestamp, tp_reason)
+
+                # Momentum Peak: RSI overbought reversal + EWO decline
+                elif mp_exit and not position.is_closed:
+                    exit_price = option_price * (1 - self.slippage_pct)
+                    position.close(exit_price, timestamp, mp_reason)
 
                 # Closure - Peak: Avg RSI (10min) based exit in last 30 minutes of trading day
                 elif CP_enabled and not position.is_closed and not np.isnan(rsi_10min_avg) and timestamp.time() >= CP_start_time:
