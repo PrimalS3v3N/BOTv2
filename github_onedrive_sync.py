@@ -2,27 +2,26 @@
 """
 GitHub to OneDrive Sync Script
 
-Fetches the latest files from a GitHub repository and syncs them
-to a local OneDrive folder. Supports both public and private repos.
+Compares files between a GitHub repository and a local OneDrive folder,
+then updates OneDrive copies for files that exist in BOTH locations.
+Files unique to either side are left completely untouched.
 
 Usage:
     python github_onedrive_sync.py <github_url> <onedrive_path> [options]
 
 Examples:
-    # Sync a public repo to your OneDrive folder
-    python github_onedrive_sync.py https://github.com/owner/repo ~/OneDrive/Backups/repo
+    # Update matching files in your OneDrive folder from GitHub
+    python github_onedrive_sync.py https://github.com/owner/repo ~/OneDrive/Projects/repo
 
-    # Sync a specific branch with a GitHub token
+    # Sync a specific branch
     python github_onedrive_sync.py https://github.com/owner/repo ~/OneDrive/Projects/repo \
         --branch develop --token ghp_xxxx
 
-    # Sync via API only (no git required)
-    python github_onedrive_sync.py https://github.com/owner/repo ~/OneDrive/Projects/repo \
-        --method api
+    # Use the API method (no git required)
+    python github_onedrive_sync.py owner/repo ~/OneDrive/Projects/repo --method api
 
-    # Dry run to see what would change
-    python github_onedrive_sync.py https://github.com/owner/repo ~/OneDrive/Projects/repo \
-        --dry-run
+    # Preview what would change without writing anything
+    python github_onedrive_sync.py owner/repo ~/OneDrive/Projects/repo --dry-run
 """
 
 import argparse
@@ -100,12 +99,33 @@ def parse_github_url(url: str) -> tuple:
     )
 
 
+def collect_local_files(directory: Path) -> dict[str, Path]:
+    """
+    Walk a directory and return {relative_path_str: absolute_path} for every
+    file, skipping hidden sync-state files.
+    """
+    files = {}
+    for item in sorted(directory.rglob("*")):
+        if not item.is_file():
+            continue
+        rel = item.relative_to(directory)
+        rel_str = str(rel)
+        # Skip our own state file
+        if rel.name == SYNC_STATE_FILE:
+            continue
+        # Skip hidden .git dirs (shouldn't exist here, but just in case)
+        if rel.parts[0] == ".git":
+            continue
+        files[rel_str] = item
+    return files
+
+
 # ---------------------------------------------------------------------------
 # Sync State
 # ---------------------------------------------------------------------------
 
 class SyncState:
-    """Tracks what has been synced so unchanged files can be skipped."""
+    """Persists the last-known hashes so unchanged files can be skipped."""
 
     def __init__(self, onedrive_path: Path):
         self.state_file = onedrive_path / SYNC_STATE_FILE
@@ -136,17 +156,22 @@ class SyncState:
     def last_sync_time(self) -> str | None:
         return self.data.get("last_sync")
 
-    def file_changed(self, rel_path: str, current_hash: str) -> bool:
-        prev = self.data.get("files", {}).get(rel_path)
-        return prev != current_hash
+    def prev_hash(self, rel_path: str) -> str | None:
+        return self.data.get("files", {}).get(rel_path)
 
 
 # ---------------------------------------------------------------------------
-# GitHubSync
+# GitHubOneDriveSync
 # ---------------------------------------------------------------------------
 
-class GitHubSync:
-    """Sync files from a GitHub repo to a local OneDrive folder."""
+class GitHubOneDriveSync:
+    """
+    Update OneDrive files from a GitHub repo.
+
+    Only files that already exist in the OneDrive folder AND in the GitHub
+    repo are compared and updated.  Files unique to either side are never
+    touched or deleted.
+    """
 
     def __init__(
         self,
@@ -162,7 +187,7 @@ class GitHubSync:
         self.clone_url = f"https://github.com/{self.owner}/{self.repo}.git"
         self.onedrive_path = Path(onedrive_path).expanduser().resolve()
         self.token = token or os.environ.get("GITHUB_TOKEN")
-        self.branch = branch  # None means default branch
+        self.branch = branch  # None → will resolve to default branch
         self.exclude = set(exclude or [])
         self.dry_run = dry_run
         self.verbose = verbose
@@ -170,14 +195,14 @@ class GitHubSync:
         # API session
         self.session = requests.Session()
         self.session.headers["Accept"] = "application/vnd.github.v3+json"
-        self.session.headers["User-Agent"] = "github-onedrive-sync/1.0"
+        self.session.headers["User-Agent"] = "github-onedrive-sync/2.0"
         if self.token:
             self.session.headers["Authorization"] = f"token {self.token}"
 
         self.api_base = "https://api.github.com"
         self.state = SyncState(self.onedrive_path)
 
-    # ---- informational ----
+    # ---- logging helpers ----
 
     def _log(self, msg: str):
         print(f"  {msg}")
@@ -185,6 +210,15 @@ class GitHubSync:
     def _vlog(self, msg: str):
         if self.verbose:
             print(f"  [verbose] {msg}")
+
+    # ---- exclusion ----
+
+    def _is_excluded(self, rel_path: str) -> bool:
+        parts = Path(rel_path).parts
+        for exc in self.exclude:
+            if exc in parts or rel_path.startswith(exc):
+                return True
+        return False
 
     # ---- GitHub API helpers ----
 
@@ -208,7 +242,6 @@ class GitHubSync:
         return resp.json()["sha"]
 
     def get_repo_tree(self, sha: str) -> list:
-        """Get the full recursive tree for a commit."""
         resp = self._api_get(
             f"/repos/{self.owner}/{self.repo}/git/trees/{sha}",
             params={"recursive": "1"},
@@ -221,7 +254,6 @@ class GitHubSync:
         return data.get("tree", [])
 
     def download_file_content(self, file_path: str) -> bytes:
-        """Download raw file content from the repo."""
         url = (
             f"https://raw.githubusercontent.com/"
             f"{self.owner}/{self.repo}/{self.branch}/{file_path}"
@@ -233,20 +265,30 @@ class GitHubSync:
         resp.raise_for_status()
         return resp.content
 
-    # ---- sync via git clone/pull ----
+    # ------------------------------------------------------------------
+    # sync via git (clone → compare → copy matching)
+    # ------------------------------------------------------------------
 
     def sync_via_git(self):
-        """Clone or pull the repo, then mirror files to OneDrive."""
-        print(f"\n[git] Syncing {self.owner}/{self.repo} -> {self.onedrive_path}")
+        print(f"\n[git] Syncing {self.owner}/{self.repo} <-> {self.onedrive_path}")
 
         branch = self.branch or self.get_default_branch()
         self.branch = branch
         print(f"[git] Branch: {branch}")
 
+        if not self.onedrive_path.exists():
+            print(f"ERROR: OneDrive path does not exist: {self.onedrive_path}")
+            print("       Create the folder and place the files you want kept in sync.")
+            sys.exit(1)
+
+        # Collect local OneDrive files first
+        local_files = collect_local_files(self.onedrive_path)
+        self._log(f"OneDrive files found: {len(local_files)}")
+
         with tempfile.TemporaryDirectory(prefix="gh_sync_") as tmp:
             tmp_repo = Path(tmp) / self.repo
 
-            # Clone
+            # Shallow clone
             cmd = ["git", "clone", "--depth", "1", "--branch", branch]
             if self.token:
                 authed_url = (
@@ -264,189 +306,204 @@ class GitHubSync:
                 print(f"ERROR: git clone failed:\n{result.stderr}")
                 sys.exit(1)
 
-            # Get commit SHA
+            # Commit SHA
             sha_result = subprocess.run(
                 ["git", "rev-parse", "HEAD"],
                 capture_output=True, text=True, cwd=tmp_repo,
             )
             commit_sha = sha_result.stdout.strip()
+            print(f"[git] Commit: {commit_sha[:8]}")
 
-            if self.state.last_commit == commit_sha:
-                print(f"[git] Already up to date (commit {commit_sha[:8]})")
-                return
+            # Collect repo files (skip .git/)
+            repo_files: dict[str, Path] = {}
+            for item in sorted(tmp_repo.rglob("*")):
+                if not item.is_file():
+                    continue
+                rel = item.relative_to(tmp_repo)
+                if rel.parts[0] == ".git":
+                    continue
+                repo_files[str(rel)] = item
 
-            print(f"[git] New commit: {commit_sha[:8]}")
-            if self.state.last_commit:
-                print(f"[git] Previous:   {self.state.last_commit[:8]}")
+            self._log(f"GitHub files found: {len(repo_files)}")
 
-            # Mirror files
-            self._mirror_directory(tmp_repo, commit_sha)
+            # Find common files
+            common = set(local_files.keys()) & set(repo_files.keys())
+            github_only = set(repo_files.keys()) - set(local_files.keys())
+            onedrive_only = set(local_files.keys()) - set(repo_files.keys())
 
-        print("[git] Sync complete.\n")
+            self._log(f"Files in common:     {len(common)}")
+            self._vlog(f"GitHub-only files:   {len(github_only)} (ignored)")
+            self._vlog(f"OneDrive-only files: {len(onedrive_only)} (ignored)")
 
-    # ---- sync via API ----
+            if self.verbose:
+                for f in sorted(github_only):
+                    self._vlog(f"  GitHub only  : {f}")
+                for f in sorted(onedrive_only):
+                    self._vlog(f"  OneDrive only: {f}")
+
+            # Compare and update matching files
+            updated = 0
+            unchanged = 0
+            skipped = 0
+            file_hashes = {}
+
+            for rel_path in sorted(common):
+                if self._is_excluded(rel_path):
+                    self._vlog(f"Excluded: {rel_path}")
+                    skipped += 1
+                    continue
+
+                src = repo_files[rel_path]
+                dest = local_files[rel_path]
+                src_hash = file_hash(src)
+                dest_hash = file_hash(dest)
+                file_hashes[rel_path] = src_hash
+
+                if src_hash == dest_hash:
+                    self._vlog(f"Identical: {rel_path}")
+                    unchanged += 1
+                    continue
+
+                # Content differs — update OneDrive with GitHub version
+                if self.dry_run:
+                    self._log(f"[WOULD UPDATE] {rel_path}")
+                else:
+                    self._log(f"Updating: {rel_path}")
+                    shutil.copy2(src, dest)
+                updated += 1
+
+        if not self.dry_run:
+            self.state.save(commit_sha, file_hashes)
+
+        label = "Would update" if self.dry_run else "Updated"
+        print(f"[git] Done: {updated} {label.lower()}, "
+              f"{unchanged} identical, {skipped} excluded")
+        print(f"[git] Skipped {len(github_only)} GitHub-only, "
+              f"{len(onedrive_only)} OneDrive-only (untouched)\n")
+
+    # ------------------------------------------------------------------
+    # sync via API (no git required)
+    # ------------------------------------------------------------------
 
     def sync_via_api(self):
-        """Download files via the GitHub API to OneDrive."""
-        print(f"\n[api] Syncing {self.owner}/{self.repo} -> {self.onedrive_path}")
+        print(f"\n[api] Syncing {self.owner}/{self.repo} <-> {self.onedrive_path}")
 
         branch = self.branch or self.get_default_branch()
         self.branch = branch
         print(f"[api] Branch: {branch}")
 
+        if not self.onedrive_path.exists():
+            print(f"ERROR: OneDrive path does not exist: {self.onedrive_path}")
+            print("       Create the folder and place the files you want kept in sync.")
+            sys.exit(1)
+
+        # Collect local OneDrive files
+        local_files = collect_local_files(self.onedrive_path)
+        self._log(f"OneDrive files found: {len(local_files)}")
+
+        # Get GitHub tree
         commit_sha = self.get_latest_commit_sha(branch)
-
-        if self.state.last_commit == commit_sha:
-            print(f"[api] Already up to date (commit {commit_sha[:8]})")
-            return
-
-        print(f"[api] New commit: {commit_sha[:8]}")
-        if self.state.last_commit:
-            print(f"[api] Previous:   {self.state.last_commit[:8]}")
+        print(f"[api] Commit: {commit_sha[:8]}")
 
         tree = self.get_repo_tree(commit_sha)
-        blobs = [item for item in tree if item["type"] == "blob"]
-        total = len(blobs)
+        repo_file_set = {
+            item["path"]: item["sha"]
+            for item in tree
+            if item["type"] == "blob"
+        }
+        self._log(f"GitHub files found: {len(repo_file_set)}")
 
-        if self.dry_run:
-            self._log(f"Would sync {total} files (dry run)")
-            for item in blobs:
-                self._log(f"  {item['path']}")
-            return
+        # Find common files
+        common = set(local_files.keys()) & set(repo_file_set.keys())
+        github_only = set(repo_file_set.keys()) - set(local_files.keys())
+        onedrive_only = set(local_files.keys()) - set(repo_file_set.keys())
 
-        self.onedrive_path.mkdir(parents=True, exist_ok=True)
+        self._log(f"Files in common:     {len(common)}")
+        self._vlog(f"GitHub-only files:   {len(github_only)} (ignored)")
+        self._vlog(f"OneDrive-only files: {len(onedrive_only)} (ignored)")
 
-        file_hashes = {}
-        synced = 0
+        if self.verbose:
+            for f in sorted(github_only):
+                self._vlog(f"  GitHub only  : {f}")
+            for f in sorted(onedrive_only):
+                self._vlog(f"  OneDrive only: {f}")
+
+        # Compare and update matching files
+        updated = 0
+        unchanged = 0
         skipped = 0
+        file_hashes = {}
 
-        for i, item in enumerate(blobs, 1):
-            rel_path = item["path"]
-
+        for rel_path in sorted(common):
             if self._is_excluded(rel_path):
                 self._vlog(f"Excluded: {rel_path}")
                 skipped += 1
                 continue
 
-            dest = self.onedrive_path / rel_path
+            blob_sha = repo_file_set[rel_path]
+            prev = self.state.prev_hash(rel_path)
+            dest = local_files[rel_path]
 
-            # Use git blob SHA as a change indicator
-            blob_sha = item["sha"]
-            if not self.state.file_changed(rel_path, blob_sha) and dest.exists():
-                self._vlog(f"Unchanged: {rel_path}")
+            # If the GitHub blob SHA hasn't changed since last sync and the
+            # local file hash also matches what we recorded, skip the download.
+            if prev == blob_sha:
+                dest_hash = file_hash(dest)
+                saved_local = self.state.data.get("local_hashes", {}).get(rel_path)
+                if saved_local == dest_hash:
+                    self._vlog(f"Unchanged: {rel_path}")
+                    file_hashes[rel_path] = blob_sha
+                    unchanged += 1
+                    continue
+
+            # Need to download and compare
+            if self.dry_run:
+                self._log(f"[WOULD CHECK/UPDATE] {rel_path}")
+                updated += 1
                 file_hashes[rel_path] = blob_sha
-                skipped += 1
                 continue
 
-            self._log(f"[{i}/{total}] Downloading {rel_path}")
             try:
                 content = self.download_file_content(rel_path)
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                dest.write_bytes(content)
-                file_hashes[rel_path] = blob_sha
-                synced += 1
             except Exception as e:
                 print(f"  WARNING: Failed to download {rel_path}: {e}")
-
-        # Remove files that no longer exist in the repo
-        removed = self._cleanup_removed_files(
-            {item["path"] for item in blobs}
-        )
-
-        self.state.save(commit_sha, file_hashes)
-        print(f"[api] Done: {synced} updated, {skipped} unchanged, {removed} removed\n")
-
-    # ---- shared helpers ----
-
-    def _is_excluded(self, rel_path: str) -> bool:
-        """Check if a path matches any exclusion pattern."""
-        parts = Path(rel_path).parts
-        for exc in self.exclude:
-            if exc in parts or rel_path.startswith(exc):
-                return True
-        return False
-
-    def _mirror_directory(self, source_dir: Path, commit_sha: str):
-        """Copy files from source_dir to onedrive_path, tracking changes."""
-        if self.dry_run:
-            self._log("Dry run — listing files that would be synced:")
-
-        self.onedrive_path.mkdir(parents=True, exist_ok=True)
-
-        file_hashes = {}
-        synced = 0
-        skipped = 0
-
-        # Walk the cloned repo (skip .git directory)
-        for src_file in sorted(source_dir.rglob("*")):
-            if not src_file.is_file():
                 continue
 
-            rel = src_file.relative_to(source_dir)
-            rel_str = str(rel)
+            # Compare downloaded content to local file
+            src_hash = hashlib.sha256(content).hexdigest()
+            dest_hash = file_hash(dest)
 
-            # Skip .git internals
-            if rel.parts[0] == ".git":
+            file_hashes[rel_path] = blob_sha
+
+            if src_hash == dest_hash:
+                self._vlog(f"Identical: {rel_path}")
+                unchanged += 1
                 continue
 
-            if self._is_excluded(rel_str):
-                self._vlog(f"Excluded: {rel_str}")
-                continue
+            self._log(f"Updating: {rel_path}")
+            dest.write_bytes(content)
+            updated += 1
 
-            current_hash = file_hash(src_file)
-            file_hashes[rel_str] = current_hash
+        if not self.dry_run:
+            # Also save local hashes so we can skip re-downloads next time
+            local_hashes = {}
+            for rel_path in file_hashes:
+                p = local_files.get(rel_path)
+                if p and p.exists():
+                    local_hashes[rel_path] = file_hash(p)
+            state_data = {
+                "last_sync": datetime.now(timezone.utc).isoformat(),
+                "commit_sha": commit_sha,
+                "files": file_hashes,
+                "local_hashes": local_hashes,
+            }
+            self.state.state_file.parent.mkdir(parents=True, exist_ok=True)
+            self.state.state_file.write_text(json.dumps(state_data, indent=2))
 
-            if self.dry_run:
-                changed = self.state.file_changed(rel_str, current_hash)
-                status = "CHANGED" if changed else "unchanged"
-                self._log(f"  [{status}] {rel_str}")
-                continue
-
-            dest = self.onedrive_path / rel
-            if not self.state.file_changed(rel_str, current_hash) and dest.exists():
-                self._vlog(f"Unchanged: {rel_str}")
-                skipped += 1
-                continue
-
-            self._log(f"Syncing: {rel_str}")
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(src_file, dest)
-            synced += 1
-
-        if self.dry_run:
-            return
-
-        # Clean up files removed from repo
-        removed = self._cleanup_removed_files(set(file_hashes.keys()))
-
-        self.state.save(commit_sha, file_hashes)
-        print(f"[git] Done: {synced} updated, {skipped} unchanged, {removed} removed")
-
-    def _cleanup_removed_files(self, current_files: set) -> int:
-        """Remove local files that no longer exist in the repo."""
-        prev_files = set(self.state.data.get("files", {}).keys())
-        to_remove = prev_files - current_files
-        removed = 0
-
-        for rel_path in to_remove:
-            if self._is_excluded(rel_path):
-                continue
-            target = self.onedrive_path / rel_path
-            if target.exists():
-                self._log(f"Removing deleted file: {rel_path}")
-                if not self.dry_run:
-                    target.unlink()
-                    # Remove empty parent directories
-                    parent = target.parent
-                    while parent != self.onedrive_path:
-                        try:
-                            parent.rmdir()  # only removes if empty
-                            parent = parent.parent
-                        except OSError:
-                            break
-                removed += 1
-
-        return removed
+        label = "Would update" if self.dry_run else "Updated"
+        print(f"[api] Done: {updated} {label.lower()}, "
+              f"{unchanged} identical, {skipped} excluded")
+        print(f"[api] Skipped {len(github_only)} GitHub-only, "
+              f"{len(onedrive_only)} OneDrive-only (untouched)\n")
 
 
 # ---------------------------------------------------------------------------
@@ -456,15 +513,19 @@ class GitHubSync:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="github_onedrive_sync",
-        description="Sync files from a GitHub repository to a local OneDrive folder.",
+        description=(
+            "Update files in a local OneDrive folder from a GitHub repository. "
+            "Only files that exist in BOTH locations are compared and updated. "
+            "Files unique to either side are never touched or deleted."
+        ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""\
 examples:
-  %(prog)s https://github.com/owner/repo ~/OneDrive/Backups/repo
+  %(prog)s https://github.com/owner/repo ~/OneDrive/Projects/repo
   %(prog)s owner/repo ~/OneDrive/Projects/repo --branch develop
   %(prog)s owner/repo "C:/Users/me/OneDrive/Code/repo" --method api
   %(prog)s owner/repo ~/OneDrive/repo --exclude .github --exclude docs
-  %(prog)s owner/repo ~/OneDrive/repo --dry-run
+  %(prog)s owner/repo ~/OneDrive/repo --dry-run --verbose
 """,
     )
     parser.add_argument(
@@ -473,12 +534,12 @@ examples:
     )
     parser.add_argument(
         "onedrive_path",
-        help="Local OneDrive folder path to sync files into",
+        help="Local OneDrive folder path containing your files",
     )
     parser.add_argument(
         "--branch", "-b",
         default=None,
-        help="Branch to sync (default: repo's default branch)",
+        help="Branch to sync from (default: repo's default branch)",
     )
     parser.add_argument(
         "--token", "-t",
@@ -489,23 +550,23 @@ examples:
         "--method", "-m",
         choices=["git", "api"],
         default="git",
-        help="Sync method: 'git' clones the repo (default), 'api' downloads via GitHub API",
+        help="Sync method: 'git' clones the repo (default), 'api' uses GitHub API",
     )
     parser.add_argument(
         "--exclude", "-e",
         action="append",
         default=[],
-        help="Exclude files/directories matching this name (repeatable)",
+        help="Exclude matching files from sync (repeatable)",
     )
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Show what would be synced without making changes",
+        help="Show what would be updated without making changes",
     )
     parser.add_argument(
         "--verbose", "-v",
         action="store_true",
-        help="Show detailed output including unchanged files",
+        help="Show detailed output (identical files, ignored files, etc.)",
     )
     return parser
 
@@ -515,7 +576,7 @@ def main():
     args = parser.parse_args()
 
     try:
-        syncer = GitHubSync(
+        syncer = GitHubOneDriveSync(
             github_url=args.github_url,
             onedrive_path=args.onedrive_path,
             token=args.token,
@@ -529,10 +590,11 @@ def main():
         sys.exit(1)
 
     print("=" * 60)
-    print("  GitHub -> OneDrive Sync")
+    print("  GitHub <-> OneDrive Sync")
+    print("  (update matching files only, nothing deleted)")
     print("=" * 60)
     print(f"  Repository : {syncer.owner}/{syncer.repo}")
-    print(f"  Destination: {syncer.onedrive_path}")
+    print(f"  OneDrive   : {syncer.onedrive_path}")
     print(f"  Method     : {args.method}")
     if syncer.branch:
         print(f"  Branch     : {syncer.branch}")
