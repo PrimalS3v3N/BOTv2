@@ -483,25 +483,28 @@ def calculate_greeks(S, K, T, r, sigma, option_type='CALL'):
 
 def estimate_option_price_bs(stock_price, strike, option_type, days_to_expiry,
                               entry_price=None, entry_stock_price=None,
+                              entry_days_to_expiry=None,
                               volatility=None, risk_free_rate=None):
     """
     Estimate option price using Black-Scholes model with offset calibration.
 
     When entry data is provided, calibrates BS to the actual market price:
-        offset = entry_price - BS(entry_stock_price)
-        price  = BS(current_stock_price) + offset
+        offset = entry_price - BS(entry_stock_price, T_entry)
+        price  = BS(current_stock_price, T_current) + offset
 
-    At entry the simulated price matches the signal cost exactly. Subsequent
-    bars move by full BS dynamics (delta + gamma) instead of a linear delta
-    approximation, keeping the stop-loss buffer consistent with entry pricing.
+    The offset is computed once using T_entry (the time to expiry at entry)
+    so that theta decay in the BS(current) term is reflected naturally.
+    days_to_expiry should be fractional (intraday precision) so 0DTE
+    options retain time value instead of collapsing to intrinsic-only.
 
     Args:
         stock_price: Current stock price
         strike: Option strike price
         option_type: 'CALL' or 'PUT'
-        days_to_expiry: Days until expiration
+        days_to_expiry: Fractional days until expiration
         entry_price: Original entry price (optional, for offset calibration)
         entry_stock_price: Stock price at entry (optional, for offset calibration)
+        entry_days_to_expiry: Days to expiry at entry time (optional, for fixed offset)
         volatility: Implied volatility (default from config)
         risk_free_rate: Risk-free rate (default from config)
 
@@ -523,12 +526,14 @@ def estimate_option_price_bs(stock_price, strike, option_type, days_to_expiry,
     theoretical_price = black_scholes_price(stock_price, strike, T, risk_free_rate, volatility, option_type)
 
     # If we have entry data, calibrate BS to actual market price using offset
-    # offset = entry_price - BS_theoretical(entry_stock) anchors the model
+    # offset = entry_price - BS_theoretical(entry_stock, T_entry) anchors the model
     # so that at entry the simulated price matches the signal cost exactly,
-    # and subsequent bars move by full BS dynamics (delta + gamma)
+    # and subsequent bars move by full BS dynamics (delta + gamma + theta)
     if entry_price and entry_stock_price and entry_price > 0:
+        # Use entry-time T for offset so theta decay isn't canceled out
+        T_entry = max(0, entry_days_to_expiry) / 365 if entry_days_to_expiry is not None else T
         entry_theoretical = black_scholes_price(
-            entry_stock_price, strike, T, risk_free_rate, volatility, option_type
+            entry_stock_price, strike, T_entry, risk_free_rate, volatility, option_type
         )
         offset = entry_price - entry_theoretical
         calibrated_price = theoretical_price + offset

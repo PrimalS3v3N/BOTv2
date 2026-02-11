@@ -867,8 +867,14 @@ class Backtest:
         entry_time = stock_data.index[entry_idx]
         entry_stock_price = entry_bar['close']
 
-        # Get entry option price
-        days_to_expiry = (signal['expiration'] - entry_time.date()).days if signal['expiration'] else 30
+        # Get entry option price (use intraday precision for 0DTE)
+        if signal['expiration']:
+            expiry_dt = dt.datetime.combine(
+                signal['expiration'], dt.time(16, 0), tzinfo=EASTERN
+            )
+            days_to_expiry = max(0, (expiry_dt - entry_time).total_seconds() / 86400)
+        else:
+            days_to_expiry = 30
 
         if signal.get('cost'):
             entry_option_price = signal.get('cost')
@@ -900,7 +906,17 @@ class Backtest:
 
     def _simulate_position(self, position, matrix, stock_data, signal, entry_idx, entry_stock_price):
         """Simulate position through historical data."""
-        days_to_expiry = (signal['expiration'] - position.entry_time.date()).days if signal['expiration'] else 30
+        # Calculate expiry as a precise datetime (market close at 16:00 ET)
+        # so that 0DTE and intraday options get fractional T instead of T=0
+        if signal['expiration']:
+            expiry_dt = dt.datetime.combine(
+                signal['expiration'], dt.time(16, 0), tzinfo=EASTERN
+            )
+        else:
+            expiry_dt = position.entry_time + dt.timedelta(days=30)
+
+        # Fractional days from entry to expiry (used once for offset calibration)
+        entry_days_to_expiry = max(0, (expiry_dt - position.entry_time).total_seconds() / 86400)
 
         # Get indicator settings from config
         indicator_config = self.config.get('indicators', {})
@@ -958,7 +974,7 @@ class Backtest:
             st_value = bar.get('supertrend', np.nan)
             st_direction = bar.get('supertrend_direction', np.nan)
 
-            current_days_to_expiry = max(0, days_to_expiry - (timestamp.date() - position.entry_time.date()).days)
+            current_days_to_expiry = max(0, (expiry_dt - timestamp).total_seconds() / 86400)
 
             # Estimate option price
             option_price = Analysis.estimate_option_price_bs(
@@ -967,7 +983,8 @@ class Backtest:
                 option_type=position.option_type,
                 days_to_expiry=current_days_to_expiry,
                 entry_price=position.entry_price,
-                entry_stock_price=entry_stock_price
+                entry_stock_price=entry_stock_price,
+                entry_days_to_expiry=entry_days_to_expiry
             )
 
             # Determine holding status
