@@ -381,6 +381,8 @@ class GitHubOneDriveSync:
         print(f"[git] Skipped {len(github_only)} GitHub-only, "
               f"{len(onedrive_only)} OneDrive-only (untouched)\n")
 
+        return updated
+
     # ------------------------------------------------------------------
     # sync via API (no git required)
     # ------------------------------------------------------------------

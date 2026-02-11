@@ -1592,16 +1592,20 @@ def test_options_pricing():
 
 
 def sync_from_github():
-    """Sync matching files from GitHub to the local OneDrive folder before running."""
+    """
+    Sync matching files from GitHub to the local folder.
+    Returns the number of files that were updated (0 = already up to date).
+    """
     try:
         from github_onedrive_sync import GitHubOneDriveSync
         syncer = GitHubOneDriveSync(
             github_url="https://github.com/PrimalS3v3N/BOTv2",
             onedrive_path=os.path.dirname(os.path.abspath(__file__)),
         )
-        syncer.sync_via_git()
+        return syncer.sync_via_git() or 0
     except Exception as e:
         print(f"  Sync skipped: {e}")
+        return 0
 
 
 if __name__ == '__main__':
@@ -1611,7 +1615,12 @@ if __name__ == '__main__':
     if len(sys.argv) > 1 and sys.argv[1] == '--test-pricing':
         test_options_pricing()
     else:
-        sync_from_github()
+        # Skip sync check if we already restarted after an update
+        if '--post-update' not in sys.argv:
+            updated = sync_from_github()
+            if updated > 0:
+                print(f"\n  {updated} file(s) updated from GitHub — restarting with new code...\n")
+                os.execv(sys.executable, [sys.executable] + sys.argv + ['--post-update'])
         bt = Backtest(lookback_days=1)
         bt.run()
         bt.BT_Save()
