@@ -163,6 +163,10 @@ BACKTEST_CONFIG = {
         'rsi_oversold': 30,                        # RSI oversold threshold
         'supertrend_period': 10,                   # Supertrend ATR period (bars)
         'supertrend_multiplier': 3.0,              # Supertrend ATR multiplier
+        'ichimoku_tenkan': 9,                      # Ichimoku Tenkan-sen period (Conversion Line)
+        'ichimoku_kijun': 26,                      # Ichimoku Kijun-sen period (Base Line)
+        'ichimoku_senkou_b': 52,                   # Ichimoku Senkou Span B period
+        'ichimoku_displacement': 26,               # Ichimoku cloud forward displacement
     },
 
     # Closure - Peak: Avg RSI (10min) based exit in last 30 minutes of trading day
@@ -248,6 +252,7 @@ DATAFRAME_COLUMNS = {
         'market_bias',
         'vwap', 'ema_30', 'vwap_ema_avg', 'emavwap', 'ewo', 'ewo_15min_avg', 'rsi', 'rsi_10min_avg',
         'supertrend', 'supertrend_direction',
+        'ichimoku_tenkan', 'ichimoku_kijun', 'ichimoku_senkou_a', 'ichimoku_senkou_b',
     ],
 
     # Metadata columns appended to databook (Test.py)
@@ -266,6 +271,7 @@ DATAFRAME_COLUMNS = {
         'market_bias',
         'vwap', 'ema_30', 'vwap_ema_avg', 'emavwap', 'ewo', 'ewo_15min_avg', 'rsi', 'rsi_10min_avg',
         'supertrend', 'supertrend_direction',
+        'ichimoku_tenkan', 'ichimoku_kijun', 'ichimoku_senkou_a', 'ichimoku_senkou_b',
     ],
 }
 

@@ -33,6 +33,13 @@ COLORS = {
     'emavwap': '#00E5FF',         # Cyan
     # Trading range
     'trading_range': '#FF1744',   # Red
+    # Ichimoku Cloud
+    'ichimoku_tenkan': '#E91E63',   # Pink (Conversion Line)
+    'ichimoku_kijun': '#3F51B5',    # Indigo (Base Line)
+    'ichimoku_cloud_bull': 'rgba(0, 200, 83, 0.15)',   # Green cloud fill
+    'ichimoku_cloud_bear': 'rgba(255, 23, 68, 0.15)',  # Red cloud fill
+    'ichimoku_senkou_a': '#26A69A',  # Teal (Leading Span A)
+    'ichimoku_senkou_b': '#EF5350',  # Red (Leading Span B)
 }
 
 def load_data():
@@ -117,7 +124,7 @@ def find_entry_exit(df):
     return entry_row, exit_row, opt_col
 
 
-def create_trade_chart(df, trade_label, market_hours_only=False, show_ewo=True, show_rsi=True, show_supertrend=False, show_market_bias=True):
+def create_trade_chart(df, trade_label, market_hours_only=False, show_ewo=True, show_rsi=True, show_supertrend=False, show_ichimoku=False, show_market_bias=True):
     """Create dual-axis chart with stock/option prices, error bars, and combined EWO/RSI subplot."""
     df = df.copy()
     df['time'] = df['timestamp'].apply(parse_time)
@@ -305,6 +312,76 @@ def create_trade_chart(df, trade_label, market_hours_only=False, show_ewo=True, 
                     name='Supertrend',
                     line=dict(color=COLORS['supertrend'], width=2),
                     hovertemplate='Supertrend: $%{y:.2f}<extra></extra>'
+                ),
+                row=1, col=1, secondary_y=False
+            )
+
+    # Ichimoku Cloud (left y-axis) - cloud fill between Senkou spans + Tenkan/Kijun lines
+    if show_ichimoku:
+        has_senkou_a = 'ichimoku_senkou_a' in df.columns and df['ichimoku_senkou_a'].notna().any()
+        has_senkou_b = 'ichimoku_senkou_b' in df.columns and df['ichimoku_senkou_b'].notna().any()
+        has_tenkan = 'ichimoku_tenkan' in df.columns and df['ichimoku_tenkan'].notna().any()
+        has_kijun = 'ichimoku_kijun' in df.columns and df['ichimoku_kijun'].notna().any()
+
+        # Cloud fill: Senkou Span A and B with shaded region between
+        if has_senkou_a and has_senkou_b:
+            # Determine cloud color per bar: green when A >= B (bullish), red when A < B (bearish)
+            cloud_colors = [
+                COLORS['ichimoku_cloud_bull'] if a >= b else COLORS['ichimoku_cloud_bear']
+                for a, b in zip(
+                    df['ichimoku_senkou_a'].fillna(0),
+                    df['ichimoku_senkou_b'].fillna(0)
+                )
+            ]
+
+            # Senkou Span A (upper/lower boundary of cloud)
+            fig.add_trace(
+                go.Scatter(
+                    x=df['time'],
+                    y=df['ichimoku_senkou_a'],
+                    name='Senkou A',
+                    line=dict(color=COLORS['ichimoku_senkou_a'], width=1),
+                    hovertemplate='Senkou A: $%{y:.2f}<extra></extra>'
+                ),
+                row=1, col=1, secondary_y=False
+            )
+
+            # Senkou Span B with fill to Senkou A
+            fig.add_trace(
+                go.Scatter(
+                    x=df['time'],
+                    y=df['ichimoku_senkou_b'],
+                    name='Senkou B',
+                    line=dict(color=COLORS['ichimoku_senkou_b'], width=1),
+                    fill='tonexty',
+                    fillcolor=COLORS['ichimoku_cloud_bull'],
+                    hovertemplate='Senkou B: $%{y:.2f}<extra></extra>'
+                ),
+                row=1, col=1, secondary_y=False
+            )
+
+        # Tenkan-sen (Conversion Line)
+        if has_tenkan:
+            fig.add_trace(
+                go.Scatter(
+                    x=df['time'],
+                    y=df['ichimoku_tenkan'],
+                    name='Tenkan',
+                    line=dict(color=COLORS['ichimoku_tenkan'], width=1.5),
+                    hovertemplate='Tenkan: $%{y:.2f}<extra></extra>'
+                ),
+                row=1, col=1, secondary_y=False
+            )
+
+        # Kijun-sen (Base Line)
+        if has_kijun:
+            fig.add_trace(
+                go.Scatter(
+                    x=df['time'],
+                    y=df['ichimoku_kijun'],
+                    name='Kijun',
+                    line=dict(color=COLORS['ichimoku_kijun'], width=1.5, dash='dash'),
+                    hovertemplate='Kijun: $%{y:.2f}<extra></extra>'
                 ),
                 row=1, col=1, secondary_y=False
             )
@@ -758,6 +835,7 @@ def main():
         show_ewo = st.toggle("Show EWO Graph", value=True)
         show_rsi = st.toggle("Show RSI Graph", value=True)
         show_supertrend = st.toggle("Show Supertrend", value=False, help="Overlay Supertrend indicator on main chart")
+        show_ichimoku = st.toggle("Show Ichimoku Cloud", value=False, help="Overlay Ichimoku Cloud (Tenkan, Kijun, Senkou spans) on main chart")
         show_market_bias = st.toggle("Show Market Bias", value=True, help="Market bias on indicator subplot: +1 Bull, 0 Side, -1 Bear")
 
         st.markdown("---")
@@ -794,7 +872,7 @@ def main():
     df = matrices[pos_id]
 
     # Chart first (no summary above)
-    fig = create_trade_chart(df, trade_label, market_hours_only, show_ewo, show_rsi, show_supertrend, show_market_bias)
+    fig = create_trade_chart(df, trade_label, market_hours_only, show_ewo, show_rsi, show_supertrend, show_ichimoku, show_market_bias)
     if fig:
         st.plotly_chart(fig, use_container_width=True)
     else:
@@ -860,6 +938,8 @@ def main():
         for col in ['stock_price', 'stock_high', 'stock_low', 'true_price', 'option_price',
                      'entry_price', 'highest_price', 'lowest_price', 'trailing_stop_price',
                      'vwap', 'ema_30', 'vwap_ema_avg', 'emavwap', 'supertrend']:
+        # Format numeric columns
+        for col in ['stock_price', 'stock_high', 'stock_low', 'true_price', 'option_price', 'stop_loss', 'vwap', 'ema_20', 'ema_30', 'vwap_ema_avg', 'emavwap', 'supertrend', 'ichimoku_tenkan', 'ichimoku_kijun', 'ichimoku_senkou_a', 'ichimoku_senkou_b']:
             if col in matrix_df.columns:
                 matrix_df[col] = matrix_df[col].apply(lambda x: f"${x:.2f}" if pd.notna(x) else "")
 

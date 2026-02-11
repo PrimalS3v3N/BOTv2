@@ -254,8 +254,69 @@ def Supertrend(df, atr_period=10, multiplier=3.0):
     return supertrend, direction
 
 
+def IchimokuCloud(df, tenkan_period=9, kijun_period=26, senkou_b_period=52, displacement=26):
+    """
+    Calculate Ichimoku Cloud indicator.
+
+    The Ichimoku Cloud (Ichimoku Kinko Hyo) is a comprehensive indicator that defines
+    support/resistance, trend direction, momentum, and trading signals.
+
+    Components:
+    - Tenkan-sen (Conversion Line): Midpoint of highest high and lowest low over tenkan_period
+    - Kijun-sen (Base Line): Midpoint of highest high and lowest low over kijun_period
+    - Senkou Span A (Leading Span A): Average of Tenkan and Kijun, displaced forward
+    - Senkou Span B (Leading Span B): Midpoint of highest high and lowest low over senkou_b_period, displaced forward
+    - Chikou Span (Lagging Span): Current close displaced backward (not included - only useful visually)
+
+    Cloud interpretation:
+    - Price above cloud: Bullish trend
+    - Price below cloud: Bearish trend
+    - Price inside cloud: Consolidation/no trend
+    - Span A above Span B: Bullish cloud (green)
+    - Span A below Span B: Bearish cloud (red)
+
+    Args:
+        df: DataFrame with 'high', 'low', 'close' columns
+        tenkan_period: Period for Tenkan-sen / Conversion Line (default: 9)
+        kijun_period: Period for Kijun-sen / Base Line (default: 26)
+        senkou_b_period: Period for Senkou Span B (default: 52)
+        displacement: Forward displacement for Senkou spans (default: 26)
+
+    Returns:
+        tuple: (tenkan_sen, kijun_sen, senkou_span_a, senkou_span_b)
+            - tenkan_sen: Conversion Line values
+            - kijun_sen: Base Line values
+            - senkou_span_a: Leading Span A (displaced forward by displacement periods)
+            - senkou_span_b: Leading Span B (displaced forward by displacement periods)
+    """
+    empty = pd.Series(index=df.index, dtype=float)
+    if not all(col in df.columns for col in ['high', 'low', 'close']):
+        return empty.copy(), empty.copy(), empty.copy(), empty.copy()
+
+    high = df['high']
+    low = df['low']
+
+    # Tenkan-sen (Conversion Line): (highest high + lowest low) / 2 over tenkan_period
+    tenkan_sen = (high.rolling(window=tenkan_period, min_periods=tenkan_period).max() +
+                  low.rolling(window=tenkan_period, min_periods=tenkan_period).min()) / 2
+
+    # Kijun-sen (Base Line): (highest high + lowest low) / 2 over kijun_period
+    kijun_sen = (high.rolling(window=kijun_period, min_periods=kijun_period).max() +
+                 low.rolling(window=kijun_period, min_periods=kijun_period).min()) / 2
+
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2, displaced forward
+    senkou_span_a = ((tenkan_sen + kijun_sen) / 2).shift(displacement)
+
+    # Senkou Span B (Leading Span B): (highest high + lowest low) / 2 over senkou_b_period, displaced forward
+    senkou_span_b = ((high.rolling(window=senkou_b_period, min_periods=senkou_b_period).max() +
+                      low.rolling(window=senkou_b_period, min_periods=senkou_b_period).min()) / 2).shift(displacement)
+
+    return tenkan_sen, kijun_sen, senkou_span_a, senkou_span_b
+
+
 def add_indicators(df, ema_period=30, ewo_fast=5, ewo_slow=35, ewo_avg_period=15, rsi_period=14, rsi_avg_period=10,
-                   supertrend_period=10, supertrend_multiplier=3.0):
+                   supertrend_period=10, supertrend_multiplier=3.0,
+                   ichimoku_tenkan=9, ichimoku_kijun=26, ichimoku_senkou_b=52, ichimoku_displacement=26):
     """
     Add all standard indicators to a DataFrame.
 
@@ -269,6 +330,10 @@ def add_indicators(df, ema_period=30, ewo_fast=5, ewo_slow=35, ewo_avg_period=15
         rsi_avg_period: Period for RSI rolling average (default: 10 for 10-min avg on 1-min data)
         supertrend_period: ATR period for Supertrend (default: 10)
         supertrend_multiplier: ATR multiplier for Supertrend bands (default: 3.0)
+        ichimoku_tenkan: Tenkan-sen period (default: 9)
+        ichimoku_kijun: Kijun-sen period (default: 26)
+        ichimoku_senkou_b: Senkou Span B period (default: 52)
+        ichimoku_displacement: Forward displacement for cloud spans (default: 26)
 
     Returns:
         DataFrame with added indicator columns:
@@ -282,6 +347,10 @@ def add_indicators(df, ema_period=30, ewo_fast=5, ewo_slow=35, ewo_avg_period=15
         - rsi_10min_avg: 10-minute rolling average of RSI
         - supertrend: Supertrend line value
         - supertrend_direction: 1 (uptrend/bullish) or -1 (downtrend/bearish)
+        - ichimoku_tenkan: Tenkan-sen (Conversion Line)
+        - ichimoku_kijun: Kijun-sen (Base Line)
+        - ichimoku_senkou_a: Senkou Span A (Leading Span A)
+        - ichimoku_senkou_b: Senkou Span B (Leading Span B)
     """
     df = df.copy()
 
@@ -319,6 +388,12 @@ def add_indicators(df, ema_period=30, ewo_fast=5, ewo_slow=35, ewo_avg_period=15
     # Add Supertrend
     df['supertrend'], df['supertrend_direction'] = Supertrend(
         df, atr_period=supertrend_period, multiplier=supertrend_multiplier
+    )
+
+    # Add Ichimoku Cloud
+    df['ichimoku_tenkan'], df['ichimoku_kijun'], df['ichimoku_senkou_a'], df['ichimoku_senkou_b'] = IchimokuCloud(
+        df, tenkan_period=ichimoku_tenkan, kijun_period=ichimoku_kijun,
+        senkou_b_period=ichimoku_senkou_b, displacement=ichimoku_displacement
     )
 
     # Clean up temporary column
@@ -544,6 +619,6 @@ def estimate_option_price_bs(stock_price, strike, option_type, days_to_expiry,
 
 
 # Export functions for use by other modules
-__all__ = ['EMA', 'VWAP', 'EWO', 'true_price', 'RSI', 'Supertrend', 'add_indicators',
+__all__ = ['EMA', 'VWAP', 'EWO', 'true_price', 'RSI', 'Supertrend', 'IchimokuCloud', 'add_indicators',
            'black_scholes_call', 'black_scholes_put', 'black_scholes_price',
            'calculate_greeks', 'estimate_option_price_bs']
