@@ -1018,7 +1018,10 @@ class Backtest:
 
                 # Take Profit - Milestones: trailing stop triggered
                 if tp_exit and not position.is_closed:
-                    exit_price = option_price * (1 - self.slippage_pct)
+                    # Fill at the trailing stop price, not the current bar price.
+                    # The stop order triggers at the trailing level; using option_price
+                    # would fill at whatever the bar gapped down to, understating profits.
+                    exit_price = tp_tracker.trailing_exit_price * (1 - self.slippage_pct)
                     position.close(exit_price, timestamp, tp_reason)
 
                 # Closure - Peak: Avg RSI (10min) based exit in last 30 minutes of trading day
