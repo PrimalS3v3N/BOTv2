@@ -154,6 +154,21 @@ BACKTEST_CONFIG = {
     'slippage_pct': 0.001,                         # Slippage per fill (0.1%)
     'commission_per_contract': 0.65,               # Per-contract commission
 
+    # Stop Loss - three phases: initial -> breakeven -> trailing
+    'stop_loss': {
+        'enabled': True,
+        'stop_loss_pct': 0.27,                     # Max loss from entry (25%)
+        'stop_loss_warning_pct': 0.15,             # Warning threshold (15%)
+        'profit_target_pct': 1.00,                 # Profit target (100%)
+        'trailing_stop_pct': 0.27,                 # Trailing below highest (20%)
+        'time_stop_minutes': 60,                   # Time stop (minutes)
+        'breakeven_threshold_pct': None,           # None = auto-calculate as entry/(1-stop_loss_pct)
+        'breakeven_min_minutes': 30,               # Min hold before breakeven transition
+        'trailing_trigger_pct': 0.30,              # Start trailing at profit (50%)
+        'reversal_exit_enabled': True,             # Exit when True Price < VWAP (reversal)
+        'downtrend_exit_enabled': True,            # Exit when True Price & EMA < vwap_ema_avg (downtrend)
+    },
+
     # Technical indicators for backtest
     'indicators': {
         'ema_period': 25,                          # EMA period (bars)
@@ -248,6 +263,7 @@ DATAFRAME_COLUMNS = {
         'timestamp', 'stock_price', 'stock_high', 'stock_low', 'true_price', 'atr',
         'option_price', 'volume', 'holding', 'entry_price',
         'pnl', 'pnl_pct', 'highest_price', 'lowest_price', 'minutes_held',
+        'stop_loss', 'stop_loss_mode',
         'milestone_pct', 'trailing_stop_price',
         'market_bias',
         'vwap', 'ema_30', 'vwap_ema_avg', 'emavwap', 'ewo', 'ewo_15min_avg', 'rsi', 'rsi_10min_avg',
@@ -267,6 +283,7 @@ DATAFRAME_COLUMNS = {
         'timestamp', 'stock_price', 'stock_high', 'stock_low', 'true_price', 'atr',
         'option_price', 'volume', 'holding', 'entry_price',
         'pnl', 'pnl_pct', 'highest_price', 'lowest_price', 'minutes_held',
+        'stop_loss', 'stop_loss_mode',
         'milestone_pct', 'trailing_stop_price',
         'market_bias',
         'vwap', 'ema_30', 'vwap_ema_avg', 'emavwap', 'ewo', 'ewo_15min_avg', 'rsi', 'rsi_10min_avg',

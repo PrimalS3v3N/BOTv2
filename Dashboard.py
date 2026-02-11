@@ -31,6 +31,7 @@ COLORS = {
     'ema_30': '#AB47BC',          # Purple
     'vwap_ema_avg': '#FFEB3B',    # Yellow
     'emavwap': '#00E5FF',         # Cyan
+    'stop_loss_line': '#00C853',  # Green
     # Trading range
     'trading_range': '#FF1744',   # Red
     # Ichimoku Cloud
@@ -315,6 +316,29 @@ def create_trade_chart(df, trade_label, market_hours_only=False, show_ewo=True, 
                 ),
                 row=1, col=1, secondary_y=False
             )
+
+    # Stop Loss line (right y-axis, tracks stop loss price)
+    if 'stop_loss' in df.columns and df['stop_loss'].notna().any():
+        # Create hover text with stop_loss_mode if available
+        if 'stop_loss_mode' in df.columns:
+            hover_text = df.apply(
+                lambda r: f"Stop Loss: ${r['stop_loss']:.2f}<br>Mode: {r['stop_loss_mode']}"
+                if pd.notna(r['stop_loss']) else "", axis=1
+            )
+        else:
+            hover_text = df['stop_loss'].apply(lambda x: f"Stop Loss: ${x:.2f}" if pd.notna(x) else "")
+
+        fig.add_trace(
+            go.Scatter(
+                x=df['time'],
+                y=df['stop_loss'],
+                name='Stop Loss',
+                line=dict(color=COLORS['stop_loss_line'], width=1.5, dash='dash'),
+                hovertemplate='%{text}<extra></extra>',
+                text=hover_text
+            ),
+            row=1, col=1, secondary_y=True
+        )
 
     # Ichimoku Cloud (left y-axis) - cloud fill between Senkou spans + Tenkan/Kijun lines
     if show_ichimoku:
@@ -936,10 +960,9 @@ def main():
 
         # Format price columns as $X.XX
         for col in ['stock_price', 'stock_high', 'stock_low', 'true_price', 'option_price',
-                     'entry_price', 'highest_price', 'lowest_price', 'trailing_stop_price',
-                     'vwap', 'ema_30', 'vwap_ema_avg', 'emavwap', 'supertrend']:
-        # Format numeric columns
-        for col in ['stock_price', 'stock_high', 'stock_low', 'true_price', 'option_price', 'stop_loss', 'vwap', 'ema_20', 'ema_30', 'vwap_ema_avg', 'emavwap', 'supertrend', 'ichimoku_tenkan', 'ichimoku_kijun', 'ichimoku_senkou_a', 'ichimoku_senkou_b']:
+                     'entry_price', 'highest_price', 'lowest_price', 'stop_loss', 'trailing_stop_price',
+                     'vwap', 'ema_30', 'vwap_ema_avg', 'emavwap', 'supertrend',
+                     'ichimoku_tenkan', 'ichimoku_kijun', 'ichimoku_senkou_a', 'ichimoku_senkou_b']:
             if col in matrix_df.columns:
                 matrix_df[col] = matrix_df[col].apply(lambda x: f"${x:.2f}" if pd.notna(x) else "")
 
