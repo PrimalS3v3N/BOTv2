@@ -167,6 +167,45 @@ def create_trade_chart(df, trade_label, market_hours_only=False, show_ewo=True, 
     else:
         fig = make_subplots(specs=[[{"secondary_y": True}]])
 
+    # Option price (right y-axis) - green
+    if opt_col in df.columns:
+        fig.add_trace(
+            go.Scatter(
+                x=df['time'],
+                y=df[opt_col],
+                name='Option',
+                line=dict(color='#00C853', width=2),
+                hovertemplate='Option: $%{y:.2f}<extra></extra>'
+            ),
+            row=1, col=1, secondary_y=True
+        )
+
+    # Price (left y-axis) - blue with high/low error bars
+    if 'true_price' in df.columns and df['true_price'].notna().any():
+        true_price_trace = go.Scatter(
+            x=df['time'],
+            y=df['true_price'],
+            name='Price',
+            line=dict(color='#2196F3', width=2),
+            hovertemplate='Price: $%{y:.2f}<extra></extra>'
+        )
+
+        # Add error bars showing high/low range relative to true price
+        if 'stock_high' in df.columns and 'stock_low' in df.columns:
+            tp_error_plus = df['stock_high'] - df['true_price']
+            tp_error_minus = df['true_price'] - df['stock_low']
+            true_price_trace.error_y = dict(
+                type='data',
+                symmetric=False,
+                array=tp_error_plus,
+                arrayminus=tp_error_minus,
+                color='rgba(255, 255, 255, 0.8)',
+                thickness=3,
+                width=0
+            )
+
+        fig.add_trace(true_price_trace, row=1, col=1, secondary_y=False)
+
     # VWAP (left y-axis)
     if 'vwap' in df.columns and df['vwap'].notna().any():
         fig.add_trace(
@@ -193,7 +232,7 @@ def create_trade_chart(df, trade_label, market_hours_only=False, show_ewo=True, 
             row=1, col=1, secondary_y=False
         )
 
-    # Profit (left y-axis) - yellow
+    # MA (left y-axis) - yellow
     if 'vwap_ema_avg' in df.columns and df['vwap_ema_avg'].notna().any():
         fig.add_trace(
             go.Scatter(
@@ -268,45 +307,6 @@ def create_trade_chart(df, trade_label, market_hours_only=False, show_ewo=True, 
                 row=1, col=1, secondary_y=False
             )
 
-    # True Price (left y-axis) - blue with high/low error bars
-    if 'true_price' in df.columns and df['true_price'].notna().any():
-        true_price_trace = go.Scatter(
-            x=df['time'],
-            y=df['true_price'],
-            name='True Price',
-            line=dict(color='#2196F3', width=2),
-            hovertemplate='True Price: $%{y:.2f}<extra></extra>'
-        )
-
-        # Add error bars showing high/low range relative to true price
-        if 'stock_high' in df.columns and 'stock_low' in df.columns:
-            tp_error_plus = df['stock_high'] - df['true_price']
-            tp_error_minus = df['true_price'] - df['stock_low']
-            true_price_trace.error_y = dict(
-                type='data',
-                symmetric=False,
-                array=tp_error_plus,
-                arrayminus=tp_error_minus,
-                color='rgba(255, 255, 255, 0.8)',
-                thickness=3,
-                width=0
-            )
-
-        fig.add_trace(true_price_trace, row=1, col=1, secondary_y=False)
-
-    # Option price (right y-axis) - green
-    if opt_col in df.columns:
-        fig.add_trace(
-            go.Scatter(
-                x=df['time'],
-                y=df[opt_col],
-                name='Option',
-                line=dict(color='#00C853', width=2),
-                hovertemplate='Option: $%{y:.2f}<extra></extra>'
-            ),
-            row=1, col=1, secondary_y=True
-        )
-
     # Entry marker
     if entry_row is not None:
         entry_time = parse_time(entry_row['timestamp'])
@@ -362,22 +362,6 @@ def create_trade_chart(df, trade_label, market_hours_only=False, show_ewo=True, 
             row=2, col=1
         )
 
-        # EWO 15-min average line (if available)
-        if 'ewo_15min_avg' in df.columns and df['ewo_15min_avg'].notna().any():
-            fig.add_trace(
-                go.Scatter(
-                    x=df['time'],
-                    y=df['ewo_15min_avg'],
-                    name='Avg(EWO)',
-                    line=dict(color='#FF9800', width=2, dash='dot'),
-                    hovertemplate='Avg(EWO): %{y:.3f}<extra></extra>'
-                ),
-                row=2, col=1
-            )
-
-        # Zero line for EWO
-        fig.add_hline(y=0, line_dash="dash", line_color="gray", line_width=1, row=2, col=1)
-
     # RSI on row 2 (secondary y-axis when sharing with EWO, primary when alone)
     if has_rsi:
         # RSI line in white
@@ -392,20 +376,38 @@ def create_trade_chart(df, trade_label, market_hours_only=False, show_ewo=True, 
             row=2, col=1, secondary_y=rsi_secondary
         )
 
-        # Avg(RSI) 10-min average line (if available)
-        if 'rsi_10min_avg' in df.columns and df['rsi_10min_avg'].notna().any():
-            fig.add_trace(
-                go.Scatter(
-                    x=df['time'],
-                    y=df['rsi_10min_avg'],
-                    name='Avg(RSI)',
-                    line=dict(color='#FF9800', width=2, dash='dot'),
-                    hovertemplate='Avg(RSI): %{y:.1f}<extra></extra>'
-                ),
-                row=2, col=1, secondary_y=rsi_secondary
-            )
+    # Avg(EWO) 15-min average line
+    if has_ewo and 'ewo_15min_avg' in df.columns and df['ewo_15min_avg'].notna().any():
+        fig.add_trace(
+            go.Scatter(
+                x=df['time'],
+                y=df['ewo_15min_avg'],
+                name='Avg(EWO)',
+                line=dict(color='#FF9800', width=2, dash='dot'),
+                hovertemplate='Avg(EWO): %{y:.3f}<extra></extra>'
+            ),
+            row=2, col=1
+        )
 
-        # RSI reference lines
+    # Avg(RSI) 10-min average line
+    if has_rsi and 'rsi_10min_avg' in df.columns and df['rsi_10min_avg'].notna().any():
+        fig.add_trace(
+            go.Scatter(
+                x=df['time'],
+                y=df['rsi_10min_avg'],
+                name='Avg(RSI)',
+                line=dict(color='#FF9800', width=2, dash='dot'),
+                hovertemplate='Avg(RSI): %{y:.1f}<extra></extra>'
+            ),
+            row=2, col=1, secondary_y=rsi_secondary
+        )
+
+    # EWO zero line
+    if has_ewo:
+        fig.add_hline(y=0, line_dash="dash", line_color="gray", line_width=1, row=2, col=1)
+
+    # RSI reference lines
+    if has_rsi:
         # Use scatter traces for reference lines since add_hline doesn't support secondary_y
         time_range = [df['time'].iloc[0], df['time'].iloc[-1]]
 
