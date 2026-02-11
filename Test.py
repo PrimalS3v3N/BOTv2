@@ -627,7 +627,7 @@ class Databook:
         self.day_low = np.inf
 
     def add_record(self, timestamp, stock_price, option_price, volume, holding=True,
-                   vwap=np.nan, ema_30=np.nan,
+                   stop_loss=np.nan, stop_loss_mode=None, vwap=np.nan, ema_30=np.nan,
                    vwap_ema_avg=np.nan, emavwap=np.nan, stock_high=np.nan, stock_low=np.nan,
                    ewo=np.nan, ewo_15min_avg=np.nan,
                    rsi=np.nan, rsi_10min_avg=np.nan,
@@ -674,6 +674,9 @@ class Databook:
             'highest_price': self.position.highest_price if holding else np.nan,
             'lowest_price': self.position.lowest_price if holding else np.nan,
             'minutes_held': self.position.get_minutes_held(timestamp) if holding else np.nan,
+            # Stop loss tracking
+            'stop_loss': stop_loss,
+            'stop_loss_mode': stop_loss_mode,
             # Take profit milestone tracking
             'milestone_pct': milestone_pct,
             'trailing_stop_price': trailing_stop_price,
@@ -931,6 +934,16 @@ class Backtest:
                                              supertrend_period=supertrend_period,
                                              supertrend_multiplier=supertrend_multiplier)
 
+        # Get stop loss settings from config
+        SL_config = self.config.get('stop_loss', {})
+        SL_enabled = SL_config.get('enabled', True)
+        SL_pct = SL_config.get('stop_loss_pct', 0.30)
+        SL_trailing_trigger_pct = SL_config.get('trailing_trigger_pct', 0.50)
+        SL_trailing_stop_pct = SL_config.get('trailing_stop_pct', 0.30)
+        SL_breakeven_min_minutes = SL_config.get('breakeven_min_minutes', 30)
+        SL_reversal_exit_enabled = SL_config.get('reversal_exit_enabled', True)
+        SL_downtrend_exit_enabled = SL_config.get('downtrend_exit_enabled', True)
+
         # Get Take Profit - Milestones settings from config
         tp_strategy = Strategy.TakeProfitMilestones(self.config.get('take_profit_milestones', {}))
         tp_tracker = tp_strategy.create_tracker(position.entry_price)
@@ -949,6 +962,16 @@ class Backtest:
         CP_start_hour = 15
         CP_start_minute = 60 - CP_minutes
         CP_start_time = dt.time(CP_start_hour, CP_start_minute)
+
+        # Initialize stop loss manager
+        SL_manager = Strategy.StopLoss(
+            entry_price=position.entry_price,
+            stop_loss_pct=SL_pct,
+            trailing_trigger_pct=SL_trailing_trigger_pct,
+            trailing_stop_pct=SL_trailing_stop_pct,
+            breakeven_min_minutes=SL_breakeven_min_minutes,
+            option_type=position.option_type
+        )
 
         max_vwap_ema_avg = np.nan  # Running max of (VWAP+EMA+High)/3
 
@@ -1003,6 +1026,27 @@ class Backtest:
             if holding:
                 position.update(timestamp, option_price, stock_price)
 
+                # Update stop loss and check if triggered
+                SL_price = np.nan
+                SL_mode = None
+                SL_triggered = False
+                SL_reversal = False
+                SL_downtrend = False
+
+                if SL_enabled:
+                    minutes_held = position.get_minutes_held(timestamp)
+                    true_price = Analysis.true_price(stock_price, stock_high, stock_low)
+                    SL_result = SL_manager.update(
+                        option_price, minutes_held=minutes_held,
+                        true_price=true_price, vwap=vwap, ema=ema_30,
+                        emavwap=emavwap, vwap_ema_avg=vwap_ema_avg
+                    )
+                    SL_price = SL_result['stop_loss']
+                    SL_mode = SL_result['mode']
+                    SL_triggered = SL_result['triggered']
+                    SL_reversal = SL_result['reversal']
+                    SL_downtrend = SL_result['downtrend']
+
                 # Update take profit milestone tracker
                 tp_exit = False
                 tp_reason = None
@@ -1014,13 +1058,15 @@ class Backtest:
                         cur_milestone_pct = tp_tracker.current_milestone_pct
                         cur_trailing_price = tp_tracker.trailing_exit_price
 
-                # Record tracking data with indicators
+                # Record tracking data with stop loss and indicators
                 matrix.add_record(
                     timestamp=timestamp,
                     stock_price=stock_price,
                     option_price=option_price,
                     volume=volume,
                     holding=True,
+                    stop_loss=SL_price,
+                    stop_loss_mode=SL_mode,
                     vwap=vwap,
                     ema_30=ema_30,
                     vwap_ema_avg=vwap_ema_avg,
@@ -1057,6 +1103,24 @@ class Backtest:
                     exit_price = option_price * (1 - self.slippage_pct)
                     position.close(exit_price, timestamp, mp_reason)
 
+                # Check for reversal exit (True Price < VWAP)
+                elif SL_enabled and SL_reversal_exit_enabled and SL_reversal and not position.is_closed:
+                    exit_price = option_price * (1 - self.slippage_pct)
+                    exit_reason = self._format_exit_reason('stop_loss_reversal')
+                    position.close(exit_price, timestamp, exit_reason)
+
+                # Check for downtrend exit (True Price & EMA < vwap_ema_avg)
+                elif SL_enabled and SL_downtrend_exit_enabled and SL_downtrend and not position.is_closed:
+                    exit_price = option_price * (1 - self.slippage_pct)
+                    exit_reason = self._format_exit_reason('stop_loss_downtrend')
+                    position.close(exit_price, timestamp, exit_reason)
+
+                # Check for stop loss exit (only if stop loss is enabled)
+                elif SL_enabled and SL_triggered and not position.is_closed:
+                    exit_price = option_price * (1 - self.slippage_pct)
+                    exit_reason = self._format_exit_reason(f'stop_loss_{SL_mode}')
+                    position.close(exit_price, timestamp, exit_reason)
+
                 # Closure - Peak: Avg RSI (10min) based exit in last 30 minutes of trading day
                 elif CP_enabled and not position.is_closed and not np.isnan(rsi_10min_avg) and timestamp.time() >= CP_start_time:
                     if position.option_type.upper() in ['CALL', 'CALLS', 'C'] and rsi_10min_avg >= CP_rsi_call:
@@ -1078,6 +1142,8 @@ class Backtest:
                     option_price=option_price,
                     volume=volume,
                     holding=False,
+                    stop_loss=np.nan,
+                    stop_loss_mode=None,
                     vwap=vwap,
                     ema_30=ema_30,
                     vwap_ema_avg=vwap_ema_avg,
@@ -1100,6 +1166,45 @@ class Backtest:
         # Record highest milestone reached during holding
         if tp_tracker and tp_tracker.current_milestone_pct is not None:
             position.highest_milestone_pct = tp_tracker.current_milestone_pct
+
+    def _format_exit_reason(self, reason):
+        """
+        Format exit reason to user-friendly display string.
+
+        Mappings:
+        - stop_loss_initial -> "SL - Initial"
+        - stop_loss_breakeven -> "SL - Breakeven"
+        - stop_loss_trailing -> "SL - Trailing"
+        - stop_loss_reversal -> "SL - Reversal"
+        - stop_loss_downtrend -> "SL - DownTrend"
+        - closure_peak -> "Closure - Peak"
+        - market_close -> "Closure-Market"
+        """
+        if reason is None:
+            return 'Unknown'
+
+        # Stop loss exits
+        if reason == 'stop_loss_initial':
+            return 'SL - Initial'
+        elif reason == 'stop_loss_breakeven':
+            return 'SL - Breakeven'
+        elif reason == 'stop_loss_trailing':
+            return 'SL - Trailing'
+        elif reason == 'stop_loss_reversal':
+            return 'SL - Reversal'
+        elif reason == 'stop_loss_downtrend':
+            return 'SL - DownTrend'
+
+        # Closure - Peak
+        elif reason == 'closure_peak':
+            return 'Closure - Peak'
+
+        # Closure-Market
+        elif reason == 'market_close':
+            return 'Closure-Market'
+
+        # Return original if no mapping found
+        return reason
 
     def _compile_results(self):
         """Compile backtest results into DataFrames."""
