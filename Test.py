@@ -1591,6 +1591,19 @@ def test_options_pricing():
     return True
 
 
+def sync_from_github():
+    """Sync matching files from GitHub to the local OneDrive folder before running."""
+    try:
+        from github_onedrive_sync import GitHubOneDriveSync
+        syncer = GitHubOneDriveSync(
+            github_url="https://github.com/PrimalS3v3N/BOTv2",
+            onedrive_path=os.path.dirname(os.path.abspath(__file__)),
+        )
+        syncer.sync_via_git()
+    except Exception as e:
+        print(f"  Sync skipped: {e}")
+
+
 if __name__ == '__main__':
     import sys
 
@@ -1598,6 +1611,7 @@ if __name__ == '__main__':
     if len(sys.argv) > 1 and sys.argv[1] == '--test-pricing':
         test_options_pricing()
     else:
+        sync_from_github()
         bt = Backtest(lookback_days=1)
         bt.run()
         bt.BT_Save()
