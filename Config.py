@@ -172,6 +172,29 @@ BACKTEST_CONFIG = {
         'rsi_put_threshold': 15,               # Sell PUT contracts when Avg RSI (10min) <= this
         'minutes_before_close': 30,            # Activate in last N minutes (15:30+)
     },
+
+    # Take Profit - Milestones: Ratcheting trailing stops at profit levels
+    # Once a milestone gain% is reached, trailing stop is set at trailing_pct% above entry.
+    # Milestones only ratchet upward — once reached, trailing stop never drops below that level.
+    # Exit triggers when price falls to or below the trailing stop price.
+    'take_profit_milestones': {
+        'enabled': True,
+        'milestones': [
+            {'gain_pct': 10,  'trailing_pct': 0},     # Breakeven at entry cost
+            {'gain_pct': 20,  'trailing_pct': 5},     # 5% above entry
+            {'gain_pct': 30,  'trailing_pct': 10},    # 10% above entry
+            {'gain_pct': 40,  'trailing_pct': 20},    # 20% above entry
+            {'gain_pct': 50,  'trailing_pct': 30},    # 30% above entry
+            {'gain_pct': 75,  'trailing_pct': 50},    # 50% above entry
+            {'gain_pct': 100, 'trailing_pct': 75},    # 75% above entry
+            {'gain_pct': 125, 'trailing_pct': 95},    # 95% above entry
+            {'gain_pct': 150, 'trailing_pct': 115},   # 115% above entry
+            {'gain_pct': 200, 'trailing_pct': 150},   # 150% above entry
+            {'gain_pct': 300, 'trailing_pct': 225},   # 225% above entry
+            {'gain_pct': 400, 'trailing_pct': 300},   # 300% above entry
+            {'gain_pct': 500, 'trailing_pct': 375},   # 375% above entry
+        ],
+    },
 }
 
 
@@ -200,6 +223,7 @@ DATAFRAME_COLUMNS = {
         'contracts', 'highest_price', 'lowest_price',
         'pnl', 'pnl_pct', 'minutes_held',
         'max_price_to_eod', 'max_stop_loss_price', 'profit_min',
+        'highest_milestone_pct',
     ],
 
     # Per-bar tracking data from Databook (Test.py)
@@ -207,6 +231,7 @@ DATAFRAME_COLUMNS = {
         'timestamp', 'stock_price', 'stock_high', 'stock_low', 'true_price', 'atr',
         'option_price', 'volume', 'holding', 'entry_price',
         'pnl', 'pnl_pct', 'highest_price', 'lowest_price', 'minutes_held',
+        'milestone_pct', 'trailing_stop_price',
         'market_bias',
         'vwap', 'ema_30', 'vwap_ema_avg', 'emavwap', 'ewo', 'ewo_15min_avg', 'rsi', 'rsi_10min_avg',
         'supertrend', 'supertrend_direction',

@@ -89,6 +89,7 @@ Modules: Config.py, Signal.py, Analysis.py, Strategy.py
 import Config
 import Signal
 import Analysis
+import Strategy
 
 
 # =============================================================================
@@ -535,6 +536,9 @@ class Position:
         self.max_price_to_eod = entry_price  # Track max price from entry to end of day
         self.max_stop_loss_price = entry_price  # Track lowest price during holding (worst stop loss point)
 
+        # Take profit milestone tracking
+        self.highest_milestone_pct = None  # Highest milestone reached during holding
+
     def update(self, timestamp, price, stock_price=None):
         """Update position with new price data during holding period."""
         self.current_price = price
@@ -604,6 +608,7 @@ class Position:
             'max_price_to_eod': self.max_price_to_eod,
             'max_stop_loss_price': self.max_stop_loss_price,
             'profit_min': profit_min,
+            'highest_milestone_pct': self.highest_milestone_pct,
         }
 
 
@@ -626,7 +631,8 @@ class Databook:
                    vwap_ema_avg=np.nan, emavwap=np.nan, stock_high=np.nan, stock_low=np.nan,
                    ewo=np.nan, ewo_15min_avg=np.nan,
                    rsi=np.nan, rsi_10min_avg=np.nan,
-                   supertrend=np.nan, supertrend_direction=np.nan):
+                   supertrend=np.nan, supertrend_direction=np.nan,
+                   milestone_pct=np.nan, trailing_stop_price=np.nan):
         """Add a tracking record."""
         pnl_pct = self.position.get_pnl_pct(option_price) if holding else np.nan
 
@@ -668,6 +674,9 @@ class Databook:
             'highest_price': self.position.highest_price if holding else np.nan,
             'lowest_price': self.position.lowest_price if holding else np.nan,
             'minutes_held': self.position.get_minutes_held(timestamp) if holding else np.nan,
+            # Take profit milestone tracking
+            'milestone_pct': milestone_pct,
+            'trailing_stop_price': trailing_stop_price,
             # Market assessment
             'market_bias': market_bias,
             # Technical indicators
@@ -906,6 +915,10 @@ class Backtest:
                                              supertrend_period=supertrend_period,
                                              supertrend_multiplier=supertrend_multiplier)
 
+        # Get Take Profit - Milestones settings from config
+        tp_strategy = Strategy.TakeProfitMilestones(self.config.get('take_profit_milestones', {}))
+        tp_tracker = tp_strategy.create_tracker(position.entry_price)
+
         # Get Closure - Peak settings from config
         CP_config = self.config.get('closure_peak', {})
         CP_enabled = CP_config.get('enabled', True)
@@ -969,6 +982,17 @@ class Backtest:
             if holding:
                 position.update(timestamp, option_price, stock_price)
 
+                # Update take profit milestone tracker
+                tp_exit = False
+                tp_reason = None
+                cur_milestone_pct = np.nan
+                cur_trailing_price = np.nan
+                if tp_tracker:
+                    tp_exit, tp_reason = tp_tracker.update(option_price)
+                    if tp_tracker.current_milestone_pct is not None:
+                        cur_milestone_pct = tp_tracker.current_milestone_pct
+                        cur_trailing_price = tp_tracker.trailing_exit_price
+
                 # Record tracking data with indicators
                 matrix.add_record(
                     timestamp=timestamp,
@@ -987,11 +1011,18 @@ class Backtest:
                     rsi=rsi,
                     rsi_10min_avg=rsi_10min_avg,
                     supertrend=st_value,
-                    supertrend_direction=st_direction
+                    supertrend_direction=st_direction,
+                    milestone_pct=cur_milestone_pct,
+                    trailing_stop_price=cur_trailing_price,
                 )
 
+                # Take Profit - Milestones: trailing stop triggered
+                if tp_exit and not position.is_closed:
+                    exit_price = option_price * (1 - self.slippage_pct)
+                    position.close(exit_price, timestamp, tp_reason)
+
                 # Closure - Peak: Avg RSI (10min) based exit in last 30 minutes of trading day
-                if CP_enabled and not position.is_closed and not np.isnan(rsi_10min_avg) and timestamp.time() >= CP_start_time:
+                elif CP_enabled and not position.is_closed and not np.isnan(rsi_10min_avg) and timestamp.time() >= CP_start_time:
                     if position.option_type.upper() in ['CALL', 'CALLS', 'C'] and rsi_10min_avg >= CP_rsi_call:
                         exit_price = option_price * (1 - self.slippage_pct)
                         position.close(exit_price, timestamp, 'Closure - Peak')
@@ -1029,6 +1060,10 @@ class Backtest:
         if not position.is_closed:
             exit_price = position.current_price * (1 - self.slippage_pct)
             position.close(exit_price, stock_data.index[-1], 'Closure-Market')
+
+        # Record highest milestone reached during holding
+        if tp_tracker and tp_tracker.current_milestone_pct is not None:
+            position.highest_milestone_pct = tp_tracker.current_milestone_pct
 
     def _compile_results(self):
         """Compile backtest results into DataFrames."""
