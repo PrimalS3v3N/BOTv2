@@ -178,6 +178,10 @@ BACKTEST_CONFIG = {
         'rsi_oversold': 30,                        # RSI oversold threshold
         'supertrend_period': 10,                   # Supertrend ATR period (bars)
         'supertrend_multiplier': 3.0,              # Supertrend ATR multiplier
+        'ichimoku_tenkan': 9,                      # Ichimoku Tenkan-sen period (Conversion Line)
+        'ichimoku_kijun': 26,                      # Ichimoku Kijun-sen period (Base Line)
+        'ichimoku_senkou_b': 52,                   # Ichimoku Senkou Span B period
+        'ichimoku_displacement': 26,               # Ichimoku cloud forward displacement
     },
 
     # Closure - Peak: Avg RSI (10min) based exit in last 30 minutes of trading day
@@ -264,6 +268,7 @@ DATAFRAME_COLUMNS = {
         'market_bias',
         'vwap', 'ema_30', 'vwap_ema_avg', 'emavwap', 'ewo', 'ewo_15min_avg', 'rsi', 'rsi_10min_avg',
         'supertrend', 'supertrend_direction',
+        'ichimoku_tenkan', 'ichimoku_kijun', 'ichimoku_senkou_a', 'ichimoku_senkou_b',
     ],
 
     # Metadata columns appended to databook (Test.py)
@@ -273,13 +278,17 @@ DATAFRAME_COLUMNS = {
     ],
 
     # Dashboard databook display columns (Dashboard.py)
+    # Mirrors 'databook' columns so the dashboard table reflects the full databook.
     'dashboard_databook': [
-        'timestamp', 'holding', 'stock_price', 'stock_high', 'stock_low',
-        'true_price', 'option_price', 'pnl_pct',
+        'timestamp', 'stock_price', 'stock_high', 'stock_low', 'true_price', 'atr',
+        'option_price', 'volume', 'holding', 'entry_price',
+        'pnl', 'pnl_pct', 'highest_price', 'lowest_price', 'minutes_held',
         'stop_loss', 'stop_loss_mode',
+        'milestone_pct', 'trailing_stop_price',
         'market_bias',
-        'vwap', 'ema_20', 'ema_30', 'vwap_ema_avg', 'emavwap', 'ewo', 'ewo_15min_avg', 'rsi', 'rsi_10min_avg',
+        'vwap', 'ema_30', 'vwap_ema_avg', 'emavwap', 'ewo', 'ewo_15min_avg', 'rsi', 'rsi_10min_avg',
         'supertrend', 'supertrend_direction',
+        'ichimoku_tenkan', 'ichimoku_kijun', 'ichimoku_senkou_a', 'ichimoku_senkou_b',
     ],
 }
 

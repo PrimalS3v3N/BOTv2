@@ -632,6 +632,8 @@ class Databook:
                    ewo=np.nan, ewo_15min_avg=np.nan,
                    rsi=np.nan, rsi_10min_avg=np.nan,
                    supertrend=np.nan, supertrend_direction=np.nan,
+                   ichimoku_tenkan=np.nan, ichimoku_kijun=np.nan,
+                   ichimoku_senkou_a=np.nan, ichimoku_senkou_b=np.nan,
                    milestone_pct=np.nan, trailing_stop_price=np.nan):
         """Add a tracking record."""
         pnl_pct = self.position.get_pnl_pct(option_price) if holding else np.nan
@@ -693,6 +695,10 @@ class Databook:
             'rsi_10min_avg': rsi_10min_avg,
             'supertrend': supertrend,
             'supertrend_direction': supertrend_direction,
+            'ichimoku_tenkan': ichimoku_tenkan,
+            'ichimoku_kijun': ichimoku_kijun,
+            'ichimoku_senkou_a': ichimoku_senkou_a,
+            'ichimoku_senkou_b': ichimoku_senkou_b,
         }
 
         self.records.append(record)
@@ -929,10 +935,20 @@ class Backtest:
         supertrend_period = indicator_config.get('supertrend_period', 10)
         supertrend_multiplier = indicator_config.get('supertrend_multiplier', 3.0)
 
+        # Get ichimoku settings from config
+        ichimoku_tenkan = indicator_config.get('ichimoku_tenkan', 9)
+        ichimoku_kijun = indicator_config.get('ichimoku_kijun', 26)
+        ichimoku_senkou_b = indicator_config.get('ichimoku_senkou_b', 52)
+        ichimoku_displacement = indicator_config.get('ichimoku_displacement', 26)
+
         # Add technical indicators to stock data
         stock_data = Analysis.add_indicators(stock_data, ema_period=ema_period,
                                              supertrend_period=supertrend_period,
-                                             supertrend_multiplier=supertrend_multiplier)
+                                             supertrend_multiplier=supertrend_multiplier,
+                                             ichimoku_tenkan=ichimoku_tenkan,
+                                             ichimoku_kijun=ichimoku_kijun,
+                                             ichimoku_senkou_b=ichimoku_senkou_b,
+                                             ichimoku_displacement=ichimoku_displacement)
 
         # Get stop loss settings from config
         SL_config = self.config.get('stop_loss', {})
@@ -1000,6 +1016,10 @@ class Backtest:
             rsi_10min_avg = bar.get('rsi_10min_avg', np.nan)
             st_value = bar.get('supertrend', np.nan)
             st_direction = bar.get('supertrend_direction', np.nan)
+            ichi_tenkan = bar.get('ichimoku_tenkan', np.nan)
+            ichi_kijun = bar.get('ichimoku_kijun', np.nan)
+            ichi_senkou_a = bar.get('ichimoku_senkou_a', np.nan)
+            ichi_senkou_b = bar.get('ichimoku_senkou_b', np.nan)
 
             current_days_to_expiry = max(0, (expiry_dt - timestamp).total_seconds() / 86400)
 
@@ -1079,6 +1099,10 @@ class Backtest:
                     rsi_10min_avg=rsi_10min_avg,
                     supertrend=st_value,
                     supertrend_direction=st_direction,
+                    ichimoku_tenkan=ichi_tenkan,
+                    ichimoku_kijun=ichi_kijun,
+                    ichimoku_senkou_a=ichi_senkou_a,
+                    ichimoku_senkou_b=ichi_senkou_b,
                     milestone_pct=cur_milestone_pct,
                     trailing_stop_price=cur_trailing_price,
                 )
@@ -1155,7 +1179,11 @@ class Backtest:
                     rsi=rsi,
                     rsi_10min_avg=rsi_10min_avg,
                     supertrend=st_value,
-                    supertrend_direction=st_direction
+                    supertrend_direction=st_direction,
+                    ichimoku_tenkan=ichi_tenkan,
+                    ichimoku_kijun=ichi_kijun,
+                    ichimoku_senkou_a=ichi_senkou_a,
+                    ichimoku_senkou_b=ichi_senkou_b,
                 )
 
         # Close at end of data if still open
