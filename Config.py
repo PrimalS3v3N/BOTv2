@@ -257,11 +257,14 @@ DATAFRAME_COLUMNS = {
     ],
 
     # Dashboard databook display columns (Dashboard.py)
+    # Mirrors 'databook' columns so the dashboard table reflects the full databook.
     'dashboard_databook': [
-        'timestamp', 'holding', 'stock_price', 'stock_high', 'stock_low',
-        'true_price', 'option_price', 'pnl_pct',
+        'timestamp', 'stock_price', 'stock_high', 'stock_low', 'true_price', 'atr',
+        'option_price', 'volume', 'holding', 'entry_price',
+        'pnl', 'pnl_pct', 'highest_price', 'lowest_price', 'minutes_held',
+        'milestone_pct', 'trailing_stop_price',
         'market_bias',
-        'vwap', 'ema_20', 'ema_30', 'vwap_ema_avg', 'emavwap', 'ewo', 'ewo_15min_avg', 'rsi', 'rsi_10min_avg',
+        'vwap', 'ema_30', 'vwap_ema_avg', 'emavwap', 'ewo', 'ewo_15min_avg', 'rsi', 'rsi_10min_avg',
         'supertrend', 'supertrend_direction',
     ],
 }

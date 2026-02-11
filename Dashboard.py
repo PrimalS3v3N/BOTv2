@@ -28,7 +28,6 @@ COLORS = {
     'exit': '#FF1744',
     'vwap': '#0D47A1',
     'supertrend': '#9C27B0',
-    'ema_20': '#29B6F6',          # Light Blue
     'ema_30': '#AB47BC',          # Purple
     'vwap_ema_avg': '#FFEB3B',    # Yellow
     'emavwap': '#00E5FF',         # Cyan
@@ -857,13 +856,35 @@ def main():
             # Filter to holding period only
             matrix_df = matrix_df[df['holding'] == True]
 
-        # Format numeric columns
-        for col in ['stock_price', 'stock_high', 'stock_low', 'true_price', 'option_price', 'stop_loss', 'vwap', 'ema_20', 'ema_30', 'vwap_ema_avg', 'emavwap', 'supertrend']:
+        # Format price columns as $X.XX
+        for col in ['stock_price', 'stock_high', 'stock_low', 'true_price', 'option_price',
+                     'entry_price', 'highest_price', 'lowest_price', 'trailing_stop_price',
+                     'vwap', 'ema_30', 'vwap_ema_avg', 'emavwap', 'supertrend']:
             if col in matrix_df.columns:
                 matrix_df[col] = matrix_df[col].apply(lambda x: f"${x:.2f}" if pd.notna(x) else "")
 
+        # Format ATR
+        if 'atr' in matrix_df.columns:
+            matrix_df['atr'] = matrix_df['atr'].apply(lambda x: f"{x:.4f}" if pd.notna(x) else "")
+
+        # Format volume as integer
+        if 'volume' in matrix_df.columns:
+            matrix_df['volume'] = matrix_df['volume'].apply(lambda x: f"{int(x):,}" if pd.notna(x) else "")
+
+        # Format P&L dollar amount
+        if 'pnl' in matrix_df.columns:
+            matrix_df['pnl'] = matrix_df['pnl'].apply(lambda x: f"${x:+,.2f}" if pd.notna(x) else "")
+
         if 'pnl_pct' in matrix_df.columns:
             matrix_df['pnl_pct'] = matrix_df['pnl_pct'].apply(lambda x: f"{x:+.1f}%" if pd.notna(x) else "")
+
+        # Format minutes held as integer
+        if 'minutes_held' in matrix_df.columns:
+            matrix_df['minutes_held'] = matrix_df['minutes_held'].apply(lambda x: f"{int(x)}" if pd.notna(x) else "")
+
+        # Format milestone percentage
+        if 'milestone_pct' in matrix_df.columns:
+            matrix_df['milestone_pct'] = matrix_df['milestone_pct'].apply(lambda x: f"{x:.0f}%" if pd.notna(x) else "")
 
         if 'market_bias' in matrix_df.columns:
             bias_map = {1: 'Bullish', 0: 'Sideways', -1: 'Bearish'}
