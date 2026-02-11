@@ -118,7 +118,7 @@ def find_entry_exit(df):
     return entry_row, exit_row, opt_col
 
 
-def create_trade_chart(df, trade_label, market_hours_only=False, show_ewo=True, show_rsi=True, show_supertrend=False):
+def create_trade_chart(df, trade_label, market_hours_only=False, show_ewo=True, show_rsi=True, show_supertrend=False, show_market_bias=True):
     """Create dual-axis chart with stock/option prices, error bars, and combined EWO/RSI subplot."""
     df = df.copy()
     df['time'] = df['timestamp'].apply(parse_time)
@@ -149,12 +149,15 @@ def create_trade_chart(df, trade_label, market_hours_only=False, show_ewo=True, 
     # Check if RSI data is available (and toggle is on)
     has_rsi = show_rsi and 'rsi' in df.columns and df['rsi'].notna().any()
 
+    # Check if market bias data is available (and toggle is on)
+    has_market_bias = show_market_bias and 'market_bias' in df.columns and df['market_bias'].notna().any()
+
     # RSI uses secondary y-axis only when EWO is also shown (they share row 2)
     # When EWO is off, RSI uses the primary y-axis to avoid empty primary axis issues
     rsi_secondary = has_ewo
 
     # Create subplots: main chart + combined indicator subplot below
-    if has_ewo or has_rsi:
+    if has_ewo or has_rsi or has_market_bias:
         # 2 rows: main chart, indicators
         row2_spec = {"secondary_y": True} if has_ewo else {"secondary_y": False}
         fig = make_subplots(
@@ -444,8 +447,67 @@ def create_trade_chart(df, trade_label, market_hours_only=False, show_ewo=True, 
             row=2, col=1, secondary_y=rsi_secondary
         )
 
+    # Market bias on row 2 primary y-axis (color-coded step fill: green=bull, red=bear)
+    if has_market_bias and (has_ewo or has_rsi or has_market_bias):
+        bias_vals = df['market_bias'].copy()
+
+        # Bullish segments (+1) with green fill from 0 to +1
+        bias_bull = bias_vals.where(bias_vals >= 1)
+        if bias_bull.notna().any():
+            fig.add_trace(
+                go.Scatter(
+                    x=df['time'], y=bias_bull,
+                    name='Bias (Bull)',
+                    mode='lines',
+                    line=dict(color='#00C853', width=2, shape='hv'),
+                    fill='tozeroy',
+                    fillcolor='rgba(0, 200, 83, 0.12)',
+                    connectgaps=False,
+                    hovertemplate='Bias: +1 (Bull)<extra></extra>'
+                ),
+                row=2, col=1
+            )
+
+        # Bearish segments (-1) with red fill from 0 to -1
+        bias_bear = bias_vals.where(bias_vals <= -1)
+        if bias_bear.notna().any():
+            fig.add_trace(
+                go.Scatter(
+                    x=df['time'], y=bias_bear,
+                    name='Bias (Bear)',
+                    mode='lines',
+                    line=dict(color='#FF1744', width=2, shape='hv'),
+                    fill='tozeroy',
+                    fillcolor='rgba(255, 23, 68, 0.12)',
+                    connectgaps=False,
+                    hovertemplate='Bias: -1 (Bear)<extra></extra>'
+                ),
+                row=2, col=1
+            )
+
+        # Reference lines at +1 and -1
+        time_range = [df['time'].iloc[0], df['time'].iloc[-1]]
+        fig.add_trace(
+            go.Scatter(
+                x=time_range, y=[1, 1],
+                mode='lines',
+                line=dict(color='rgba(0, 200, 83, 0.4)', width=1, dash='dot'),
+                showlegend=False, hoverinfo='skip'
+            ),
+            row=2, col=1
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=time_range, y=[-1, -1],
+                mode='lines',
+                line=dict(color='rgba(255, 23, 68, 0.4)', width=1, dash='dot'),
+                showlegend=False, hoverinfo='skip'
+            ),
+            row=2, col=1
+        )
+
     # Layout
-    if has_ewo or has_rsi:
+    if has_ewo or has_rsi or has_market_bias:
         chart_height = 800
     else:
         chart_height = 500
@@ -472,11 +534,17 @@ def create_trade_chart(df, trade_label, market_hours_only=False, show_ewo=True, 
     fig.update_yaxes(title_text="Price ($)", secondary_y=False, tickformat='$.2f', row=1, col=1)
     fig.update_yaxes(title_text="Option ($)", secondary_y=True, tickformat='$.2f', row=1, col=1)
 
-    if has_ewo or has_rsi:
+    if has_ewo or has_rsi or has_market_bias:
         fig.update_xaxes(title_text="Time", tickformat='%H:%M', row=2, col=1)
 
     if has_ewo:
-        fig.update_yaxes(title_text="EWO", secondary_y=False, row=2, col=1)
+        ewo_title = "EWO / Bias" if has_market_bias else "EWO"
+        fig.update_yaxes(title_text=ewo_title, secondary_y=False, row=2, col=1)
+    elif has_market_bias and not has_rsi:
+        fig.update_yaxes(
+            title_text="Bias", secondary_y=False, row=2, col=1,
+            range=[-1.5, 1.5], tickvals=[-1, 0, 1], ticktext=['Bear', 'Side', 'Bull']
+        )
 
     if has_rsi:
         fig.update_yaxes(
@@ -691,6 +759,7 @@ def main():
         show_ewo = st.toggle("Show EWO Graph", value=True)
         show_rsi = st.toggle("Show RSI Graph", value=True)
         show_supertrend = st.toggle("Show Supertrend", value=False, help="Overlay Supertrend indicator on main chart")
+        show_market_bias = st.toggle("Show Market Bias", value=True, help="Market bias on indicator subplot: +1 Bull, 0 Side, -1 Bear")
 
         st.markdown("---")
 
@@ -726,7 +795,7 @@ def main():
     df = matrices[pos_id]
 
     # Chart first (no summary above)
-    fig = create_trade_chart(df, trade_label, market_hours_only, show_ewo, show_rsi, show_supertrend)
+    fig = create_trade_chart(df, trade_label, market_hours_only, show_ewo, show_rsi, show_supertrend, show_market_bias)
     if fig:
         st.plotly_chart(fig, use_container_width=True)
     else:

@@ -173,6 +173,19 @@ BACKTEST_CONFIG = {
         'minutes_before_close': 30,            # Activate in last N minutes (15:30+)
     },
 
+    # Momentum Peak: Detect momentum exhaustion peaks for early exit
+    # Combines RSI overbought reversal + EWO decline + RSI < avg confirmation
+    # Designed to exit 1-2 bars after a peak, before the bulk of the reversal
+    'momentum_peak': {
+        'enabled': True,
+        'min_profit_pct': 15,              # Only consider when option profit >= this %
+        'rsi_overbought': 80,              # RSI must have reached this recently
+        'rsi_lookback': 5,                 # Bars back to check for overbought RSI
+        'rsi_drop_threshold': 10,          # RSI must drop by >= this from recent peak
+        'ewo_declining_bars': 1,           # EWO must decline for N consecutive bars
+        'require_rsi_below_avg': True,     # Require RSI < RSI_10min_avg
+    },
+
     # Take Profit - Milestones: Ratcheting trailing stops at profit levels
     # Once a milestone gain% is reached, trailing stop is set at trailing_pct% above entry.
     # Milestones only ratchet upward — once reached, trailing stop never drops below that level.
