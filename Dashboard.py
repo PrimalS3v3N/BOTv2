@@ -222,15 +222,16 @@ def create_trade_chart(df, trade_label, market_hours_only=False, show_ewo=True, 
     # Supertrend (left y-axis) - color-coded by direction
     if show_supertrend and 'supertrend' in df.columns and df['supertrend'].notna().any():
         if 'supertrend_direction' in df.columns:
-            # Split into bullish (green) and bearish (red) segments for color coding
-            st_up = df[df['supertrend_direction'] == 1]
-            st_down = df[df['supertrend_direction'] == -1]
+            # Use full time axis with NaN for non-matching direction so connectgaps
+            # breaks lines at direction transitions instead of drawing across gaps
+            st_bull = df['supertrend'].where(df['supertrend_direction'] == 1)
+            st_bear = df['supertrend'].where(df['supertrend_direction'] == -1)
 
-            if not st_up.empty:
+            if st_bull.notna().any():
                 fig.add_trace(
                     go.Scatter(
-                        x=st_up['time'],
-                        y=st_up['supertrend'],
+                        x=df['time'],
+                        y=st_bull,
                         name='ST (Bull)',
                         mode='markers+lines',
                         line=dict(color='#00C853', width=2),
@@ -240,11 +241,11 @@ def create_trade_chart(df, trade_label, market_hours_only=False, show_ewo=True, 
                     ),
                     row=1, col=1, secondary_y=False
                 )
-            if not st_down.empty:
+            if st_bear.notna().any():
                 fig.add_trace(
                     go.Scatter(
-                        x=st_down['time'],
-                        y=st_down['supertrend'],
+                        x=df['time'],
+                        y=st_bear,
                         name='ST (Bear)',
                         mode='markers+lines',
                         line=dict(color='#FF1744', width=2),
