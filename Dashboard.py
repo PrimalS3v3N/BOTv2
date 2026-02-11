@@ -199,9 +199,9 @@ def create_trade_chart(df, trade_label, market_hours_only=False, show_ewo=True, 
             go.Scatter(
                 x=df['time'],
                 y=df['vwap_ema_avg'],
-                name='Profit',
+                name='MA',
                 line=dict(color='#FFEB3B', width=1.5, dash='dashdot'),
-                hovertemplate='Profit: $%{y:.2f}<extra></extra>'
+                hovertemplate='MA: $%{y:.2f}<extra></extra>'
             ),
             row=1, col=1, secondary_y=False
         )
