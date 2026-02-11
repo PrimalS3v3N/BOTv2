@@ -202,25 +202,27 @@ DATAFRAME_COLUMNS = {
         'max_price_to_eod', 'max_stop_loss_price', 'profit_min',
     ],
 
-    # Per-bar tracking data from TrackingMatrix (Test.py)
-    'tracking_matrix': [
+    # Per-bar tracking data from Databook (Test.py)
+    'databook': [
         'timestamp', 'stock_price', 'stock_high', 'stock_low', 'true_price', 'atr',
         'option_price', 'volume', 'holding', 'entry_price',
         'pnl', 'pnl_pct', 'highest_price', 'lowest_price', 'minutes_held',
+        'market_bias',
         'vwap', 'ema_30', 'vwap_ema_avg', 'emavwap', 'ewo', 'ewo_15min_avg', 'rsi', 'rsi_10min_avg',
         'supertrend', 'supertrend_direction',
     ],
 
-    # Metadata columns appended to tracking matrix (Test.py)
-    'tracking_matrix_metadata': [
+    # Metadata columns appended to databook (Test.py)
+    'databook_metadata': [
         'trade_label', 'ticker', 'strike', 'option_type', 'expiration',
         'contracts', 'entry_time', 'exit_time', 'exit_reason',
     ],
 
-    # Dashboard matrix display columns (Dashboard.py)
-    'dashboard_matrix': [
+    # Dashboard databook display columns (Dashboard.py)
+    'dashboard_databook': [
         'timestamp', 'holding', 'stock_price', 'stock_high', 'stock_low',
         'true_price', 'option_price', 'pnl_pct',
+        'market_bias',
         'vwap', 'ema_20', 'ema_30', 'vwap_ema_avg', 'emavwap', 'ewo', 'ewo_15min_avg', 'rsi', 'rsi_10min_avg',
         'supertrend', 'supertrend_direction',
     ],

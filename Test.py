@@ -608,16 +608,18 @@ class Position:
 
 
 # =============================================================================
-# INTERNAL - Tracking Matrix
+# INTERNAL - Databook
 # =============================================================================
 
-class TrackingMatrix:
+class Databook:
     """High-resolution tracking data for a single trade."""
 
     def __init__(self, position):
         self.position = position
         self.trade_label = position.get_trade_label()
         self.records = []
+        self.day_high = -np.inf
+        self.day_low = np.inf
 
     def add_record(self, timestamp, stock_price, option_price, volume, holding=True,
                    vwap=np.nan, ema_30=np.nan,
@@ -630,6 +632,26 @@ class TrackingMatrix:
 
         # Calculate True Price via Analysis module
         tp = Analysis.true_price(stock_price, stock_high, stock_low)
+
+        # Track running day high/low for sideways band calculation
+        if not np.isnan(stock_high):
+            self.day_high = max(self.day_high, stock_high)
+        if not np.isnan(stock_low) and stock_low > 0:
+            self.day_low = min(self.day_low, stock_low)
+
+        # Market bias: +1 (bullish), 0 (sideways), -1 (bearish)
+        # Sideways zone = VWAP +/- 10% of today's high-low range
+        if not np.isnan(vwap) and vwap > 0 and self.day_high > self.day_low:
+            day_range = self.day_high - self.day_low
+            sideways_band = 0.10 * day_range
+            if stock_price >= vwap + sideways_band:
+                market_bias = 1
+            elif stock_price <= vwap - sideways_band:
+                market_bias = -1
+            else:
+                market_bias = 0
+        else:
+            market_bias = np.nan
 
         record = {
             'timestamp': timestamp,
@@ -646,6 +668,8 @@ class TrackingMatrix:
             'highest_price': self.position.highest_price if holding else np.nan,
             'lowest_price': self.position.lowest_price if holding else np.nan,
             'minutes_held': self.position.get_minutes_held(timestamp) if holding else np.nan,
+            # Market assessment
+            'market_bias': market_bias,
             # Technical indicators
             'vwap': vwap,
             'ema_30': ema_30,
@@ -678,7 +702,7 @@ class TrackingMatrix:
             df['exit_reason'] = self.position.exit_reason
 
             # Reorder columns per Config source of truth
-            col_order = Config.DATAFRAME_COLUMNS['tracking_matrix'] + Config.DATAFRAME_COLUMNS['tracking_matrix_metadata']
+            col_order = Config.DATAFRAME_COLUMNS['databook'] + Config.DATAFRAME_COLUMNS['databook_metadata']
             df = df[[c for c in col_order if c in df.columns]]
 
             return df
@@ -739,7 +763,7 @@ class Backtest:
         self.messages_df = None
         self.signals_df = None
         self.positions = []
-        self.tracking_matrices = {}
+        self.databooks = {}
         self.results = None
         self._has_run = False
 
@@ -777,7 +801,7 @@ class Backtest:
         # Step 3: Process each signal
         print("\nProcessing signals...")
         self.positions = []
-        self.tracking_matrices = {}
+        self.databooks = {}
 
         for idx, signal in self.signals_df.iterrows():
             print(f"\n  [{idx+1}/{len(self.signals_df)}] {signal['ticker']} "
@@ -787,7 +811,7 @@ class Backtest:
 
             if position:
                 self.positions.append(position)
-                self.tracking_matrices[position.get_trade_label()] = matrix
+                self.databooks[position.get_trade_label()] = matrix
 
                 pnl = position.get_pnl(position.exit_price) if position.exit_price else 0
                 print(f"    Exit: {position.exit_reason} | P&L: ${pnl:+.2f}")
@@ -858,7 +882,7 @@ class Backtest:
         )
 
         # Create tracking matrix
-        matrix = TrackingMatrix(position)
+        matrix = Databook(position)
 
         # Simulate through all bars
         self._simulate_position(position, matrix, stock_data, signal, entry_idx, entry_stock_price)
@@ -1019,16 +1043,16 @@ class Backtest:
         else:
             positions_df = pd.DataFrame()
 
-        tracking_matrices = {}
-        for label, matrix in self.tracking_matrices.items():
-            tracking_matrices[label] = matrix.to_dataframe()
+        databooks = {}
+        for label, databook in self.databooks.items():
+            databooks[label] = databook.to_dataframe()
 
         summary = self._calculate_summary(positions_df)
 
         return {
             'Signals': signals_df,
             'Positions': positions_df,
-            'Tracking_matrices': tracking_matrices,
+            'Databooks': databooks,
             'Summary': summary
         }
 
@@ -1128,7 +1152,7 @@ class Backtest:
         return {
             'Signals': pd.DataFrame(),
             'Positions': pd.DataFrame(),
-            'Tracking_matrices': {},
+            'Databooks': {},
             'Summary': {}
         }
 
@@ -1182,13 +1206,13 @@ class Backtest:
 
         print(f"{'='*60}\n")
 
-    def get_tracking_matrices(self):
-        """Get all trade tracking matrices."""
+    def get_databooks(self):
+        """Get all trade databooks."""
         if not self._has_run:
             print("Backtest has not been run yet. Call run() first.")
             return {}
 
-        return self.results.get('Tracking_matrices', {})
+        return self.results.get('Databooks', {})
 
     def get_positions_df(self):
         """Get positions DataFrame."""
@@ -1223,10 +1247,9 @@ class Backtest:
             filepath = os.path.join(script_dir, 'BT_DATA.pkl')
 
         try:
-            # Format data for Dashboard.py which expects 'matrices' and 'exit_signals' keys
+            # Format data for Dashboard.py which expects 'matrices' key
             dashboard_data = {
-                'matrices': self.results.get('Tracking_matrices', {}),
-                'exit_signals': {},  # Placeholder for future exit signal tracking
+                'matrices': self.results.get('Databooks', {}),
             }
             with open(filepath, 'wb') as f:
                 pickle.dump(dashboard_data, f)
