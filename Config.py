@@ -255,13 +255,14 @@ BACKTEST_CONFIG = {
             # Custom instructions appended to BOTH text and vision prompts.
             # Use this to teach the model your server's lingo, screenshot
             # patterns, or any domain-specific rules. Plain English works.
+            # Uncomment and set a value to enable.
             #
             # Examples:
             #   'In this server, "out" always means full exit, never trim.'
             #   'Robinhood P&L screenshots with $0.00 market value = EXIT.'
             #   'Ignore memes and reaction images — classify as NONE.'
             #   'Messages from bot accounts are never real exits — NONE.'
-            'custom_instructions': '',
+            # 'custom_instructions': '',
         },
     },
 

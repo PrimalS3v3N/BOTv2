@@ -226,7 +226,7 @@ def BuildOrder(message):
 # Cache for AI classification results to avoid re-classifying identical messages
 _ai_classify_cache = {}
 
-# Base prompts — custom_instructions from Config are appended at runtime
+# Base prompts (custom_instructions support commented out for now — see _build_system_prompt)
 _AI_SYSTEM_PROMPT_BASE = (
     "You classify Discord messages that reply to stock/options trading alerts. "
     "Determine if the reply indicates the trader is exiting or trimming their position. "
@@ -244,9 +244,10 @@ _AI_USER_TEMPLATE = (
 def _build_system_prompt(ai_config):
     """Build system prompt, appending custom_instructions if configured."""
     prompt = _AI_SYSTEM_PROMPT_BASE
-    custom = ai_config.get('custom_instructions', '').strip()
-    if custom:
-        prompt += f"\n\nAdditional instructions:\n{custom}"
+    # Uncomment to enable custom_instructions from Config:
+    # custom = ai_config.get('custom_instructions', '').strip()
+    # if custom:
+    #     prompt += f"\n\nAdditional instructions:\n{custom}"
     return prompt
 
 
@@ -456,11 +457,12 @@ def _classify_vision_with_ai(image_urls, text_content=None):
         print(f"    Image download failed: {e}")
         return None
 
-    # Build prompt with optional text context + custom instructions
+    # Build prompt with optional text context
     prompt = _AI_VISION_PROMPT
-    custom = ai_config.get('custom_instructions', '').strip()
-    if custom:
-        prompt += f"\n\nAdditional instructions:\n{custom}"
+    # Uncomment to enable custom_instructions from Config:
+    # custom = ai_config.get('custom_instructions', '').strip()
+    # if custom:
+    #     prompt += f"\n\nAdditional instructions:\n{custom}"
     if text_content and text_content.strip():
         prompt += f"\n\nAccompanying text: \"{text_content.strip()}\""
 
