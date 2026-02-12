@@ -235,11 +235,21 @@ BACKTEST_CONFIG = {
         # AI classification: fallback when keyword matching misses.
         # Catches slang, context-dependent phrasing, emojis, etc.
         # Keywords are checked first (free/instant); AI runs only if keywords miss.
+        #
+        # Providers (pick one):
+        #   'ollama'    - Local model, no API key, ~10-50ms (recommended)
+        #   'anthropic' - Claude Haiku API, ~200-500ms, requires API key
+        #   'openai'    - GPT-4o-mini API, ~200-500ms, requires API key
+        #
+        # Ollama setup: install from https://ollama.com, then run:
+        #   ollama pull gemma3:1b
         'ai': {
             'enabled': False,                              # Set True to enable AI fallback
-            'provider': 'anthropic',                       # 'anthropic' or 'openai'
-            'model': 'claude-haiku-4-5-20251001',          # Model ID (fast + cheap)
-            'api_key': '',                                 # API key (or set ANTHROPIC_API_KEY / OPENAI_API_KEY env var)
+            'provider': 'ollama',                          # 'ollama', 'anthropic', or 'openai'
+            'model': 'gemma3:1b',                          # Ollama: gemma3:1b, phi4-mini, llama3.2:3b
+            'ollama_url': 'http://localhost:11434',        # Ollama server URL
+            'timeout': 10,                                 # Request timeout (seconds)
+            'api_key': '',                                 # For anthropic/openai only (or use env var)
         },
     },
 

@@ -225,44 +225,52 @@ def BuildOrder(message):
 # Cache for AI classification results to avoid re-classifying identical messages
 _ai_classify_cache = {}
 
+# Reusable prompt — the {message} placeholder is filled per call
+_AI_SYSTEM_PROMPT = (
+    "You classify Discord messages that reply to stock/options trading alerts. "
+    "Determine if the reply indicates the trader is exiting or trimming their position. "
+    "Respond with ONLY one word: EXIT, TRIM, or NONE."
+)
+
+_AI_USER_TEMPLATE = (
+    "EXIT = full sell/close of position\n"
+    "TRIM = partial sell (trimming, scaling out, took some off)\n"
+    "NONE = not a sell action\n\n"
+    "Message: \"{message}\""
+)
+
 
 def _classify_with_ai(message):
     """
     Use an AI model to classify whether a Discord reply indicates an exit or trim.
 
-    Supports two providers (configured in BACKTEST_CONFIG.discord_exit_signals.ai):
-      - 'anthropic' : Uses Claude (claude-haiku via Anthropic SDK)
-      - 'openai'    : Uses GPT (gpt-4o-mini via OpenAI SDK)
+    Supports three providers (configured in BACKTEST_CONFIG.discord_exit_signals.ai):
+      - 'ollama'    : Local model via Ollama HTTP API (~10-50ms, no API key needed)
+      - 'anthropic' : Claude Haiku via Anthropic SDK (~200-500ms)
+      - 'openai'    : GPT-4o-mini via OpenAI SDK (~200-500ms)
 
     Returns:
         dict {'type': 'exit'|'trim', 'keyword': 'ai'} or None
     """
     exit_config = Config.BACKTEST_CONFIG.get('discord_exit_signals', {})
     ai_config = exit_config.get('ai', {})
-    provider = ai_config.get('provider', 'anthropic')
+    provider = ai_config.get('provider', 'ollama')
 
     # Check cache first
     cache_key = message.strip().lower()
     if cache_key in _ai_classify_cache:
         return _ai_classify_cache[cache_key]
 
-    prompt = (
-        "You are classifying a Discord message that was posted as a reply to a "
-        "stock/options trading alert. Determine if the reply indicates the trader "
-        "is exiting (selling) or trimming (partially selling) their position.\n\n"
-        "Respond with ONLY one word:\n"
-        "- EXIT  — if the message indicates a full sell/close of the position\n"
-        "- TRIM  — if the message indicates a partial sell (trimming, scaling out)\n"
-        "- NONE  — if the message does NOT indicate any selling action\n\n"
-        f"Message: \"{message}\""
-    )
+    user_prompt = _AI_USER_TEMPLATE.format(message=message)
 
     result = None
     try:
-        if provider == 'anthropic':
-            result = _classify_anthropic(prompt, ai_config)
+        if provider == 'ollama':
+            result = _classify_ollama(user_prompt, ai_config)
+        elif provider == 'anthropic':
+            result = _classify_anthropic(user_prompt, ai_config)
         elif provider == 'openai':
-            result = _classify_openai(prompt, ai_config)
+            result = _classify_openai(user_prompt, ai_config)
     except Exception as e:
         print(f"    AI classification failed ({provider}): {e}")
 
@@ -270,7 +278,48 @@ def _classify_with_ai(message):
     return result
 
 
-def _classify_anthropic(prompt, ai_config):
+def _classify_ollama(user_prompt, ai_config):
+    """
+    Classify using a local Ollama model.
+
+    Ollama runs locally — no API key, no network latency, no cost.
+    Requires: `ollama pull <model>` once to download the model.
+
+    Recommended models (sorted by speed):
+      - gemma3:1b     (~10-20ms, 1B params, very fast)
+      - phi4-mini     (~20-40ms, 3.8B params, good accuracy)
+      - llama3.2:3b   (~20-40ms, 3B params, solid balance)
+      - gemma3:4b     (~30-50ms, 4B params, best accuracy at this tier)
+    """
+    import requests
+
+    base_url = ai_config.get('ollama_url', 'http://localhost:11434')
+    model = ai_config.get('model', 'gemma3:1b')
+    timeout = ai_config.get('timeout', 10)
+
+    response = requests.post(
+        f"{base_url}/api/chat",
+        json={
+            "model": model,
+            "messages": [
+                {"role": "system", "content": _AI_SYSTEM_PROMPT},
+                {"role": "user", "content": user_prompt},
+            ],
+            "stream": False,
+            "options": {
+                "num_predict": 10,       # Only need 1 word back
+                "temperature": 0.0,      # Deterministic classification
+            },
+        },
+        timeout=timeout,
+    )
+
+    response.raise_for_status()
+    answer = response.json().get('message', {}).get('content', '').strip().upper()
+    return _parse_ai_answer(answer)
+
+
+def _classify_anthropic(user_prompt, ai_config):
     """Classify using Anthropic Claude API."""
     import anthropic
 
@@ -281,14 +330,15 @@ def _classify_anthropic(prompt, ai_config):
     response = client.messages.create(
         model=model,
         max_tokens=10,
-        messages=[{"role": "user", "content": prompt}],
+        system=_AI_SYSTEM_PROMPT,
+        messages=[{"role": "user", "content": user_prompt}],
     )
 
     answer = response.content[0].text.strip().upper()
     return _parse_ai_answer(answer)
 
 
-def _classify_openai(prompt, ai_config):
+def _classify_openai(user_prompt, ai_config):
     """Classify using OpenAI API."""
     import openai
 
@@ -299,7 +349,10 @@ def _classify_openai(prompt, ai_config):
     response = client.chat.completions.create(
         model=model,
         max_tokens=10,
-        messages=[{"role": "user", "content": prompt}],
+        messages=[
+            {"role": "system", "content": _AI_SYSTEM_PROMPT},
+            {"role": "user", "content": user_prompt},
+        ],
     )
 
     answer = response.choices[0].message.content.strip().upper()
