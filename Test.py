@@ -1862,8 +1862,8 @@ def sync_from_github():
     Returns the number of files that were updated (0 = already up to date).
     """
     try:
-        from github_onedrive_sync import GitHubOneDriveSync
-        syncer = GitHubOneDriveSync(
+        from Updater import AutoUpdate
+        syncer = AutoUpdate(
             github_url="https://github.com/PrimalS3v3N/BOTv2",
             onedrive_path=os.path.dirname(os.path.abspath(__file__)),
         )

@@ -1,27 +1,27 @@
 #!/usr/bin/env python3
 """
-GitHub to OneDrive Sync Script
+AutoUpdate — GitHub to Local Sync Script
 
-Compares files between a GitHub repository and a local OneDrive folder,
-then updates OneDrive copies for files that exist in BOTH locations.
+Compares files between a GitHub repository and a local folder,
+then updates local copies for files that exist in BOTH locations.
 Files unique to either side are left completely untouched.
 
 Usage:
-    python github_onedrive_sync.py <github_url> <onedrive_path> [options]
+    python Updater.py <github_url> <local_path> [options]
 
 Examples:
-    # Update matching files in your OneDrive folder from GitHub
-    python github_onedrive_sync.py https://github.com/owner/repo ~/OneDrive/Projects/repo
+    # Update matching files in your local folder from GitHub
+    python Updater.py https://github.com/owner/repo ~/Projects/repo
 
     # Sync a specific branch
-    python github_onedrive_sync.py https://github.com/owner/repo ~/OneDrive/Projects/repo \
+    python Updater.py https://github.com/owner/repo ~/Projects/repo \
         --branch develop --token ghp_xxxx
 
     # Use the API method (no git required)
-    python github_onedrive_sync.py owner/repo ~/OneDrive/Projects/repo --method api
+    python Updater.py owner/repo ~/Projects/repo --method api
 
     # Preview what would change without writing anything
-    python github_onedrive_sync.py owner/repo ~/OneDrive/Projects/repo --dry-run
+    python Updater.py owner/repo ~/Projects/repo --dry-run
 """
 
 import argparse
@@ -161,10 +161,10 @@ class SyncState:
 
 
 # ---------------------------------------------------------------------------
-# GitHubOneDriveSync
+# AutoUpdate
 # ---------------------------------------------------------------------------
 
-class GitHubOneDriveSync:
+class AutoUpdate:
     """
     Update OneDrive files from a GitHub repo.
 
@@ -514,7 +514,7 @@ class GitHubOneDriveSync:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="github_onedrive_sync",
+        prog="AutoUpdate",
         description=(
             "Update files in a local OneDrive folder from a GitHub repository. "
             "Only files that exist in BOTH locations are compared and updated. "
@@ -578,7 +578,7 @@ def main():
     args = parser.parse_args()
 
     try:
-        syncer = GitHubOneDriveSync(
+        syncer = AutoUpdate(
             github_url=args.github_url,
             onedrive_path=args.onedrive_path,
             token=args.token,
