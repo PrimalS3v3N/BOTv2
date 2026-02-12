@@ -232,6 +232,15 @@ BACKTEST_CONFIG = {
         ],
         # Max words to scan from start of message (0 = scan entire message)
         'scan_max_words': 0,
+        # AI classification: fallback when keyword matching misses.
+        # Catches slang, context-dependent phrasing, emojis, etc.
+        # Keywords are checked first (free/instant); AI runs only if keywords miss.
+        'ai': {
+            'enabled': False,                              # Set True to enable AI fallback
+            'provider': 'anthropic',                       # 'anthropic' or 'openai'
+            'model': 'claude-haiku-4-5-20251001',          # Model ID (fast + cheap)
+            'api_key': '',                                 # API key (or set ANTHROPIC_API_KEY / OPENAI_API_KEY env var)
+        },
     },
 
     # Take Profit - Milestones: Ratcheting trailing stops at profit levels
@@ -285,7 +294,7 @@ DATAFRAME_COLUMNS = {
         'contracts', 'highest_price', 'lowest_price',
         'pnl', 'pnl_pct', 'minutes_held',
         'max_price_to_eod', 'max_stop_loss_price', 'profit_min',
-        'highest_milestone_pct',
+        'highest_milestone_pct', 'trims',
     ],
 
     # Per-bar tracking data from Databook (Test.py)

@@ -627,6 +627,36 @@ class Position:
         self.exit_reason = exit_reason
         self.is_closed = True
 
+    def trim(self, trim_price, trim_time, count=1):
+        """
+        Reduce position size by closing some contracts (partial exit).
+        Records each trim as a realized P&L event.
+
+        Args:
+            trim_price: Price at which contracts were sold
+            trim_time:  Timestamp of the trim
+            count:      Number of contracts to trim (default 1)
+
+        Returns:
+            True if trim occurred, False if not enough contracts
+        """
+        if self.contracts <= 1 or count >= self.contracts:
+            return False  # Can't trim below 1; use close() for full exit
+
+        if not hasattr(self, 'trims'):
+            self.trims = []
+
+        trimmed = min(count, self.contracts - 1)
+        pnl_per = (trim_price - self.entry_price) * 100
+        self.trims.append({
+            'time': trim_time,
+            'price': trim_price,
+            'contracts': trimmed,
+            'pnl': pnl_per * trimmed,
+        })
+        self.contracts -= trimmed
+        return True
+
     def get_pnl(self, price=None):
         """Get P&L in dollars per contract."""
         price = price or self.current_price
@@ -655,6 +685,15 @@ class Position:
         # Calculate Profit[min] - P&L at the worst stop loss point (lowest price during holding)
         profit_min = self.get_pnl(self.max_stop_loss_price) if self.max_stop_loss_price else None
 
+        # Sum realized P&L from trims + remaining contracts at exit
+        trims = getattr(self, 'trims', [])
+        trim_pnl = sum(t['pnl'] for t in trims) if trims else 0
+        remaining_pnl = self.get_pnl(self.exit_price) if self.exit_price else None
+        total_pnl = (trim_pnl + remaining_pnl) if remaining_pnl is not None else None
+
+        # Contracts at entry (before any trims)
+        total_contracts = self.contracts + sum(t['contracts'] for t in trims) if trims else self.contracts
+
         return {
             'ticker': self.ticker,
             'strike': self.strike,
@@ -666,16 +705,17 @@ class Position:
             'exit_price': self.exit_price,
             'exit_time': self.exit_time,
             'exit_reason': self.exit_reason,
-            'contracts': self.contracts,
+            'contracts': total_contracts,
             'highest_price': self.highest_price,
             'lowest_price': self.lowest_price,
-            'pnl': self.get_pnl(self.exit_price) if self.exit_price else None,
+            'pnl': total_pnl,
             'pnl_pct': self.get_pnl_pct(self.exit_price) if self.exit_price else None,
             'minutes_held': self.get_minutes_held(self.exit_time) if self.exit_time else None,
             'max_price_to_eod': self.max_price_to_eod,
             'max_stop_loss_price': self.max_stop_loss_price,
             'profit_min': profit_min,
             'highest_milestone_pct': self.highest_milestone_pct,
+            'trims': len(trims),
         }
 
 
@@ -1345,12 +1385,13 @@ class Backtest:
                             discord_exit_idx += 1
                             if de['type'] == 'exit':
                                 exit_price = option_price * (1 - self.slippage_pct)
-                                position.close(exit_price, timestamp,
-                                               f"Discord Exit ({de['keyword']})")
+                                position.close(exit_price, timestamp, 'Signal - Sell')
                                 discord_exit_triggered = True
                                 break
-                            # 'trim' type — log but don't close (partial exits
-                            # not modeled yet; treat as informational)
+                            elif de['type'] == 'trim' and position.contracts > 1:
+                                trim_price = option_price * (1 - self.slippage_pct)
+                                position.trim(trim_price, timestamp, count=1)
+                                # Don't set discord_exit_triggered — position stays open
                         else:
                             break
 

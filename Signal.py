@@ -9,7 +9,9 @@ INTERNAL - Signal Parsing Logic
 ================================================================================
 """
 
+import os
 import re
+import json
 import datetime as dt
 from datetime import timedelta, date
 import pandas as pd
@@ -216,19 +218,121 @@ def BuildOrder(message):
     return order
 
 
+# =============================================================================
+# INTERNAL - AI Message Classifier
+# =============================================================================
+
+# Cache for AI classification results to avoid re-classifying identical messages
+_ai_classify_cache = {}
+
+
+def _classify_with_ai(message):
+    """
+    Use an AI model to classify whether a Discord reply indicates an exit or trim.
+
+    Supports two providers (configured in BACKTEST_CONFIG.discord_exit_signals.ai):
+      - 'anthropic' : Uses Claude (claude-haiku via Anthropic SDK)
+      - 'openai'    : Uses GPT (gpt-4o-mini via OpenAI SDK)
+
+    Returns:
+        dict {'type': 'exit'|'trim', 'keyword': 'ai'} or None
+    """
+    exit_config = Config.BACKTEST_CONFIG.get('discord_exit_signals', {})
+    ai_config = exit_config.get('ai', {})
+    provider = ai_config.get('provider', 'anthropic')
+
+    # Check cache first
+    cache_key = message.strip().lower()
+    if cache_key in _ai_classify_cache:
+        return _ai_classify_cache[cache_key]
+
+    prompt = (
+        "You are classifying a Discord message that was posted as a reply to a "
+        "stock/options trading alert. Determine if the reply indicates the trader "
+        "is exiting (selling) or trimming (partially selling) their position.\n\n"
+        "Respond with ONLY one word:\n"
+        "- EXIT  — if the message indicates a full sell/close of the position\n"
+        "- TRIM  — if the message indicates a partial sell (trimming, scaling out)\n"
+        "- NONE  — if the message does NOT indicate any selling action\n\n"
+        f"Message: \"{message}\""
+    )
+
+    result = None
+    try:
+        if provider == 'anthropic':
+            result = _classify_anthropic(prompt, ai_config)
+        elif provider == 'openai':
+            result = _classify_openai(prompt, ai_config)
+    except Exception as e:
+        print(f"    AI classification failed ({provider}): {e}")
+
+    _ai_classify_cache[cache_key] = result
+    return result
+
+
+def _classify_anthropic(prompt, ai_config):
+    """Classify using Anthropic Claude API."""
+    import anthropic
+
+    api_key = ai_config.get('api_key') or os.getenv('ANTHROPIC_API_KEY', '')
+    model = ai_config.get('model', 'claude-haiku-4-5-20251001')
+
+    client = anthropic.Anthropic(api_key=api_key)
+    response = client.messages.create(
+        model=model,
+        max_tokens=10,
+        messages=[{"role": "user", "content": prompt}],
+    )
+
+    answer = response.content[0].text.strip().upper()
+    return _parse_ai_answer(answer)
+
+
+def _classify_openai(prompt, ai_config):
+    """Classify using OpenAI API."""
+    import openai
+
+    api_key = ai_config.get('api_key') or os.getenv('OPENAI_API_KEY', '')
+    model = ai_config.get('model', 'gpt-4o-mini')
+
+    client = openai.OpenAI(api_key=api_key)
+    response = client.chat.completions.create(
+        model=model,
+        max_tokens=10,
+        messages=[{"role": "user", "content": prompt}],
+    )
+
+    answer = response.choices[0].message.content.strip().upper()
+    return _parse_ai_answer(answer)
+
+
+def _parse_ai_answer(answer):
+    """Convert AI model's one-word answer to result dict."""
+    if 'EXIT' in answer:
+        return {'type': 'exit', 'keyword': 'ai'}
+    elif 'TRIM' in answer:
+        return {'type': 'trim', 'keyword': 'ai'}
+    return None
+
+
+# =============================================================================
+# EXTERNAL - Exit Signal Parsing
+# =============================================================================
+# Used by: Test.py
+
 def ParseExitSignal(message):
     """
     Parse a Discord reply message for exit signal keywords.
 
-    Checks if the message content indicates the signal provider is exiting
-    or trimming a position. Used on messages that reply to an original
-    signal alert.
+    Two-stage approach:
+      1. Fast keyword matching (no API calls, instant)
+      2. AI classification fallback (optional, if keywords miss)
 
     Args:
         message: Raw reply message string from Discord
 
     Returns:
-        dict with keys: type ('exit', 'trim', or None), keyword (matched word)
+        dict with keys: type ('exit', 'trim'), keyword (matched word or 'ai')
         or None if no exit signal detected
     """
     if not message:
@@ -258,15 +362,21 @@ def ParseExitSignal(message):
         if neg.lower() in words:
             return None
 
-    # Check full exit keywords first (higher priority)
+    # Stage 1: Fast keyword matching
     for kw in exit_keywords:
         if kw.lower() in text:
             return {'type': 'exit', 'keyword': kw}
 
-    # Check trim/partial exit keywords
     for kw in trim_keywords:
         if kw.lower() in text:
             return {'type': 'trim', 'keyword': kw}
+
+    # Stage 2: AI classification fallback (if enabled)
+    ai_config = exit_config.get('ai', {})
+    if ai_config.get('enabled', False):
+        ai_result = _classify_with_ai(message)
+        if ai_result:
+            return ai_result
 
     return None
 
