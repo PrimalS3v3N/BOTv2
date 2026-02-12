@@ -209,6 +209,19 @@ BACKTEST_CONFIG = {
         'require_rsi_below_avg': True,     # Require RSI < RSI_10min_avg
     },
 
+    # StatsBook Exit: Exit based on historical statistical bounds
+    # Uses StatsBook data to identify when price action reaches historical extremes
+    # Min = noise floor, Median = normal zone, Max = selling zone
+    'statsbook_exit': {
+        'enabled': True,
+        'timeframe': '5m',                 # StatsBook timeframe to compare against
+        'ewo_max_exit': True,              # Exit when EWO >= Median.Max(EWO)
+        'hl_max_exit': True,               # Exit when rolling H-L >= Median.Max(H-L)
+        'min_profit_pct': 10,              # Minimum option profit % to consider exit
+        'min_hold_bars': 5,                # Minimum bars held before StatsBook exit
+        'rolling_window': 5,               # Bars for rolling H-L range calculation
+    },
+
     # AI Exit Signal: Local LLM-based exit signal generation
     # Runs a quantized model via llama-cpp-python on GPU during backtesting.
     # The model analyzes multi-timeframe technical data and recommends hold/sell.

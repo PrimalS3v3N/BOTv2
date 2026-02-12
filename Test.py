@@ -778,6 +778,7 @@ class StatsBook:
     METRICS = [
         'Max(H-L)', 'Median.Max(H-L)', 'Median(H-L)', 'Min(H-L)', 'Median.Min(H-L)',
         'Max(C-O)', 'Median.Max(C-O)', 'Median(C-O)', 'Min(C-O)', 'Median.Min(C-O)',
+        'Max(EWO)', 'Median.Max(EWO)', 'Median(EWO)', 'Min(EWO)', 'Median.Min(EWO)',
         'Max(Vol)', 'Max(Vol)x', 'Median.Max(Vol)', 'Median(Vol)', 'Min(Vol)', 'Median.Min(Vol)',
     ]
 
@@ -802,6 +803,10 @@ class StatsBook:
             df['delta_co'] = round(df['close'] - df['open'], 3)
             df['delta_hl'] = round(df['high'] - df['low'], 3)
             df['volume'] = df['volume'].astype('float64')
+            # EWO: EMA(5) - EMA(35) on close price
+            ema_fast = df['close'].ewm(span=5, adjust=False).mean()
+            ema_slow = df['close'].ewm(span=35, adjust=False).mean()
+            df['ewo'] = ema_fast - ema_slow
             self._cache[cache_key] = df
             return df
         except Exception as e:
@@ -826,6 +831,13 @@ class StatsBook:
         stats['Median(C-O)'] = round(float(np.median(df['delta_co'])), 3)
         stats['Min(C-O)'] = round(float(np.min(df['delta_co'])), 3)
         stats['Median.Min(C-O)'] = round(float(np.median(df['delta_co'].nsmallest(R))), 3)
+
+        # EWO Stats
+        stats['Max(EWO)'] = round(float(np.max(df['ewo'])), 3)
+        stats['Median.Max(EWO)'] = round(float(np.median(df['ewo'].nlargest(R))), 3)
+        stats['Median(EWO)'] = round(float(np.median(df['ewo'])), 3)
+        stats['Min(EWO)'] = round(float(np.min(df['ewo'])), 3)
+        stats['Median.Min(EWO)'] = round(float(np.median(df['ewo'].nsmallest(R))), 3)
 
         # Volume Stats
         max_vol = float(np.max(df['volume']))
@@ -967,17 +979,17 @@ class Backtest:
             print(f"\n  [{idx+1}/{len(self.signals_df)}] {signal['ticker']} "
                   f"${signal['strike']} {signal['option_type']}")
 
+            # Build StatsBook for ticker (once per ticker, before processing)
+            ticker = signal['ticker']
+            if ticker not in self.statsbooks:
+                print(f"    Building StatsBook for {ticker}...")
+                self.statsbooks[ticker] = self.statsbook_builder.build(ticker)
+
             position, matrix = self._process_signal(signal)
 
             if position:
                 self.positions.append(position)
                 self.databooks[position.get_trade_label()] = matrix
-
-                # Build StatsBook for ticker (once per ticker)
-                ticker = signal['ticker']
-                if ticker not in self.statsbooks:
-                    print(f"    Building StatsBook for {ticker}...")
-                    self.statsbooks[ticker] = self.statsbook_builder.build(ticker)
 
                 pnl = position.get_pnl(position.exit_price) if position.exit_price else 0
                 print(f"    Exit: {position.exit_reason} | P&L: ${pnl:+.2f}")
@@ -1120,6 +1132,10 @@ class Backtest:
         # Get Momentum Peak settings from config
         mp_strategy = Strategy.MomentumPeak(self.config.get('momentum_peak', {}))
         mp_detector = mp_strategy.create_detector()
+
+        # Get StatsBook Exit settings from config
+        sb_strategy = Strategy.StatsBookExit(self.config.get('statsbook_exit', {}))
+        sb_detector = sb_strategy.create_detector(self.statsbooks.get(position.ticker))
 
         # Get AI Exit Signal detector for this position
         ai_detector = self.ai_strategy.create_detector(
@@ -1315,6 +1331,13 @@ class Backtest:
                     mp_pnl = position.get_pnl_pct(option_price)
                     mp_exit, mp_reason = mp_detector.update(mp_pnl, rsi, rsi_10min_avg, ewo)
 
+                # Update StatsBook detector
+                sb_exit = False
+                sb_reason = None
+                if sb_detector and not position.is_closed:
+                    sb_pnl = position.get_pnl_pct(option_price)
+                    sb_exit, sb_reason = sb_detector.update(sb_pnl, ewo, stock_high, stock_low)
+
                 # Take Profit - Milestones: trailing stop triggered
                 if tp_exit and not position.is_closed:
                     # Fill at the trailing stop price, not the current bar price.
@@ -1322,6 +1345,11 @@ class Backtest:
                     # would fill at whatever the bar gapped down to, understating profits.
                     exit_price = tp_tracker.trailing_exit_price * (1 - self.slippage_pct)
                     position.close(exit_price, timestamp, tp_reason)
+
+                # StatsBook Exit: EWO or H-L range at historical extreme
+                elif sb_exit and not position.is_closed:
+                    exit_price = option_price * (1 - self.slippage_pct)
+                    position.close(exit_price, timestamp, sb_reason)
 
                 # Momentum Peak: RSI overbought reversal + EWO decline
                 elif mp_exit and not position.is_closed:
