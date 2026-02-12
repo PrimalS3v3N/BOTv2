@@ -242,13 +242,14 @@ BACKTEST_CONFIG = {
         #   'openai'    - GPT-4o-mini API, ~200-500ms, requires API key
         #
         # Ollama setup: install from https://ollama.com, then run:
-        #   ollama pull gemma3:1b
+        #   ollama pull gemma3:4b            # text + vision (recommended for 4090)
         'ai': {
             'enabled': False,                              # Set True to enable AI fallback
             'provider': 'ollama',                          # 'ollama', 'anthropic', or 'openai'
-            'model': 'gemma3:1b',                          # Ollama: gemma3:1b, phi4-mini, llama3.2:3b
+            'model': 'gemma3:4b',                          # Text model (also handles vision if capable)
+            'vision_model': 'gemma3:4b',                   # Vision model for image attachments
             'ollama_url': 'http://localhost:11434',        # Ollama server URL
-            'timeout': 10,                                 # Request timeout (seconds)
+            'timeout': 30,                                 # Request timeout (seconds)
             'api_key': '',                                 # For anthropic/openai only (or use env var)
         },
     },
@@ -288,7 +289,7 @@ DATAFRAME_COLUMNS = {
     # Discord messages fetched by DiscordFetcher (Test.py)
     'discord_messages': [
         'id', 'timestamp', 'content', 'author', 'author_id',
-        'reply_to_id', 'referenced_content',
+        'reply_to_id', 'referenced_content', 'image_urls',
     ],
 
     # Parsed trading signals from SignalParser (Test.py, Signal.py)

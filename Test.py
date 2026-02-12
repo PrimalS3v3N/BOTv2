@@ -322,6 +322,13 @@ class DiscordFetcher:
                     ref_msg = msg.get('referenced_message')
                     referenced_content = ref_msg.get('content', '') if ref_msg else None
 
+                    # Extract image attachment URLs (Discord CDN)
+                    attachments = msg.get('attachments', [])
+                    image_urls = [
+                        a['url'] for a in attachments
+                        if a.get('content_type', '').startswith('image/')
+                    ]
+
                     all_messages.append({
                         'id': msg.get('id'),
                         'timestamp': timestamp,
@@ -330,6 +337,7 @@ class DiscordFetcher:
                         'author_id': msg.get('author', {}).get('id'),
                         'reply_to_id': reply_to_id,
                         'referenced_content': referenced_content,
+                        'image_urls': image_urls if image_urls else None,
                     })
                 except Exception:
                     continue
@@ -474,7 +482,8 @@ class SignalParser:
 
             # This message is a reply to a known signal — check for exit keywords
             content = row.get('content', '')
-            exit_result = Signal.ParseExitSignal(content)
+            image_urls = row.get('image_urls')
+            exit_result = Signal.ParseExitSignal(content, image_urls=image_urls)
 
             if exit_result:
                 if reply_to not in exit_map:

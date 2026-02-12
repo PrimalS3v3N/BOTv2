@@ -12,6 +12,7 @@ INTERNAL - Signal Parsing Logic
 import os
 import re
 import json
+import base64
 import datetime as dt
 from datetime import timedelta, date
 import pandas as pd
@@ -369,67 +370,273 @@ def _parse_ai_answer(answer):
 
 
 # =============================================================================
+# INTERNAL - Vision (Image) Classifier
+# =============================================================================
+
+# Prompt for image-based classification
+_AI_VISION_PROMPT = (
+    "This image was posted as a reply to a stock/options trading alert on Discord. "
+    "It may show a P&L screenshot, a brokerage confirmation, a chart, or other trading content.\n\n"
+    "Determine if this image indicates the trader has:\n"
+    "- EXIT — fully sold/closed their position (e.g. P&L screenshot showing closed trade, "
+    "'sold' confirmation, zero position)\n"
+    "- TRIM — partially sold (e.g. reduced shares/contracts, partial fill)\n"
+    "- NONE — not a sell action (e.g. chart analysis, watchlist, meme, unrelated)\n\n"
+    "Respond with ONLY one word: EXIT, TRIM, or NONE."
+)
+
+# Cache for downloaded images (URL -> base64 bytes)
+_image_download_cache = {}
+
+
+def _download_image_as_base64(url, timeout=10):
+    """Download an image from URL and return as base64 string."""
+    if url in _image_download_cache:
+        return _image_download_cache[url]
+
+    import requests
+
+    response = requests.get(url, timeout=timeout)
+    response.raise_for_status()
+
+    content_type = response.headers.get('content-type', 'image/png')
+    b64 = base64.b64encode(response.content).decode('utf-8')
+
+    result = {'base64': b64, 'media_type': content_type}
+    _image_download_cache[url] = result
+    return result
+
+
+def _classify_vision_with_ai(image_urls, text_content=None):
+    """
+    Classify image attachments using a vision-capable AI model.
+
+    Downloads the first image, sends it to the model with text context
+    (if any), and returns EXIT/TRIM/NONE classification.
+
+    Args:
+        image_urls: List of image URLs from Discord attachments
+        text_content: Optional text content accompanying the image
+
+    Returns:
+        dict {'type': 'exit'|'trim', 'keyword': 'ai-vision'} or None
+    """
+    if not image_urls:
+        return None
+
+    exit_config = Config.BACKTEST_CONFIG.get('discord_exit_signals', {})
+    ai_config = exit_config.get('ai', {})
+    provider = ai_config.get('provider', 'ollama')
+    timeout = ai_config.get('timeout', 30)
+
+    # Cache key: first image URL + text
+    cache_key = f"vision:{image_urls[0]}:{(text_content or '').strip().lower()}"
+    if cache_key in _ai_classify_cache:
+        return _ai_classify_cache[cache_key]
+
+    # Download the first image
+    try:
+        img_data = _download_image_as_base64(image_urls[0], timeout=timeout)
+    except Exception as e:
+        print(f"    Image download failed: {e}")
+        return None
+
+    # Build prompt with optional text context
+    prompt = _AI_VISION_PROMPT
+    if text_content and text_content.strip():
+        prompt += f"\n\nAccompanying text: \"{text_content.strip()}\""
+
+    result = None
+    try:
+        if provider == 'ollama':
+            result = _classify_vision_ollama(prompt, img_data, ai_config)
+        elif provider == 'anthropic':
+            result = _classify_vision_anthropic(prompt, img_data, ai_config)
+        elif provider == 'openai':
+            result = _classify_vision_openai(prompt, img_data, ai_config)
+    except Exception as e:
+        print(f"    Vision classification failed ({provider}): {e}")
+
+    _ai_classify_cache[cache_key] = result
+    return result
+
+
+def _classify_vision_ollama(prompt, img_data, ai_config):
+    """Classify image using Ollama vision model (gemma3, llava, etc.)."""
+    import requests
+
+    base_url = ai_config.get('ollama_url', 'http://localhost:11434')
+    model = ai_config.get('vision_model') or ai_config.get('model', 'gemma3:4b')
+    timeout = ai_config.get('timeout', 30)
+
+    response = requests.post(
+        f"{base_url}/api/chat",
+        json={
+            "model": model,
+            "messages": [
+                {"role": "user", "content": prompt, "images": [img_data['base64']]},
+            ],
+            "stream": False,
+            "options": {
+                "num_predict": 10,
+                "temperature": 0.0,
+            },
+        },
+        timeout=timeout,
+    )
+
+    response.raise_for_status()
+    answer = response.json().get('message', {}).get('content', '').strip().upper()
+    result = _parse_ai_answer(answer)
+    if result:
+        result['keyword'] = 'ai-vision'
+    return result
+
+
+def _classify_vision_anthropic(prompt, img_data, ai_config):
+    """Classify image using Anthropic Claude vision API."""
+    import anthropic
+
+    api_key = ai_config.get('api_key') or os.getenv('ANTHROPIC_API_KEY', '')
+    model = ai_config.get('vision_model') or ai_config.get('model', 'claude-haiku-4-5-20251001')
+
+    client = anthropic.Anthropic(api_key=api_key)
+    response = client.messages.create(
+        model=model,
+        max_tokens=10,
+        messages=[{
+            "role": "user",
+            "content": [
+                {
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": img_data['media_type'],
+                        "data": img_data['base64'],
+                    },
+                },
+                {"type": "text", "text": prompt},
+            ],
+        }],
+    )
+
+    answer = response.content[0].text.strip().upper()
+    result = _parse_ai_answer(answer)
+    if result:
+        result['keyword'] = 'ai-vision'
+    return result
+
+
+def _classify_vision_openai(prompt, img_data, ai_config):
+    """Classify image using OpenAI vision API."""
+    import openai
+
+    api_key = ai_config.get('api_key') or os.getenv('OPENAI_API_KEY', '')
+    model = ai_config.get('vision_model') or ai_config.get('model', 'gpt-4o-mini')
+
+    client = openai.OpenAI(api_key=api_key)
+    response = client.chat.completions.create(
+        model=model,
+        max_tokens=10,
+        messages=[{
+            "role": "user",
+            "content": [
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:{img_data['media_type']};base64,{img_data['base64']}",
+                    },
+                },
+                {"type": "text", "text": prompt},
+            ],
+        }],
+    )
+
+    answer = response.choices[0].message.content.strip().upper()
+    result = _parse_ai_answer(answer)
+    if result:
+        result['keyword'] = 'ai-vision'
+    return result
+
+
+# =============================================================================
 # EXTERNAL - Exit Signal Parsing
 # =============================================================================
 # Used by: Test.py
 
-def ParseExitSignal(message):
+def ParseExitSignal(message, image_urls=None):
     """
     Parse a Discord reply message for exit signal keywords.
 
-    Two-stage approach:
+    Three-stage approach:
       1. Fast keyword matching (no API calls, instant)
-      2. AI classification fallback (optional, if keywords miss)
+      2. AI text classification fallback (if keywords miss)
+      3. AI vision classification (if message has image attachments)
 
     Args:
-        message: Raw reply message string from Discord
+        message:    Raw reply message string from Discord
+        image_urls: List of image attachment URLs (or None)
 
     Returns:
-        dict with keys: type ('exit', 'trim'), keyword (matched word or 'ai')
+        dict with keys: type ('exit', 'trim'), keyword (matched word, 'ai', or 'ai-vision')
         or None if no exit signal detected
     """
-    if not message:
-        return None
-
     exit_config = Config.BACKTEST_CONFIG.get('discord_exit_signals', {})
     if not exit_config.get('enabled', True):
         return None
 
-    exit_keywords = exit_config.get('exit_keywords', [])
-    trim_keywords = exit_config.get('trim_keywords', [])
-    negation_words = exit_config.get('negation_words', [])
-    scan_max = exit_config.get('scan_max_words', 0)
+    has_text = bool(message and message.strip())
+    has_images = bool(image_urls)
 
-    # Normalize: lowercase, collapse whitespace
-    text = message.lower().strip()
-    words = text.split()
+    if not has_text and not has_images:
+        return None
 
-    if scan_max > 0:
-        words = words[:scan_max]
-        text = ' '.join(words)
+    # Stage 1: Fast keyword matching (text only)
+    if has_text:
+        exit_keywords = exit_config.get('exit_keywords', [])
+        trim_keywords = exit_config.get('trim_keywords', [])
+        negation_words = exit_config.get('negation_words', [])
+        scan_max = exit_config.get('scan_max_words', 0)
 
-    # Check for negation — if any negation word appears before or near an
-    # exit keyword, skip this message.  Simple heuristic: if ANY negation
-    # word is present anywhere in the scanned text, treat it as not an exit.
-    for neg in negation_words:
-        if neg.lower() in words:
-            return None
+        text = message.lower().strip()
+        words = text.split()
 
-    # Stage 1: Fast keyword matching
-    for kw in exit_keywords:
-        if kw.lower() in text:
-            return {'type': 'exit', 'keyword': kw}
+        if scan_max > 0:
+            words = words[:scan_max]
+            text = ' '.join(words)
 
-    for kw in trim_keywords:
-        if kw.lower() in text:
-            return {'type': 'trim', 'keyword': kw}
+        # Check for negation
+        negated = False
+        for neg in negation_words:
+            if neg.lower() in words:
+                negated = True
+                break
 
-    # Stage 2: AI classification fallback (if enabled)
+        if not negated:
+            for kw in exit_keywords:
+                if kw.lower() in text:
+                    return {'type': 'exit', 'keyword': kw}
+
+            for kw in trim_keywords:
+                if kw.lower() in text:
+                    return {'type': 'trim', 'keyword': kw}
+
+    # Stage 2 & 3: AI classification (if enabled)
     ai_config = exit_config.get('ai', {})
     if ai_config.get('enabled', False):
-        ai_result = _classify_with_ai(message)
-        if ai_result:
-            return ai_result
+        # Stage 2: AI text classification (text-only messages)
+        if has_text and not has_images:
+            ai_result = _classify_with_ai(message)
+            if ai_result:
+                return ai_result
+
+        # Stage 3: AI vision classification (messages with images)
+        if has_images:
+            vision_result = _classify_vision_with_ai(
+                image_urls, text_content=message
+            )
+            if vision_result:
+                return vision_result
 
     return None
 
