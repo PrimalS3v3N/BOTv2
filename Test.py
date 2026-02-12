@@ -909,6 +909,13 @@ class Backtest:
             print("[AI] Loading local AI model for exit signals...")
             self.ai_strategy.load_model()
             print("[AI] Model loaded successfully.")
+        else:
+            # Always create the optimal exit logger even without AI model
+            # so it collects hindsight-based training data every backtest
+            import AIModel
+            ai_config = self.config.get('ai_exit_signal', {})
+            log_dir = ai_config.get('log_dir', 'ai_training_data')
+            self.ai_strategy._optimal_logger = AIModel.OptimalExitLogger(log_dir=log_dir)
 
         # Results storage
         self.messages_df = None
@@ -1402,6 +1409,24 @@ class Backtest:
                 exit_reason=position.exit_reason or 'unknown',
                 final_pnl_pct=final_pnl,
                 exit_price=position.exit_price or np.nan,
+            )
+
+        # Log optimal exit data (runs every backtest, even without AI model)
+        if self.ai_strategy.optimal_logger is not None and matrix.records:
+            final_pnl_pct = position.get_pnl_pct(position.exit_price) if position.exit_price else np.nan
+            self.ai_strategy.optimal_logger.log_trade(
+                databook_records=matrix.records,
+                position_info={
+                    'trade_label': position.get_trade_label(),
+                    'ticker': position.ticker,
+                    'option_type': position.option_type,
+                    'strike': position.strike,
+                    'expiration': position.expiration,
+                    'entry_price': position.entry_price,
+                    'exit_price': position.exit_price,
+                    'exit_reason': position.exit_reason,
+                    'pnl_pct': float(final_pnl_pct) if not np.isnan(final_pnl_pct) else None,
+                },
             )
 
     def _format_exit_reason(self, reason):

@@ -554,6 +554,159 @@ class AIAnalysisLogger:
 
 
 # =============================================================================
+# INTERNAL - Optimal Exit Logger (Hindsight-Based Self-Training)
+# =============================================================================
+
+class OptimalExitLogger:
+    """
+    After each trade closes, walks the databook to find the bar where the option
+    price peaked during holding. Logs the full indicator snapshot at that optimal
+    exit point, plus context windows before/after the peak.
+
+    This creates high-quality supervised training data:
+    - Input: indicator conditions at the optimal sell moment
+    - Label: "sell" (this WAS the best time)
+    - Negative examples: bars before/after where "hold" was correct
+
+    The model learns the statistical fingerprint of price peaks rather than
+    relying on noisy after-the-fact binary correctness signals.
+
+    Output: JSONL file at ./ai_training_data/optimal_exits.jsonl
+    Each record contains:
+        - trade metadata (ticker, option_type, strike, entry/exit info)
+        - optimal_bar: full indicator snapshot at the peak
+        - context_before: N bars of indicators leading into the peak
+        - context_after: N bars of indicators after the peak (the decline)
+        - actual_exit: indicator snapshot at the actual exit bar
+        - efficiency: how close the actual exit was to optimal (%)
+    """
+
+    # Indicator columns to capture from each databook bar
+    INDICATOR_KEYS = [
+        'stock_price', 'true_price', 'option_price', 'volume',
+        'pnl_pct', 'stop_loss', 'stop_loss_mode',
+        'market_bias',
+        'vwap', 'ema_30', 'vwap_ema_avg', 'emavwap',
+        'ewo', 'ewo_15min_avg', 'rsi', 'rsi_10min_avg',
+        'supertrend', 'supertrend_direction',
+        'ichimoku_tenkan', 'ichimoku_kijun', 'ichimoku_senkou_a', 'ichimoku_senkou_b',
+        'milestone_pct', 'trailing_stop_price',
+    ]
+
+    def __init__(self, log_dir='ai_training_data', context_bars=5):
+        """
+        Args:
+            log_dir: Directory for training data output.
+            context_bars: Number of bars before/after peak to capture as context.
+        """
+        self.log_dir = log_dir
+        self.log_path = os.path.join(log_dir, 'optimal_exits.jsonl')
+        self.context_bars = context_bars
+        os.makedirs(log_dir, exist_ok=True)
+
+    def _extract_bar(self, row):
+        """Extract indicator values from a databook row (dict or Series) into a clean dict."""
+        bar = {}
+        for key in self.INDICATOR_KEYS:
+            val = row.get(key, None)
+            if val is None:
+                bar[key] = None
+            elif isinstance(val, float) and np.isnan(val):
+                bar[key] = None
+            elif isinstance(val, (np.integer, np.floating)):
+                bar[key] = float(val)
+            else:
+                bar[key] = val
+        # Always include timestamp
+        ts = row.get('timestamp', None)
+        bar['timestamp'] = ts.isoformat() if hasattr(ts, 'isoformat') else str(ts) if ts else None
+        bar['minutes_held'] = float(row.get('minutes_held', 0)) if row.get('minutes_held') is not None and not (isinstance(row.get('minutes_held'), float) and np.isnan(row.get('minutes_held'))) else None
+        return bar
+
+    def log_trade(self, databook_records, position_info):
+        """
+        Analyze a completed trade's databook and log optimal exit data.
+
+        Args:
+            databook_records: list of dicts (Databook.records) from the trade.
+            position_info: dict with keys:
+                trade_label, ticker, option_type, strike, expiration,
+                entry_price, entry_time, exit_price, exit_time, exit_reason,
+                pnl_pct (final)
+        """
+        # Filter to holding bars only
+        holding_bars = [r for r in databook_records if r.get('holding', False)]
+        if len(holding_bars) < 3:
+            return  # Not enough data to analyze
+
+        # Find the bar with the highest option price (optimal exit)
+        peak_idx = 0
+        peak_price = -np.inf
+        for i, bar in enumerate(holding_bars):
+            opt_price = bar.get('option_price', -np.inf)
+            if not np.isnan(opt_price) and opt_price > peak_price:
+                peak_price = opt_price
+                peak_idx = i
+
+        peak_bar = holding_bars[peak_idx]
+        entry_price = position_info.get('entry_price', 0)
+        exit_price = position_info.get('exit_price', 0)
+
+        # Calculate exit efficiency: how much of the peak profit was captured
+        # Efficiency = (actual_exit - entry) / (peak - entry) * 100
+        peak_profit = peak_price - entry_price if entry_price else 0
+        actual_profit = exit_price - entry_price if entry_price else 0
+        if peak_profit > 0:
+            efficiency = (actual_profit / peak_profit) * 100
+        elif peak_profit == 0:
+            efficiency = 100.0  # Exited at peak
+        else:
+            efficiency = 0.0  # Peak was below entry (bad trade)
+
+        # Context windows around the peak
+        ctx_start = max(0, peak_idx - self.context_bars)
+        ctx_end = min(len(holding_bars), peak_idx + self.context_bars + 1)
+        context_before = [self._extract_bar(holding_bars[i]) for i in range(ctx_start, peak_idx)]
+        context_after = [self._extract_bar(holding_bars[i]) for i in range(peak_idx + 1, ctx_end)]
+
+        # Actual exit bar (last holding bar)
+        actual_exit_bar = self._extract_bar(holding_bars[-1])
+
+        # Build the training record
+        record = {
+            'trade': {
+                'trade_label': position_info.get('trade_label'),
+                'ticker': position_info.get('ticker'),
+                'option_type': position_info.get('option_type'),
+                'strike': position_info.get('strike'),
+                'expiration': str(position_info.get('expiration')) if position_info.get('expiration') else None,
+                'entry_price': float(entry_price) if entry_price else None,
+                'exit_price': float(exit_price) if exit_price else None,
+                'exit_reason': position_info.get('exit_reason'),
+                'final_pnl_pct': position_info.get('pnl_pct'),
+                'total_holding_bars': len(holding_bars),
+            },
+            'optimal_exit': {
+                'bar_index': peak_idx,
+                'bars_from_entry': peak_idx,
+                'bars_before_actual_exit': len(holding_bars) - 1 - peak_idx,
+                'peak_option_price': float(peak_price),
+                'peak_pnl_pct': float(((peak_price - entry_price) / entry_price) * 100) if entry_price else None,
+                'indicators': self._extract_bar(peak_bar),
+            },
+            'context_before_peak': context_before,
+            'context_after_peak': context_after,
+            'actual_exit': {
+                'indicators': actual_exit_bar,
+            },
+            'efficiency': round(efficiency, 2),
+        }
+
+        with open(self.log_path, 'a') as f:
+            f.write(json.dumps(record) + '\n')
+
+
+# =============================================================================
 # EXTERNAL - Module Interface
 # =============================================================================
 
@@ -562,6 +715,7 @@ __all__ = [
     'LocalAIModel',
     'AISignalParser',
     'AIAnalysisLogger',
+    'OptimalExitLogger',
     'SYSTEM_PROMPT',
     'USER_PROMPT_TEMPLATE',
 ]

@@ -524,6 +524,7 @@ class AIExitSignal:
 
         self._model = None
         self._logger = None
+        self._optimal_logger = None
 
     def load_model(self):
         """Load the AI model into GPU memory. Call once before backtesting."""
@@ -543,9 +544,13 @@ class AIExitSignal:
         )
         self._model.load()
 
+        log_dir = self.config.get('log_dir', 'ai_training_data')
+
         if self.config.get('log_inferences', True):
-            log_dir = self.config.get('log_dir', 'ai_training_data')
             self._logger = AIModel.AIAnalysisLogger(log_dir=log_dir)
+
+        # Always create the optimal exit logger (works even without the AI model running)
+        self._optimal_logger = AIModel.OptimalExitLogger(log_dir=log_dir)
 
     def unload_model(self):
         """Free model from GPU memory. Call after backtesting."""
@@ -577,6 +582,10 @@ class AIExitSignal:
     @property
     def logger(self):
         return self._logger
+
+    @property
+    def optimal_logger(self):
+        return self._optimal_logger
 
 
 class AIExitSignalDetector:
