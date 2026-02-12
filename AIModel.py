@@ -17,9 +17,21 @@ INTERNAL - AI Inference Engine
 import json
 import os
 import datetime as dt
+import hashlib
+import uuid
 import numpy as np
 
 import Config
+
+
+# Generate a unique run ID per backtest session (set once at import time,
+# refreshed each time a logger is instantiated via Backtest.__init__).
+_RUN_ID = None
+
+
+def _new_run_id():
+    """Generate a short unique run ID for this backtest session."""
+    return uuid.uuid4().hex[:12]
 
 
 # =============================================================================
@@ -461,11 +473,44 @@ class AIAnalysisLogger:
         self.log_dir = log_dir
         self.log_path = os.path.join(log_dir, 'inference_log.jsonl')
         self._pending_records = {}  # trade_label -> list of records awaiting outcome
+        self.run_id = _new_run_id()
         self._ensure_dir()
+        self._existing_trade_keys = self._load_existing_keys()
 
     def _ensure_dir(self):
         """Create log directory if it doesn't exist."""
         os.makedirs(self.log_dir, exist_ok=True)
+
+    def _load_existing_keys(self):
+        """Load trade keys already in the log to prevent duplicates across reruns."""
+        keys = set()
+        if not os.path.exists(self.log_path):
+            return keys
+        try:
+            with open(self.log_path, 'r') as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        record = json.loads(line)
+                        trade_key = record.get('trade_key')
+                        if trade_key:
+                            keys.add(trade_key)
+                    except json.JSONDecodeError:
+                        continue
+        except OSError:
+            pass
+        return keys
+
+    @staticmethod
+    def _make_trade_key(trade_label, timestamp):
+        """
+        Create a deterministic dedup key from trade label + timestamp.
+        Same trade on same data always produces the same key.
+        """
+        raw = f"{trade_label}|{timestamp}"
+        return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
     def log_inference(self, trade_label, timestamp, data_block, ai_signal, pnl_pct, option_price):
         """
@@ -479,9 +524,14 @@ class AIAnalysisLogger:
             pnl_pct: Current P&L percentage at time of inference
             option_price: Current option price at time of inference
         """
+        ts_str = timestamp.isoformat() if hasattr(timestamp, 'isoformat') else str(timestamp)
+        trade_key = self._make_trade_key(trade_label, ts_str)
+
         record = {
+            'trade_key': trade_key,
+            'run_id': self.run_id,
             'trade_label': trade_label,
-            'timestamp': timestamp.isoformat() if hasattr(timestamp, 'isoformat') else str(timestamp),
+            'timestamp': ts_str,
             'input_data': data_block,
             'prediction': {
                 'outlook_1m': ai_signal.get('outlook_1m'),
@@ -542,10 +592,13 @@ class AIAnalysisLogger:
                 elif action == 'hold':
                     record['outcome']['action_correct'] = pnl_change >= 0
 
-        # Append all records to JSONL file
-        with open(self.log_path, 'a') as f:
-            for record in records:
-                f.write(json.dumps(record) + '\n')
+        # Append records to JSONL file, skipping duplicates from prior runs
+        new_records = [r for r in records if r.get('trade_key') not in self._existing_trade_keys]
+        if new_records:
+            with open(self.log_path, 'a') as f:
+                for record in new_records:
+                    self._existing_trade_keys.add(record['trade_key'])
+                    f.write(json.dumps(record) + '\n')
 
     def flush_remaining(self):
         """Flush any trades that never got finalized (e.g., still open at end of backtest)."""
@@ -602,7 +655,41 @@ class OptimalExitLogger:
         self.log_dir = log_dir
         self.log_path = os.path.join(log_dir, 'optimal_exits.jsonl')
         self.context_bars = context_bars
+        self.run_id = _new_run_id()
         os.makedirs(log_dir, exist_ok=True)
+        self._existing_trade_keys = self._load_existing_keys()
+
+    def _load_existing_keys(self):
+        """Load trade keys already in the log to prevent duplicates across reruns."""
+        keys = set()
+        if not os.path.exists(self.log_path):
+            return keys
+        try:
+            with open(self.log_path, 'r') as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        record = json.loads(line)
+                        trade_key = record.get('trade_key')
+                        if trade_key:
+                            keys.add(trade_key)
+                    except json.JSONDecodeError:
+                        continue
+        except OSError:
+            pass
+        return keys
+
+    @staticmethod
+    def _make_trade_key(trade_label, entry_timestamp):
+        """
+        Create a deterministic dedup key from trade label + entry time.
+        Same trade on same data always produces the same key, regardless
+        of how many times the backtest is rerun.
+        """
+        raw = f"{trade_label}|{entry_timestamp}"
+        return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
     def _extract_bar(self, row):
         """Extract indicator values from a databook row (dict or Series) into a clean dict."""
@@ -639,6 +726,14 @@ class OptimalExitLogger:
         if len(holding_bars) < 3:
             return  # Not enough data to analyze
 
+        # Dedup: build key from trade_label + entry timestamp of first holding bar
+        trade_label = position_info.get('trade_label', '')
+        entry_ts = holding_bars[0].get('timestamp', '')
+        entry_ts_str = entry_ts.isoformat() if hasattr(entry_ts, 'isoformat') else str(entry_ts)
+        trade_key = self._make_trade_key(trade_label, entry_ts_str)
+        if trade_key in self._existing_trade_keys:
+            return  # Already logged this exact trade from a prior run
+
         # Find the bar with the highest option price (optimal exit)
         peak_idx = 0
         peak_price = -np.inf
@@ -674,6 +769,8 @@ class OptimalExitLogger:
 
         # Build the training record
         record = {
+            'trade_key': trade_key,
+            'run_id': self.run_id,
             'trade': {
                 'trade_label': position_info.get('trade_label'),
                 'ticker': position_info.get('ticker'),
@@ -702,6 +799,7 @@ class OptimalExitLogger:
             'efficiency': round(efficiency, 2),
         }
 
+        self._existing_trade_keys.add(trade_key)
         with open(self.log_path, 'a') as f:
             f.write(json.dumps(record) + '\n')
 
