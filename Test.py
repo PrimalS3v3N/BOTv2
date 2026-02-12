@@ -743,6 +743,121 @@ class Databook:
 
 
 # =============================================================================
+# INTERNAL - StatsBook
+# =============================================================================
+
+class StatsBook:
+    """
+    Historical statistics matrix built when a signal is received.
+    Pulls stock history at multiple timeframes (5m, 1h, 1d) to determine
+    where we are in the trading span.
+
+    Structure:
+        Index (rows): Metric names (Max(H-L), Median(C-O), etc.)
+        Columns: '5m', '1h', '1d' (timeframe intervals)
+    """
+
+    RANGE = 15  # Tuning variable for nlargest/nsmallest
+
+    TIMEFRAMES = {
+        '5m': {'interval': '5m', 'period': '5d'},
+        '1h': {'interval': '1h', 'period': '3mo'},
+        '1d': {'interval': '1d', 'period': '1y'},
+    }
+
+    METRICS = [
+        'Max(H-L)', 'Median.Max(H-L)', 'Median(H-L)', 'Min(H-L)', 'Median.Min(H-L)',
+        'Max(C-O)', 'Median.Max(C-O)', 'Median(C-O)', 'Min(C-O)', 'Median.Min(C-O)',
+        'Max(Vol)', 'Max(Vol)x', 'Median.Max(Vol)', 'Median(Vol)', 'Min(Vol)', 'Median.Min(Vol)',
+    ]
+
+    def __init__(self):
+        self._cache = {}
+
+    def _fetch_data(self, ticker, interval, period):
+        """Fetch and prepare historical data from yfinance."""
+        if not YFINANCE_AVAILABLE:
+            return None
+
+        cache_key = f"{ticker}_{interval}_{period}"
+        if cache_key in self._cache:
+            return self._cache[cache_key]
+
+        try:
+            stock = yf.Ticker(ticker)
+            df = stock.history(interval=interval, period=period)
+            if df.empty:
+                return None
+            df.columns = df.columns.str.lower()
+            df['delta_co'] = round(df['close'] - df['open'], 3)
+            df['delta_hl'] = round(df['high'] - df['low'], 3)
+            df['volume'] = df['volume'].astype('float64')
+            self._cache[cache_key] = df
+            return df
+        except Exception as e:
+            print(f"  StatsBook: Error fetching {ticker} ({interval}/{period}): {e}")
+            return None
+
+    def _compute_stats(self, df):
+        """Compute all stats for a single timeframe DataFrame."""
+        R = self.RANGE
+        stats = {}
+
+        # H-L Stats
+        stats['Max(H-L)'] = round(float(np.max(df['delta_hl'])), 3)
+        stats['Median.Max(H-L)'] = round(float(np.median(df['delta_hl'].nlargest(R))), 3)
+        stats['Median(H-L)'] = round(float(np.median(df['delta_hl'])), 3)
+        stats['Min(H-L)'] = round(float(np.min(df['delta_hl'])), 3)
+        stats['Median.Min(H-L)'] = round(float(np.median(df['delta_hl'].nsmallest(R))), 3)
+
+        # C-O Stats
+        stats['Max(C-O)'] = round(float(np.max(df['delta_co'])), 3)
+        stats['Median.Max(C-O)'] = round(float(np.median(df['delta_co'].nlargest(R))), 3)
+        stats['Median(C-O)'] = round(float(np.median(df['delta_co'])), 3)
+        stats['Min(C-O)'] = round(float(np.min(df['delta_co'])), 3)
+        stats['Median.Min(C-O)'] = round(float(np.median(df['delta_co'].nsmallest(R))), 3)
+
+        # Volume Stats
+        max_vol = float(np.max(df['volume']))
+        med_vol = float(np.median(df['volume']))
+        vol_ratio = round(max_vol / med_vol, 2) if med_vol > 0 else 0
+        stats['Max(Vol)'] = int(max_vol)
+        stats['Max(Vol)x'] = vol_ratio
+        stats['Median.Max(Vol)'] = int(np.median(df['volume'].nlargest(R)))
+        stats['Median(Vol)'] = int(np.median(df['volume']))
+        stats['Min(Vol)'] = int(np.min(df['volume']))
+        stats['Median.Min(Vol)'] = int(np.median(df['volume'].nsmallest(R)))
+
+        return stats
+
+    def build(self, ticker):
+        """
+        Build the StatsBook matrix for a given ticker.
+
+        Returns:
+            pd.DataFrame with rows as metric names (Stats) and
+            columns as timeframes (5m, 1h, 1d).
+        """
+        data = {}
+
+        for label, params in self.TIMEFRAMES.items():
+            df = self._fetch_data(ticker, params['interval'], params['period'])
+            if df is not None and not df.empty:
+                data[label] = self._compute_stats(df)
+            else:
+                data[label] = {m: np.nan for m in self.METRICS}
+
+        statsbook = pd.DataFrame(data, index=self.METRICS)
+        statsbook.index.name = 'Stats'
+
+        return statsbook
+
+    def clear_cache(self):
+        """Clear the data cache."""
+        self._cache.clear()
+
+
+# =============================================================================
 # EXTERNAL - Backtest Class (Main Interface)
 # =============================================================================
 
@@ -776,12 +891,14 @@ class Backtest:
         self.discord_fetcher = DiscordFetcher()
         self.signal_parser = SignalParser()
         self.data_fetcher = HistoricalDataFetcher()
+        self.statsbook_builder = StatsBook()
 
         # Results storage
         self.messages_df = None
         self.signals_df = None
         self.positions = []
         self.databooks = {}
+        self.statsbooks = {}
         self.results = None
         self._has_run = False
 
@@ -820,6 +937,7 @@ class Backtest:
         print("\nProcessing signals...")
         self.positions = []
         self.databooks = {}
+        self.statsbooks = {}
 
         for idx, signal in self.signals_df.iterrows():
             print(f"\n  [{idx+1}/{len(self.signals_df)}] {signal['ticker']} "
@@ -830,6 +948,12 @@ class Backtest:
             if position:
                 self.positions.append(position)
                 self.databooks[position.get_trade_label()] = matrix
+
+                # Build StatsBook for ticker (once per ticker)
+                ticker = signal['ticker']
+                if ticker not in self.statsbooks:
+                    print(f"    Building StatsBook for {ticker}...")
+                    self.statsbooks[ticker] = self.statsbook_builder.build(ticker)
 
                 pnl = position.get_pnl(position.exit_price) if position.exit_price else 0
                 print(f"    Exit: {position.exit_reason} | P&L: ${pnl:+.2f}")
@@ -1257,6 +1381,7 @@ class Backtest:
             'Signals': signals_df,
             'Positions': positions_df,
             'Databooks': databooks,
+            'StatsBooks': dict(self.statsbooks),
             'Summary': summary
         }
 
@@ -1357,6 +1482,7 @@ class Backtest:
             'Signals': pd.DataFrame(),
             'Positions': pd.DataFrame(),
             'Databooks': {},
+            'StatsBooks': {},
             'Summary': {}
         }
 
@@ -1454,6 +1580,7 @@ class Backtest:
             # Format data for Dashboard.py which expects 'matrices' key
             dashboard_data = {
                 'matrices': self.results.get('Databooks', {}),
+                'statsbooks': self.results.get('StatsBooks', {}),
             }
             with open(filepath, 'wb') as f:
                 pickle.dump(dashboard_data, f)
