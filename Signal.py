@@ -226,8 +226,8 @@ def BuildOrder(message):
 # Cache for AI classification results to avoid re-classifying identical messages
 _ai_classify_cache = {}
 
-# Reusable prompt — the {message} placeholder is filled per call
-_AI_SYSTEM_PROMPT = (
+# Base prompts — custom_instructions from Config are appended at runtime
+_AI_SYSTEM_PROMPT_BASE = (
     "You classify Discord messages that reply to stock/options trading alerts. "
     "Determine if the reply indicates the trader is exiting or trimming their position. "
     "Respond with ONLY one word: EXIT, TRIM, or NONE."
@@ -239,6 +239,15 @@ _AI_USER_TEMPLATE = (
     "NONE = not a sell action\n\n"
     "Message: \"{message}\""
 )
+
+
+def _build_system_prompt(ai_config):
+    """Build system prompt, appending custom_instructions if configured."""
+    prompt = _AI_SYSTEM_PROMPT_BASE
+    custom = ai_config.get('custom_instructions', '').strip()
+    if custom:
+        prompt += f"\n\nAdditional instructions:\n{custom}"
+    return prompt
 
 
 def _classify_with_ai(message):
@@ -298,12 +307,14 @@ def _classify_ollama(user_prompt, ai_config):
     model = ai_config.get('model', 'gemma3:1b')
     timeout = ai_config.get('timeout', 10)
 
+    system_prompt = _build_system_prompt(ai_config)
+
     response = requests.post(
         f"{base_url}/api/chat",
         json={
             "model": model,
             "messages": [
-                {"role": "system", "content": _AI_SYSTEM_PROMPT},
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
             "stream": False,
@@ -327,11 +338,13 @@ def _classify_anthropic(user_prompt, ai_config):
     api_key = ai_config.get('api_key') or os.getenv('ANTHROPIC_API_KEY', '')
     model = ai_config.get('model', 'claude-haiku-4-5-20251001')
 
+    system_prompt = _build_system_prompt(ai_config)
+
     client = anthropic.Anthropic(api_key=api_key)
     response = client.messages.create(
         model=model,
         max_tokens=10,
-        system=_AI_SYSTEM_PROMPT,
+        system=system_prompt,
         messages=[{"role": "user", "content": user_prompt}],
     )
 
@@ -346,12 +359,14 @@ def _classify_openai(user_prompt, ai_config):
     api_key = ai_config.get('api_key') or os.getenv('OPENAI_API_KEY', '')
     model = ai_config.get('model', 'gpt-4o-mini')
 
+    system_prompt = _build_system_prompt(ai_config)
+
     client = openai.OpenAI(api_key=api_key)
     response = client.chat.completions.create(
         model=model,
         max_tokens=10,
         messages=[
-            {"role": "system", "content": _AI_SYSTEM_PROMPT},
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ],
     )
@@ -441,8 +456,11 @@ def _classify_vision_with_ai(image_urls, text_content=None):
         print(f"    Image download failed: {e}")
         return None
 
-    # Build prompt with optional text context
+    # Build prompt with optional text context + custom instructions
     prompt = _AI_VISION_PROMPT
+    custom = ai_config.get('custom_instructions', '').strip()
+    if custom:
+        prompt += f"\n\nAdditional instructions:\n{custom}"
     if text_content and text_content.strip():
         prompt += f"\n\nAccompanying text: \"{text_content.strip()}\""
 

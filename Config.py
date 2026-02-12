@@ -251,6 +251,17 @@ BACKTEST_CONFIG = {
             'ollama_url': 'http://localhost:11434',        # Ollama server URL
             'timeout': 30,                                 # Request timeout (seconds)
             'api_key': '',                                 # For anthropic/openai only (or use env var)
+
+            # Custom instructions appended to BOTH text and vision prompts.
+            # Use this to teach the model your server's lingo, screenshot
+            # patterns, or any domain-specific rules. Plain English works.
+            #
+            # Examples:
+            #   'In this server, "out" always means full exit, never trim.'
+            #   'Robinhood P&L screenshots with $0.00 market value = EXIT.'
+            #   'Ignore memes and reaction images — classify as NONE.'
+            #   'Messages from bot accounts are never real exits — NONE.'
+            'custom_instructions': '',
         },
     },
 
