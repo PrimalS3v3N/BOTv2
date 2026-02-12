@@ -634,7 +634,10 @@ class Databook:
                    supertrend=np.nan, supertrend_direction=np.nan,
                    ichimoku_tenkan=np.nan, ichimoku_kijun=np.nan,
                    ichimoku_senkou_a=np.nan, ichimoku_senkou_b=np.nan,
-                   milestone_pct=np.nan, trailing_stop_price=np.nan):
+                   milestone_pct=np.nan, trailing_stop_price=np.nan,
+                   ai_outlook_1m=None, ai_outlook_5m=None,
+                   ai_outlook_30m=None, ai_outlook_1h=None,
+                   ai_action=None, ai_reason=None):
         """Add a tracking record."""
         pnl_pct = self.position.get_pnl_pct(option_price) if holding else np.nan
 
@@ -699,6 +702,13 @@ class Databook:
             'ichimoku_kijun': ichimoku_kijun,
             'ichimoku_senkou_a': ichimoku_senkou_a,
             'ichimoku_senkou_b': ichimoku_senkou_b,
+            # AI exit signal tracking
+            'ai_outlook_1m': ai_outlook_1m,
+            'ai_outlook_5m': ai_outlook_5m,
+            'ai_outlook_30m': ai_outlook_30m,
+            'ai_outlook_1h': ai_outlook_1h,
+            'ai_action': ai_action,
+            'ai_reason': ai_reason,
         }
 
         self.records.append(record)
@@ -905,6 +915,20 @@ class Backtest:
         self.data_fetcher = HistoricalDataFetcher()
         self.statsbook_builder = StatsBook()
 
+        # Initialize AI exit signal strategy (loads model into GPU if enabled)
+        self.ai_strategy = Strategy.AIExitSignal(self.config.get('ai_exit_signal', {}))
+        if self.ai_strategy.enabled:
+            print("[AI] Loading local AI model for exit signals...")
+            self.ai_strategy.load_model()
+            print("[AI] Model loaded successfully.")
+        else:
+            # Always create the optimal exit logger even without AI model
+            # so it collects hindsight-based training data every backtest
+            import AIModel
+            ai_config = self.config.get('ai_exit_signal', {})
+            log_dir = ai_config.get('log_dir', 'ai_training_data')
+            self.ai_strategy._optimal_logger = AIModel.OptimalExitLogger(log_dir=log_dir)
+
         # Results storage
         self.messages_df = None
         self.signals_df = None
@@ -977,6 +1001,11 @@ class Backtest:
 
         self.results = self._compile_results()
         self._has_run = True
+
+        # Unload AI model from GPU memory
+        if self.ai_strategy.enabled:
+            print("[AI] Unloading AI model...")
+            self.ai_strategy.unload_model()
 
         # Display summary in terminal
         self.summary()
@@ -1108,6 +1137,13 @@ class Backtest:
         sb_strategy = Strategy.StatsBookExit(self.config.get('statsbook_exit', {}))
         sb_detector = sb_strategy.create_detector(self.statsbooks.get(position.ticker))
 
+        # Get AI Exit Signal detector for this position
+        ai_detector = self.ai_strategy.create_detector(
+            ticker=position.ticker,
+            option_type=position.option_type,
+            strike=position.strike,
+        )
+
         # Get Closure - Peak settings from config
         CP_config = self.config.get('closure_peak', {})
         CP_enabled = CP_config.get('enabled', True)
@@ -1218,7 +1254,42 @@ class Backtest:
                         cur_milestone_pct = tp_tracker.current_milestone_pct
                         cur_trailing_price = tp_tracker.trailing_exit_price
 
-                # Record tracking data with stop loss and indicators
+                # Update AI exit signal detector
+                ai_exit = False
+                ai_reason = None
+                ai_signal_data = {}
+                if ai_detector and not position.is_closed:
+                    ai_bar_data = {
+                        'stock_price': stock_price,
+                        'stock_high': stock_high,
+                        'stock_low': stock_low,
+                        'true_price': Analysis.true_price(stock_price, stock_high, stock_low),
+                        'volume': volume,
+                        'option_price': option_price,
+                        'pnl_pct': position.get_pnl_pct(option_price),
+                        'vwap': vwap,
+                        'ema_30': ema_30,
+                        'ewo': ewo,
+                        'ewo_15min_avg': ewo_15min_avg,
+                        'rsi': rsi,
+                        'rsi_10min_avg': rsi_10min_avg,
+                        'supertrend_direction': st_direction,
+                        'market_bias': matrix.records[-1]['market_bias'] if matrix.records else np.nan,
+                        'ichimoku_tenkan': ichi_tenkan,
+                        'ichimoku_kijun': ichi_kijun,
+                        'ichimoku_senkou_a': ichi_senkou_a,
+                        'ichimoku_senkou_b': ichi_senkou_b,
+                    }
+                    ai_exit, ai_reason = ai_detector.update(
+                        bar_data=ai_bar_data,
+                        pnl_pct=position.get_pnl_pct(option_price),
+                        minutes_held=position.get_minutes_held(timestamp),
+                        option_price=option_price,
+                        timestamp=timestamp,
+                    )
+                    ai_signal_data = ai_detector.current_signal
+
+                # Record tracking data with stop loss, indicators, and AI signals
                 matrix.add_record(
                     timestamp=timestamp,
                     stock_price=stock_price,
@@ -1245,6 +1316,12 @@ class Backtest:
                     ichimoku_senkou_b=ichi_senkou_b,
                     milestone_pct=cur_milestone_pct,
                     trailing_stop_price=cur_trailing_price,
+                    ai_outlook_1m=ai_signal_data.get('outlook_1m'),
+                    ai_outlook_5m=ai_signal_data.get('outlook_5m'),
+                    ai_outlook_30m=ai_signal_data.get('outlook_30m'),
+                    ai_outlook_1h=ai_signal_data.get('outlook_1h'),
+                    ai_action=ai_signal_data.get('action'),
+                    ai_reason=ai_signal_data.get('reason'),
                 )
 
                 # Update momentum peak detector
@@ -1278,6 +1355,11 @@ class Backtest:
                 elif mp_exit and not position.is_closed:
                     exit_price = option_price * (1 - self.slippage_pct)
                     position.close(exit_price, timestamp, mp_reason)
+
+                # AI Exit Signal: local LLM recommends selling
+                elif ai_exit and not position.is_closed:
+                    exit_price = option_price * (1 - self.slippage_pct)
+                    position.close(exit_price, timestamp, 'AI Exit Signal')
 
                 # Check for reversal exit (True Price < VWAP)
                 elif SL_enabled and SL_reversal_exit_enabled and SL_reversal and not position.is_closed:
@@ -1346,6 +1428,34 @@ class Backtest:
         # Record highest milestone reached during holding
         if tp_tracker and tp_tracker.current_milestone_pct is not None:
             position.highest_milestone_pct = tp_tracker.current_milestone_pct
+
+        # Finalize AI inference log with trade outcome
+        if ai_detector and self.ai_strategy.logger is not None:
+            final_pnl = position.get_pnl_pct(position.exit_price) if position.exit_price else np.nan
+            self.ai_strategy.logger.finalize_trade(
+                trade_label=ai_detector.trade_label,
+                exit_reason=position.exit_reason or 'unknown',
+                final_pnl_pct=final_pnl,
+                exit_price=position.exit_price or np.nan,
+            )
+
+        # Log optimal exit data (runs every backtest, even without AI model)
+        if self.ai_strategy.optimal_logger is not None and matrix.records:
+            final_pnl_pct = position.get_pnl_pct(position.exit_price) if position.exit_price else np.nan
+            self.ai_strategy.optimal_logger.log_trade(
+                databook_records=matrix.records,
+                position_info={
+                    'trade_label': position.get_trade_label(),
+                    'ticker': position.ticker,
+                    'option_type': position.option_type,
+                    'strike': position.strike,
+                    'expiration': position.expiration,
+                    'entry_price': position.entry_price,
+                    'exit_price': position.exit_price,
+                    'exit_reason': position.exit_reason,
+                    'pnl_pct': float(final_pnl_pct) if not np.isnan(final_pnl_pct) else None,
+                },
+            )
 
     def _format_exit_reason(self, reason):
         """

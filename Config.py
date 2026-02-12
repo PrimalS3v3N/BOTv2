@@ -222,6 +222,24 @@ BACKTEST_CONFIG = {
         'rolling_window': 5,               # Bars for rolling H-L range calculation
     },
 
+    # AI Exit Signal: Local LLM-based exit signal generation
+    # Runs a quantized model via llama-cpp-python on GPU during backtesting.
+    # The model analyzes multi-timeframe technical data and recommends hold/sell.
+    'ai_exit_signal': {
+        'enabled': False,                              # Disabled by default (requires model file)
+        'model_path': '',                              # Absolute path to GGUF model file
+        'n_gpu_layers': -1,                            # GPU layers to offload (-1 = all)
+        'n_ctx': 2048,                                 # Context window (tokens)
+        'temperature': 0.1,                            # Low = deterministic (good for backtesting)
+        'max_tokens': 256,                             # Max response tokens
+        'seed': 42,                                    # Fixed seed for reproducible backtests
+        'eval_interval': 5,                            # Evaluate every N bars (1 = every bar, 5 = every 5 min)
+        'min_bars_before_eval': 5,                     # Minimum bars held before first AI evaluation
+        'exit_on_sell': True,                          # Actually exit when AI says 'sell'
+        'log_inferences': True,                        # Save inference data for self-training
+        'log_dir': 'ai_training_data',                 # Directory for training data logs
+    },
+
     # Take Profit - Milestones: Ratcheting trailing stops at profit levels
     # Once a milestone gain% is reached, trailing stop is set at trailing_pct% above entry.
     # Milestones only ratchet upward — once reached, trailing stop never drops below that level.
@@ -286,6 +304,8 @@ DATAFRAME_COLUMNS = {
         'vwap', 'ema_30', 'vwap_ema_avg', 'emavwap', 'ewo', 'ewo_15min_avg', 'rsi', 'rsi_10min_avg',
         'supertrend', 'supertrend_direction',
         'ichimoku_tenkan', 'ichimoku_kijun', 'ichimoku_senkou_a', 'ichimoku_senkou_b',
+        'ai_outlook_1m', 'ai_outlook_5m', 'ai_outlook_30m', 'ai_outlook_1h',
+        'ai_action', 'ai_reason',
     ],
 
     # Metadata columns appended to databook (Test.py)
@@ -306,6 +326,8 @@ DATAFRAME_COLUMNS = {
         'vwap', 'ema_30', 'vwap_ema_avg', 'emavwap', 'ewo', 'ewo_15min_avg', 'rsi', 'rsi_10min_avg',
         'supertrend', 'supertrend_direction',
         'ichimoku_tenkan', 'ichimoku_kijun', 'ichimoku_senkou_a', 'ichimoku_senkou_b',
+        'ai_outlook_1m', 'ai_outlook_5m', 'ai_outlook_30m', 'ai_outlook_1h',
+        'ai_action', 'ai_reason',
     ],
 }
 
@@ -321,6 +343,7 @@ def get_config(section):
         'data': DATA_CONFIG,
         'analysis': ANALYSIS_CONFIG,
         'backtest': BACKTEST_CONFIG,
+        'ai': BACKTEST_CONFIG.get('ai_exit_signal', {}),
     }
     return configs.get(section.lower(), {})
 

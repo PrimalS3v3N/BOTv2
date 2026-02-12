@@ -47,10 +47,11 @@ def is_number(n):
 def validate_ticker(ticker):
     """Validate ticker by checking if it exists via RH quotes or is a known index."""
     try:
-        ticker_clean = re.findall(r'[A-Za-z]+', ticker)
-        if not ticker_clean:
+        # Match tickers with optional dot-suffix (e.g. BRK.B, BRK.A)
+        ticker_match = re.match(r'[A-Za-z]+(?:\.[A-Za-z]+)?', ticker)
+        if not ticker_match:
             return None
-        ticker_sym = ticker_clean[0].upper()
+        ticker_sym = ticker_match.group(0).upper()
         # Index symbols (SPX, NDX, etc.) are valid option underlyings but
         # not tradeable stocks — Robinhood's /quotes/ endpoint returns 404.
         if ticker_sym in Config.INDEX_SYMBOLS:
