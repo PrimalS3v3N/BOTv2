@@ -270,7 +270,8 @@ Modules: Config.py, Data.py, Analysis.py, Orders.py, Test.py
 import Config
 
 # Export for use by other modules
-__all__ = ['StopLoss', 'check_stop_loss', 'TakeProfitMilestones', 'MilestoneTracker', 'MomentumPeak', 'MomentumPeakDetector']
+__all__ = ['StopLoss', 'check_stop_loss', 'TakeProfitMilestones', 'MilestoneTracker',
+           'MomentumPeak', 'MomentumPeakDetector', 'StatsBookExit', 'StatsBookDetector']
 
 
 # =============================================================================
@@ -491,3 +492,140 @@ class MomentumPeakDetector:
                 return False, None
 
         return True, 'Momentum Peak'
+
+
+# =============================================================================
+# INTERNAL - StatsBook Exit Strategy
+# =============================================================================
+
+class StatsBookExit:
+    """
+    Factory for creating StatsBookDetector instances.
+
+    Uses StatsBook historical statistics to create exit/hold signals
+    based on where current price action falls within the stock's
+    historical bounds:
+
+    - Below Min: Noise floor — movement too small to act on
+    - Min to Median: Normal trading zone — HOLD
+    - Median to Max: Extended zone — prepare to sell, tighten stops
+    - At/above Max: Historical extreme — EXIT (selling zone)
+
+    Evaluates EWO momentum and H-L range against Median.Max bounds
+    (typical peaks, more actionable than absolute Max outliers).
+
+    Config: BACKTEST_CONFIG['statsbook_exit']
+        {
+            'enabled': True,
+            'timeframe': '5m',             # StatsBook timeframe to compare against
+            'ewo_max_exit': True,          # Exit when EWO >= Median.Max(EWO)
+            'hl_max_exit': True,           # Exit when rolling H-L >= Median.Max(H-L)
+            'min_profit_pct': 10,          # Minimum option profit % to consider exit
+            'min_hold_bars': 5,            # Minimum bars held before StatsBook exit
+            'rolling_window': 5,           # Bars for rolling H-L range calculation
+        }
+    """
+
+    def __init__(self, config=None):
+        sb_config = config or Config.get_setting('backtest', 'statsbook_exit', {})
+        self.enabled = sb_config.get('enabled', False)
+        self.config = sb_config
+
+    def create_detector(self, statsbook_df):
+        """Create a new StatsBookDetector for a position. Returns None if disabled or no data."""
+        if not self.enabled or statsbook_df is None or statsbook_df.empty:
+            return None
+        return StatsBookDetector(self.config, statsbook_df)
+
+
+class StatsBookDetector:
+    """
+    Evaluates current price action against StatsBook historical bounds.
+
+    Uses Median.Max / Median / Median.Min as the reference bounds
+    (more robust than absolute Max/Min which can be one-off outliers).
+
+    Zones:
+    - EWO >= Median.Max(EWO): Momentum at typical peak → EXIT
+    - EWO around Median(EWO): Normal momentum → HOLD
+    - EWO <= Median.Min(EWO): Weak momentum, below noise floor
+
+    - Rolling H-L >= Median.Max(H-L): Range at typical extreme → EXIT
+    - Rolling H-L around Median(H-L): Normal range → HOLD
+    - Rolling H-L <= Median.Min(H-L): Tight range, no signal
+    """
+
+    def __init__(self, config, statsbook_df):
+        self.min_profit_pct = config.get('min_profit_pct', 10)
+        self.min_hold_bars = config.get('min_hold_bars', 5)
+        self.ewo_max_exit = config.get('ewo_max_exit', True)
+        self.hl_max_exit = config.get('hl_max_exit', True)
+        self.rolling_window = config.get('rolling_window', 5)
+        tf = config.get('timeframe', '5m')
+
+        # Extract EWO bounds from StatsBook
+        self.ewo_max = self._get_bound(statsbook_df, 'Median.Max(EWO)', tf)
+        self.ewo_median = self._get_bound(statsbook_df, 'Median(EWO)', tf)
+        self.ewo_min = self._get_bound(statsbook_df, 'Median.Min(EWO)', tf)
+
+        # Extract H-L bounds from StatsBook
+        self.hl_max = self._get_bound(statsbook_df, 'Median.Max(H-L)', tf)
+        self.hl_median = self._get_bound(statsbook_df, 'Median(H-L)', tf)
+        self.hl_min = self._get_bound(statsbook_df, 'Median.Min(H-L)', tf)
+
+        # Rolling window state
+        self.bar_count = 0
+        self.high_window = []
+        self.low_window = []
+
+    def _get_bound(self, df, metric, tf):
+        """Safely extract a bound value from the StatsBook DataFrame."""
+        try:
+            val = df.loc[metric, tf]
+            return float(val) if not np.isnan(float(val)) else np.nan
+        except (KeyError, TypeError, ValueError):
+            return np.nan
+
+    def update(self, pnl_pct, ewo, stock_high, stock_low):
+        """
+        Check for exit/hold signal based on StatsBook bounds.
+
+        Args:
+            pnl_pct: Current P&L percentage
+            ewo: Current EWO value
+            stock_high: Current bar high price
+            stock_low: Current bar low price
+
+        Returns:
+            (should_exit, exit_reason): Tuple. exit_reason is None if no exit.
+        """
+        self.bar_count += 1
+
+        # Track rolling window for H-L range calculation
+        if not np.isnan(stock_high) and not np.isnan(stock_low) and stock_low > 0:
+            self.high_window.append(stock_high)
+            self.low_window.append(stock_low)
+            if len(self.high_window) > self.rolling_window:
+                self.high_window.pop(0)
+                self.low_window.pop(0)
+
+        # Need minimum bars before evaluating
+        if self.bar_count < self.min_hold_bars:
+            return False, None
+
+        # Need minimum profit to consider exit
+        if np.isnan(pnl_pct) or pnl_pct < self.min_profit_pct:
+            return False, None
+
+        # Check EWO against Median.Max bound (selling zone)
+        if self.ewo_max_exit and not np.isnan(ewo) and not np.isnan(self.ewo_max):
+            if ewo >= self.ewo_max:
+                return True, 'StatsBook - EWO Max'
+
+        # Check rolling H-L range against Median.Max bound (range exhaustion)
+        if self.hl_max_exit and len(self.high_window) >= self.rolling_window:
+            rolling_hl = max(self.high_window) - min(self.low_window)
+            if not np.isnan(self.hl_max) and rolling_hl >= self.hl_max:
+                return True, 'StatsBook - Range Max'
+
+        return False, None
