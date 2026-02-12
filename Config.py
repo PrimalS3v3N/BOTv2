@@ -209,6 +209,31 @@ BACKTEST_CONFIG = {
         'require_rsi_below_avg': True,     # Require RSI < RSI_10min_avg
     },
 
+    # Discord Exit Signals: Keywords in reply messages that indicate position closure
+    # When a message replies to an original signal and contains these keywords,
+    # the system treats it as a manual exit signal from the signal provider.
+    'discord_exit_signals': {
+        'enabled': True,
+        # Keywords that indicate a full exit (case-insensitive)
+        'exit_keywords': [
+            'sold', 'out', 'exit', 'closed', 'close', 'stopped',
+            'flat', 'done', 'cut',
+        ],
+        # Keywords that indicate a partial exit / trim (case-insensitive)
+        'trim_keywords': [
+            'trim', 'trimmed', 'trimming', 'partial', 'half',
+            'scaling out', 'scale out', 'took profit', 'took some',
+            'locked in', 'locking in',
+        ],
+        # Words that negate an exit (e.g. "don't sell", "not out yet")
+        'negation_words': [
+            'not', "don't", "dont", "didn't", "didnt", 'never',
+            'no', "wouldn't", 'hold', 'holding',
+        ],
+        # Max words to scan from start of message (0 = scan entire message)
+        'scan_max_words': 0,
+    },
+
     # Take Profit - Milestones: Ratcheting trailing stops at profit levels
     # Once a milestone gain% is reached, trailing stop is set at trailing_pct% above entry.
     # Milestones only ratchet upward — once reached, trailing stop never drops below that level.
@@ -244,6 +269,7 @@ DATAFRAME_COLUMNS = {
     # Discord messages fetched by DiscordFetcher (Test.py)
     'discord_messages': [
         'id', 'timestamp', 'content', 'author', 'author_id',
+        'reply_to_id', 'referenced_content',
     ],
 
     # Parsed trading signals from SignalParser (Test.py, Signal.py)

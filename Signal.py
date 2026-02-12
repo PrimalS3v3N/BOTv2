@@ -216,6 +216,61 @@ def BuildOrder(message):
     return order
 
 
+def ParseExitSignal(message):
+    """
+    Parse a Discord reply message for exit signal keywords.
+
+    Checks if the message content indicates the signal provider is exiting
+    or trimming a position. Used on messages that reply to an original
+    signal alert.
+
+    Args:
+        message: Raw reply message string from Discord
+
+    Returns:
+        dict with keys: type ('exit', 'trim', or None), keyword (matched word)
+        or None if no exit signal detected
+    """
+    if not message:
+        return None
+
+    exit_config = Config.BACKTEST_CONFIG.get('discord_exit_signals', {})
+    if not exit_config.get('enabled', True):
+        return None
+
+    exit_keywords = exit_config.get('exit_keywords', [])
+    trim_keywords = exit_config.get('trim_keywords', [])
+    negation_words = exit_config.get('negation_words', [])
+    scan_max = exit_config.get('scan_max_words', 0)
+
+    # Normalize: lowercase, collapse whitespace
+    text = message.lower().strip()
+    words = text.split()
+
+    if scan_max > 0:
+        words = words[:scan_max]
+        text = ' '.join(words)
+
+    # Check for negation — if any negation word appears before or near an
+    # exit keyword, skip this message.  Simple heuristic: if ANY negation
+    # word is present anywhere in the scanned text, treat it as not an exit.
+    for neg in negation_words:
+        if neg.lower() in words:
+            return None
+
+    # Check full exit keywords first (higher priority)
+    for kw in exit_keywords:
+        if kw.lower() in text:
+            return {'type': 'exit', 'keyword': kw}
+
+    # Check trim/partial exit keywords
+    for kw in trim_keywords:
+        if kw.lower() in text:
+            return {'type': 'trim', 'keyword': kw}
+
+    return None
+
+
 def BuildOrderFromLog(log_df):
     """
     Build order from a Discord log DataFrame.

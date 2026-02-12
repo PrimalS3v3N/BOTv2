@@ -316,12 +316,20 @@ class DiscordFetcher:
                     if timestamp < cutoff_date:
                         break
 
+                    # Extract reply/reference data if this message is a reply
+                    msg_ref = msg.get('message_reference')
+                    reply_to_id = msg_ref.get('message_id') if msg_ref else None
+                    ref_msg = msg.get('referenced_message')
+                    referenced_content = ref_msg.get('content', '') if ref_msg else None
+
                     all_messages.append({
                         'id': msg.get('id'),
                         'timestamp': timestamp,
                         'content': msg.get('content', ''),
                         'author': msg.get('author', {}).get('username', 'unknown'),
-                        'author_id': msg.get('author', {}).get('id')
+                        'author_id': msg.get('author', {}).get('id'),
+                        'reply_to_id': reply_to_id,
+                        'referenced_content': referenced_content,
                     })
                 except Exception:
                     continue
@@ -429,6 +437,65 @@ class SignalParser:
             return df
         else:
             return pd.DataFrame(columns=Config.DATAFRAME_COLUMNS['signals'])
+
+    def parse_exit_signals(self, messages_df, signals_df):
+        """
+        Scan reply messages for exit signal keywords.
+
+        Finds messages that reply to a known signal message and contain
+        exit/trim keywords. Returns a dict mapping signal message_id to
+        a list of exit events, sorted by timestamp.
+
+        Args:
+            messages_df: Full Discord messages DataFrame (with reply_to_id)
+            signals_df:  Parsed signals DataFrame (with message_id)
+
+        Returns:
+            dict: {signal_message_id: [{'timestamp', 'type', 'keyword', 'content'}, ...]}
+        """
+        exit_map = {}
+
+        if messages_df is None or messages_df.empty:
+            return exit_map
+        if signals_df is None or signals_df.empty:
+            return exit_map
+
+        # Build set of known signal message IDs for fast lookup
+        signal_ids = set(signals_df['message_id'].dropna().astype(str).tolist())
+
+        for _, row in messages_df.iterrows():
+            reply_to = row.get('reply_to_id')
+            if not reply_to:
+                continue
+
+            reply_to = str(reply_to)
+            if reply_to not in signal_ids:
+                continue
+
+            # This message is a reply to a known signal — check for exit keywords
+            content = row.get('content', '')
+            exit_result = Signal.ParseExitSignal(content)
+
+            if exit_result:
+                if reply_to not in exit_map:
+                    exit_map[reply_to] = []
+                exit_map[reply_to].append({
+                    'timestamp': row.get('timestamp'),
+                    'type': exit_result['type'],       # 'exit' or 'trim'
+                    'keyword': exit_result['keyword'],
+                    'content': content,
+                    'author': row.get('author', 'unknown'),
+                })
+
+        # Sort each signal's exit events by timestamp
+        for sig_id in exit_map:
+            exit_map[sig_id].sort(key=lambda e: e['timestamp'])
+
+        if exit_map:
+            total = sum(len(v) for v in exit_map.values())
+            print(f"  Found {total} Discord exit signal(s) across {len(exit_map)} signal(s)")
+
+        return exit_map
 
 
 # =============================================================================
@@ -933,6 +1000,12 @@ class Backtest:
 
         print(f"  Found {len(self.signals_df)} signals")
 
+        # Step 2b: Parse Discord exit signals from reply messages
+        print("\nScanning replies for exit signals...")
+        self.discord_exit_map = self.signal_parser.parse_exit_signals(
+            messages_df, self.signals_df
+        )
+
         # Step 3: Process each signal
         print("\nProcessing signals...")
         self.positions = []
@@ -943,7 +1016,11 @@ class Backtest:
             print(f"\n  [{idx+1}/{len(self.signals_df)}] {signal['ticker']} "
                   f"${signal['strike']} {signal['option_type']}")
 
-            position, matrix = self._process_signal(signal)
+            # Look up Discord exit signals for this signal's message_id
+            sig_msg_id = str(signal.get('message_id', ''))
+            discord_exits = self.discord_exit_map.get(sig_msg_id, [])
+
+            position, matrix = self._process_signal(signal, discord_exits=discord_exits)
 
             if position:
                 self.positions.append(position)
@@ -971,7 +1048,7 @@ class Backtest:
 
         return self.results
 
-    def _process_signal(self, signal):
+    def _process_signal(self, signal, discord_exits=None):
         """Process a single signal through the backtest."""
         ticker = signal['ticker']
         signal_time = signal['signal_time']
@@ -1033,11 +1110,13 @@ class Backtest:
         matrix = Databook(position)
 
         # Simulate through all bars
-        self._simulate_position(position, matrix, stock_data, signal, entry_idx, entry_stock_price)
+        self._simulate_position(position, matrix, stock_data, signal, entry_idx, entry_stock_price,
+                                discord_exits=discord_exits)
 
         return position, matrix
 
-    def _simulate_position(self, position, matrix, stock_data, signal, entry_idx, entry_stock_price):
+    def _simulate_position(self, position, matrix, stock_data, signal, entry_idx, entry_stock_price,
+                           discord_exits=None):
         """Simulate position through historical data."""
         # Calculate expiry as a precise datetime (market close at 16:00 ET)
         # so that 0DTE and intraday options get fractional T instead of T=0
@@ -1102,6 +1181,24 @@ class Backtest:
         CP_start_hour = 15
         CP_start_minute = 60 - CP_minutes
         CP_start_time = dt.time(CP_start_hour, CP_start_minute)
+
+        # Discord Exit Signals: pre-process reply-based exit events for this position
+        # Build a list of (timestamp, type, keyword) for exits that fall after entry
+        discord_exit_events = []
+        DE_config = self.config.get('discord_exit_signals', {})
+        DE_enabled = DE_config.get('enabled', True)
+        if DE_enabled and discord_exits:
+            for evt in discord_exits:
+                evt_ts = evt['timestamp']
+                if evt_ts.tzinfo is None:
+                    evt_ts = evt_ts.replace(tzinfo=EASTERN)
+                discord_exit_events.append({
+                    'timestamp': evt_ts,
+                    'type': evt['type'],
+                    'keyword': evt['keyword'],
+                })
+        # Index pointer for scanning discord exit events chronologically
+        discord_exit_idx = 0
 
         # Initialize stop loss manager
         SL_manager = Strategy.StopLoss(
@@ -1238,8 +1335,27 @@ class Backtest:
                     mp_pnl = position.get_pnl_pct(option_price)
                     mp_exit, mp_reason = mp_detector.update(mp_pnl, rsi, rsi_10min_avg, ewo)
 
+                # Discord Exit Signal: reply from signal provider says "sold", "out", etc.
+                # Highest priority — provider's explicit instruction overrides algo exits.
+                discord_exit_triggered = False
+                if DE_enabled and discord_exit_events and not position.is_closed:
+                    while discord_exit_idx < len(discord_exit_events):
+                        de = discord_exit_events[discord_exit_idx]
+                        if de['timestamp'] <= timestamp:
+                            discord_exit_idx += 1
+                            if de['type'] == 'exit':
+                                exit_price = option_price * (1 - self.slippage_pct)
+                                position.close(exit_price, timestamp,
+                                               f"Discord Exit ({de['keyword']})")
+                                discord_exit_triggered = True
+                                break
+                            # 'trim' type — log but don't close (partial exits
+                            # not modeled yet; treat as informational)
+                        else:
+                            break
+
                 # Take Profit - Milestones: trailing stop triggered
-                if tp_exit and not position.is_closed:
+                if not discord_exit_triggered and tp_exit and not position.is_closed:
                     # Fill at the trailing stop price, not the current bar price.
                     # The stop order triggers at the trailing level; using option_price
                     # would fill at whatever the bar gapped down to, understating profits.
