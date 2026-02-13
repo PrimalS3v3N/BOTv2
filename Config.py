@@ -244,7 +244,7 @@ BACKTEST_CONFIG = {
     # The model analyzes multi-timeframe technical data and recommends hold/sell.
     'ai_exit_signal': {
         'enabled': True,                               # Disabled by default (requires model file)
-        'model_path': 'models/Meta-Llama-3-8B-Instruct.Q5_K_M.gguf',  # Absolute path to GGUF model file
+        'model_path': r'C:\Users\Vadim\OneDrive\Software\Meta-Llama-3-8B-Instruct.Q5_K_M.gguf',  # Absolute path to GGUF model file
         'n_gpu_layers': -1,                            # GPU layers to offload (-1 = all)
         'n_ctx': 2048,                                 # Context window (tokens)
         'temperature': 0.1,                            # Low = deterministic (good for backtesting)
