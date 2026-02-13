@@ -635,6 +635,8 @@ class Databook:
                    ichimoku_tenkan=np.nan, ichimoku_kijun=np.nan,
                    ichimoku_senkou_a=np.nan, ichimoku_senkou_b=np.nan,
                    milestone_pct=np.nan, trailing_stop_price=np.nan,
+                   risk=None, risk_reasons=None, risk_trend=None,
+                   spy_price=np.nan, spy_gauge=None,
                    ai_outlook_1m=None, ai_outlook_5m=None,
                    ai_outlook_30m=None, ai_outlook_1h=None,
                    ai_action=None, ai_reason=None):
@@ -651,10 +653,11 @@ class Databook:
             self.day_low = min(self.day_low, stock_low)
 
         # Market bias: +1 (bullish), 0 (sideways), -1 (bearish)
-        # Sideways zone = VWAP +/- 10% of today's high-low range
+        # Sideways zone = VWAP +/- configurable % of today's high-low range
+        bias_band_pct = Config.BACKTEST_CONFIG.get('bias_sideways_band', 0.05)
         if not np.isnan(vwap) and vwap > 0 and self.day_high > self.day_low:
             day_range = self.day_high - self.day_low
-            sideways_band = 0.10 * day_range
+            sideways_band = bias_band_pct * day_range
             if stock_price >= vwap + sideways_band:
                 market_bias = 1
             elif stock_price <= vwap - sideways_band:
@@ -663,6 +666,9 @@ class Databook:
                 market_bias = 0
         else:
             market_bias = np.nan
+
+        # Unpack SPY gauge dict into individual columns
+        spy_gauge = spy_gauge or {}
 
         record = {
             'timestamp': timestamp,
@@ -685,8 +691,20 @@ class Databook:
             # Take profit milestone tracking
             'milestone_pct': milestone_pct,
             'trailing_stop_price': trailing_stop_price,
+            # Risk assessment
+            'risk': risk,
+            'risk_reasons': risk_reasons,
+            'risk_trend': risk_trend,
             # Market assessment
             'market_bias': market_bias,
+            # SPY gauge
+            'spy_price': spy_price,
+            'spy_since_open': spy_gauge.get('since_open'),
+            'spy_1m': spy_gauge.get('1m'),
+            'spy_5m': spy_gauge.get('5m'),
+            'spy_15m': spy_gauge.get('15m'),
+            'spy_30m': spy_gauge.get('30m'),
+            'spy_1h': spy_gauge.get('1h'),
             # Technical indicators
             'vwap': vwap,
             'ema_30': ema_30,
@@ -929,6 +947,9 @@ class Backtest:
             log_dir = ai_config.get('log_dir', 'ai_training_data')
             self.ai_strategy._optimal_logger = AIModel.OptimalExitLogger(log_dir=log_dir)
 
+        # SPY gauge data cache
+        self._spy_data = None
+
         # Results storage
         self.messages_df = None
         self.signals_df = None
@@ -1011,6 +1032,118 @@ class Backtest:
         self.summary()
 
         return self.results
+
+    def _fetch_spy_data(self, signal_time):
+        """Fetch SPY intraday data for the signal's trading day."""
+        spy_config = self.config.get('spy_gauge', {})
+        if not spy_config.get('enabled', False):
+            return None
+
+        spy_ticker = spy_config.get('ticker', 'SPY')
+
+        # Cache key by date
+        signal_date = signal_time.date()
+        if self._spy_data is not None and hasattr(self, '_spy_date') and self._spy_date == signal_date:
+            return self._spy_data
+
+        try:
+            start = signal_time.replace(hour=9, minute=0, second=0, microsecond=0)
+            end = signal_time.replace(hour=16, minute=30, second=0, microsecond=0)
+            df = self.data_fetcher.fetch_stock_data(spy_ticker, start, end, interval='1m')
+            if df is not None and not df.empty:
+                self._spy_data = df
+                self._spy_date = signal_date
+                return df
+        except Exception as e:
+            print(f"    SPY data fetch failed: {e}")
+        return None
+
+    def _calculate_spy_gauge(self, spy_data, timestamp):
+        """
+        Calculate SPY gauge at a given timestamp.
+
+        For each timeframe, compare current SPY price to average price over that lookback.
+        Returns dict: {'since_open': 'Bullish'/'Bearish', '1m': ..., '5m': ..., etc.}
+        Also returns current spy_price.
+        """
+        if spy_data is None or spy_data.empty:
+            return np.nan, {}
+
+        # Get SPY data up to current timestamp
+        available = spy_data[spy_data.index <= timestamp]
+        if available.empty:
+            return np.nan, {}
+
+        spy_price = available['close'].iloc[-1]
+        market_open = timestamp.replace(hour=9, minute=30, second=0, microsecond=0)
+
+        spy_config = self.config.get('spy_gauge', {})
+        timeframes = spy_config.get('timeframes', {})
+        gauge = {}
+
+        for label, minutes in timeframes.items():
+            if minutes == 0:
+                # Since open
+                lookback_start = market_open
+            else:
+                lookback_start = timestamp - timedelta(minutes=minutes)
+
+            window = available[(available.index >= lookback_start) & (available.index <= timestamp)]
+            if window.empty or len(window) < 1:
+                gauge[label] = None
+                continue
+
+            avg_price = window['close'].mean()
+            gauge[label] = 'Bullish' if spy_price >= avg_price else 'Bearish'
+
+        return spy_price, gauge
+
+    def _assess_risk(self, rsi, rsi_avg, ewo_avg, statsbook, timestamp, signal_time):
+        """
+        Assess risk at entry time.
+
+        Conditions (any TRUE = HIGH risk):
+        1. (RSI + RSI_avg) / 2 > 80
+        2. EWO_avg > Median.Max(EWO) from StatsBook (1m:5m = 5m value / 5)
+        3. Purchase during first 15 minutes of market open (9:30-9:45 EST)
+
+        Returns: (risk_level, reasons_list)
+        """
+        risk_config = self.config.get('risk_assessment', {})
+        if not risk_config.get('enabled', False):
+            return None, None
+
+        reasons = []
+
+        # Condition 1: RSI overbought
+        rsi_threshold = risk_config.get('rsi_overbought_threshold', 80)
+        if not np.isnan(rsi) and not np.isnan(rsi_avg):
+            combined_rsi = (rsi + rsi_avg) / 2
+            if combined_rsi > rsi_threshold:
+                reasons.append(f'RSI({combined_rsi:.0f}>{rsi_threshold})')
+
+        # Condition 2: EWO overbought vs Median.Max(EWO) from StatsBook
+        if risk_config.get('ewo_overbought_enabled', True) and not np.isnan(ewo_avg):
+            if statsbook is not None and not statsbook.empty:
+                try:
+                    # Get Median.Max(EWO) from 5m timeframe, normalize to 1m by dividing by 5
+                    ewo_max_5m = float(statsbook.loc['Median.Max(EWO)', '5m'])
+                    ewo_max_1m = ewo_max_5m / 5
+                    if not np.isnan(ewo_max_1m) and ewo_avg > ewo_max_1m:
+                        reasons.append(f'EWO({ewo_avg:.3f}>{ewo_max_1m:.3f})')
+                except (KeyError, TypeError, ValueError):
+                    pass
+
+        # Condition 3: First 15 minutes of market open
+        open_window = risk_config.get('market_open_window_minutes', 15)
+        market_open = signal_time.replace(hour=9, minute=30, second=0, microsecond=0)
+        market_open_end = market_open + timedelta(minutes=open_window)
+        if market_open <= timestamp <= market_open_end:
+            reasons.append(f'Open({open_window}min)')
+
+        if reasons:
+            return 'HIGH', '|'.join(reasons)
+        return 'NORMAL', None
 
     def _process_signal(self, signal):
         """Process a single signal through the backtest."""
@@ -1125,8 +1258,9 @@ class Backtest:
         SL_reversal_exit_enabled = SL_config.get('reversal_exit_enabled', True)
         SL_downtrend_exit_enabled = SL_config.get('downtrend_exit_enabled', True)
 
-        # Get Take Profit - Milestones settings from config
-        tp_strategy = Strategy.TakeProfitMilestones(self.config.get('take_profit_milestones', {}))
+        # Get Take Profit - Milestones settings from config (start with normal)
+        tp_config = self.config.get('take_profit_milestones', {})
+        tp_strategy = Strategy.TakeProfitMilestones(tp_config)
         tp_tracker = tp_strategy.create_tracker(position.entry_price)
 
         # Get Momentum Peak settings from config
@@ -1154,6 +1288,22 @@ class Backtest:
         CP_start_hour = 15
         CP_start_minute = 60 - CP_minutes
         CP_start_time = dt.time(CP_start_hour, CP_start_minute)
+
+        # Risk assessment state
+        risk_level = None
+        risk_reasons = None
+        risk_trend = None
+        risk_assessed = False
+        risk_config = self.config.get('risk_assessment', {})
+        risk_enabled = risk_config.get('enabled', False)
+        risk_downtrend_bars = risk_config.get('downtrend_monitor_bars', 3)
+        risk_downtrend_drop_pct = risk_config.get('downtrend_drop_pct', 10)
+        risk_downtrend_reason = risk_config.get('downtrend_exit_reason', 'SL-DT')
+        risk_negative_bar_count = 0  # Consecutive negative bars after entry for HIGH risk
+        risk_tp_switched = False     # Whether TP/SL have been switched for this trade
+
+        # Fetch SPY data for this signal's trading day
+        spy_data = self._fetch_spy_data(signal['signal_time'])
 
         # Initialize stop loss manager
         SL_manager = Strategy.StopLoss(
@@ -1219,8 +1369,74 @@ class Backtest:
             if not is_pre_entry:
                 position.update_eod_price(option_price)
 
+            # Calculate SPY gauge for current bar
+            spy_price, spy_gauge_data = self._calculate_spy_gauge(spy_data, timestamp)
+
             if holding:
                 position.update(timestamp, option_price, stock_price)
+
+                # --- Risk Assessment (once at entry) ---
+                if not risk_assessed and risk_enabled:
+                    risk_assessed = True
+                    risk_level, risk_reasons = self._assess_risk(
+                        rsi, rsi_10min_avg, ewo_15min_avg,
+                        self.statsbooks.get(position.ticker),
+                        timestamp, signal['signal_time']
+                    )
+                    if risk_level == 'HIGH':
+                        print(f"    RISK: HIGH [{risk_reasons}]")
+
+                # --- Risk trend monitoring (only for HIGH risk trades) ---
+                if risk_level == 'HIGH' and not position.is_closed:
+                    pnl_pct_now = position.get_pnl_pct(option_price)
+
+                    # Determine trend: Uptrend if option above entry, Downtrend if below
+                    if option_price >= position.entry_price:
+                        risk_trend = 'Uptrend'
+                    else:
+                        risk_trend = 'Downtrend'
+
+                    # Switch TP/SL based on risk trend (once per trend direction change)
+                    if not risk_tp_switched:
+                        risk_tp_switched = True
+                        if risk_trend == 'Uptrend':
+                            # Switch to TIGHT take profit milestones
+                            tight_milestones = tp_config.get('milestones_tight')
+                            if tight_milestones:
+                                tp_tracker = Strategy.MilestoneTracker(
+                                    sorted(tight_milestones, key=lambda m: m['gain_pct']),
+                                    position.entry_price
+                                )
+                                print(f"    RISK: Uptrend -> TP switched to TIGHT")
+                        elif risk_trend == 'Downtrend':
+                            # Switch to TIGHT stop loss
+                            sl_tight = self.config.get('stop_loss_tight', {})
+                            if sl_tight:
+                                SL_manager = Strategy.StopLoss(
+                                    entry_price=position.entry_price,
+                                    stop_loss_pct=sl_tight.get('stop_loss_pct', 0.15),
+                                    trailing_trigger_pct=sl_tight.get('trailing_trigger_pct', 0.15),
+                                    trailing_stop_pct=sl_tight.get('trailing_stop_pct', 0.15),
+                                    breakeven_min_minutes=sl_tight.get('breakeven_min_minutes', 15),
+                                    option_type=position.option_type
+                                )
+                                print(f"    RISK: Downtrend -> SL switched to TIGHT")
+
+                    # Track consecutive negative bars for risk downtrend exit
+                    if risk_trend == 'Downtrend':
+                        if pnl_pct_now < 0:
+                            risk_negative_bar_count += 1
+                        else:
+                            risk_negative_bar_count = 0
+
+                        # Exit: 3 consecutive negative bars OR 10% drop below entry
+                        if not position.is_closed:
+                            if risk_negative_bar_count >= risk_downtrend_bars:
+                                exit_price = option_price * (1 - self.slippage_pct)
+                                position.close(exit_price, timestamp, risk_downtrend_reason)
+                            elif pnl_pct_now <= -risk_downtrend_drop_pct:
+                                exit_price = option_price * (1 - self.slippage_pct)
+                                position.close(exit_price, timestamp, risk_downtrend_reason)
 
                 # Update stop loss and check if triggered
                 SL_price = np.nan
@@ -1289,7 +1505,7 @@ class Backtest:
                     )
                     ai_signal_data = ai_detector.current_signal
 
-                # Record tracking data with stop loss, indicators, and AI signals
+                # Record tracking data with stop loss, indicators, risk, SPY, and AI signals
                 matrix.add_record(
                     timestamp=timestamp,
                     stock_price=stock_price,
@@ -1316,6 +1532,11 @@ class Backtest:
                     ichimoku_senkou_b=ichi_senkou_b,
                     milestone_pct=cur_milestone_pct,
                     trailing_stop_price=cur_trailing_price,
+                    risk=risk_level,
+                    risk_reasons=risk_reasons,
+                    risk_trend=risk_trend,
+                    spy_price=spy_price,
+                    spy_gauge=spy_gauge_data,
                     ai_outlook_1m=ai_signal_data.get('outlook_1m'),
                     ai_outlook_5m=ai_signal_data.get('outlook_5m'),
                     ai_outlook_30m=ai_signal_data.get('outlook_30m'),
@@ -1418,6 +1639,8 @@ class Backtest:
                     ichimoku_kijun=ichi_kijun,
                     ichimoku_senkou_a=ichi_senkou_a,
                     ichimoku_senkou_b=ichi_senkou_b,
+                    spy_price=spy_price,
+                    spy_gauge=spy_gauge_data,
                 )
 
         # Close at end of data if still open

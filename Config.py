@@ -159,18 +159,35 @@ BACKTEST_CONFIG = {
     'commission_per_contract': 0.65,               # Per-contract commission
 
     # Stop Loss - three phases: initial -> breakeven -> trailing
+    # Normal mode (default)
     'stop_loss': {
         'enabled': True,
-        'stop_loss_pct': 0.27,                     # Max loss from entry (25%)
+        'stop_loss_pct': 0.27,                     # Max loss from entry (27%)
         'stop_loss_warning_pct': 0.15,             # Warning threshold (15%)
         'profit_target_pct': 1.00,                 # Profit target (100%)
-        'trailing_stop_pct': 0.27,                 # Trailing below highest (20%)
+        'trailing_stop_pct': 0.27,                 # Trailing below highest (27%)
         'time_stop_minutes': 60,                   # Time stop (minutes)
         'breakeven_threshold_pct': None,           # None = auto-calculate as entry/(1-stop_loss_pct)
         'breakeven_min_minutes': 30,               # Min hold before breakeven transition
-        'trailing_trigger_pct': 0.30,              # Start trailing at profit (50%)
+        'trailing_trigger_pct': 0.30,              # Start trailing at profit (30%)
         'reversal_exit_enabled': True,             # Exit when True Price < VWAP (reversal)
         'downtrend_exit_enabled': True,            # Exit when True Price & EMA < vwap_ema_avg (downtrend)
+    },
+    # Tight stop loss — used when RISK=HIGH + Downtrend (cut losses faster)
+    'stop_loss_tight': {
+        'stop_loss_pct': 0.15,                     # Max loss from entry (15%)
+        'stop_loss_warning_pct': 0.08,             # Warning threshold (8%)
+        'trailing_stop_pct': 0.15,                 # Trailing below highest (15%)
+        'breakeven_min_minutes': 15,               # Min hold before breakeven (15 min)
+        'trailing_trigger_pct': 0.15,              # Start trailing at profit (15%)
+    },
+    # Loose stop loss — wider tolerance for strong trends
+    'stop_loss_loose': {
+        'stop_loss_pct': 0.40,                     # Max loss from entry (40%)
+        'stop_loss_warning_pct': 0.20,             # Warning threshold (20%)
+        'trailing_stop_pct': 0.35,                 # Trailing below highest (35%)
+        'breakeven_min_minutes': 45,               # Min hold before breakeven (45 min)
+        'trailing_trigger_pct': 0.50,              # Start trailing at profit (50%)
     },
 
     # Technical indicators for backtest
@@ -246,6 +263,7 @@ BACKTEST_CONFIG = {
     # Exit triggers when price falls to or below the trailing stop price.
     'take_profit_milestones': {
         'enabled': True,
+        # Normal milestones (default)
         'milestones': [
             {'gain_pct': 10,  'trailing_pct': 0},     # Breakeven at entry cost
             {'gain_pct': 20,  'trailing_pct': 5},     # 5% above entry
@@ -261,7 +279,72 @@ BACKTEST_CONFIG = {
             {'gain_pct': 400, 'trailing_pct': 300},   # 300% above entry
             {'gain_pct': 500, 'trailing_pct': 375},   # 375% above entry
         ],
+        # Tight milestones — used when RISK=HIGH + Uptrend (lock profits faster)
+        'milestones_tight': [
+            {'gain_pct': 5,   'trailing_pct': 0},     # Breakeven at entry cost
+            {'gain_pct': 10,  'trailing_pct': 3},     # 3% above entry
+            {'gain_pct': 15,  'trailing_pct': 7},     # 7% above entry
+            {'gain_pct': 20,  'trailing_pct': 12},    # 12% above entry
+            {'gain_pct': 30,  'trailing_pct': 20},    # 20% above entry
+            {'gain_pct': 40,  'trailing_pct': 28},    # 28% above entry
+            {'gain_pct': 50,  'trailing_pct': 38},    # 38% above entry
+            {'gain_pct': 75,  'trailing_pct': 60},    # 60% above entry
+            {'gain_pct': 100, 'trailing_pct': 85},    # 85% above entry
+            {'gain_pct': 150, 'trailing_pct': 130},   # 130% above entry
+            {'gain_pct': 200, 'trailing_pct': 175},   # 175% above entry
+            {'gain_pct': 300, 'trailing_pct': 265},   # 265% above entry
+        ],
+        # Loose milestones — wider trailing for strong trends
+        'milestones_loose': [
+            {'gain_pct': 15,  'trailing_pct': 0},     # Breakeven at entry cost
+            {'gain_pct': 30,  'trailing_pct': 5},     # 5% above entry
+            {'gain_pct': 50,  'trailing_pct': 15},    # 15% above entry
+            {'gain_pct': 75,  'trailing_pct': 35},    # 35% above entry
+            {'gain_pct': 100, 'trailing_pct': 60},    # 60% above entry
+            {'gain_pct': 150, 'trailing_pct': 100},   # 100% above entry
+            {'gain_pct': 200, 'trailing_pct': 140},   # 140% above entry
+            {'gain_pct': 300, 'trailing_pct': 210},   # 210% above entry
+            {'gain_pct': 500, 'trailing_pct': 350},   # 350% above entry
+        ],
     },
+
+    # Risk Assessment: Detect overbought entry conditions
+    # Evaluates at signal time whether we are buying into an overbought zone.
+    # If any condition is TRUE, RISK = HIGH.
+    'risk_assessment': {
+        'enabled': True,
+        # Condition 1: RSI overbought — (RSI + RSI_avg) / 2 > threshold
+        'rsi_overbought_threshold': 80,
+        # Condition 2: EWO overbought — EWO_avg > Median.Max(EWO) from StatsBook (1m:5m)
+        'ewo_overbought_enabled': True,
+        # Condition 3: First 15 minutes of market open (9:30 - 9:45 EST)
+        'market_open_window_minutes': 15,
+        # Post-purchase monitoring for HIGH risk trades
+        'downtrend_monitor_bars': 3,       # If next N bars are all negative, sell
+        'downtrend_drop_pct': 10,          # OR if option drops X% below entry, sell
+        'downtrend_exit_reason': 'SL-DT',  # Exit reason label for risk downtrend
+    },
+
+    # SPY Market Gauge: Use SPY as overall market health indicator
+    # Compares current SPY price against average price over lookback windows.
+    # If current > avg → Bullish, else → Bearish for that timeframe.
+    'spy_gauge': {
+        'enabled': True,
+        'ticker': 'SPY',
+        'timeframes': {
+            'since_open': 0,     # 0 = from market open (9:30)
+            '1m': 1,
+            '5m': 5,
+            '15m': 15,
+            '30m': 30,
+            '1h': 60,
+        },
+    },
+
+    # Bias sensitivity: Controls the sideways band width for market bias calculation.
+    # Smaller = more sensitive (more bull/bear signals), Larger = wider band (more sideways).
+    # Default was 0.10, reduced to 0.05 for higher sensitivity.
+    'bias_sideways_band': 0.05,
 }
 
 
@@ -300,7 +383,9 @@ DATAFRAME_COLUMNS = {
         'pnl', 'pnl_pct', 'highest_price', 'lowest_price', 'minutes_held',
         'stop_loss', 'stop_loss_mode',
         'milestone_pct', 'trailing_stop_price',
+        'risk', 'risk_reasons', 'risk_trend',
         'market_bias',
+        'spy_price', 'spy_since_open', 'spy_1m', 'spy_5m', 'spy_15m', 'spy_30m', 'spy_1h',
         'vwap', 'ema_30', 'vwap_ema_avg', 'emavwap', 'ewo', 'ewo_15min_avg', 'rsi', 'rsi_10min_avg',
         'supertrend', 'supertrend_direction',
         'ichimoku_tenkan', 'ichimoku_kijun', 'ichimoku_senkou_a', 'ichimoku_senkou_b',
@@ -322,7 +407,9 @@ DATAFRAME_COLUMNS = {
         'pnl', 'pnl_pct', 'highest_price', 'lowest_price', 'minutes_held',
         'stop_loss', 'stop_loss_mode',
         'milestone_pct', 'trailing_stop_price',
+        'risk', 'risk_reasons', 'risk_trend',
         'market_bias',
+        'spy_price', 'spy_since_open', 'spy_1m', 'spy_5m', 'spy_15m', 'spy_30m', 'spy_1h',
         'vwap', 'ema_30', 'vwap_ema_avg', 'emavwap', 'ewo', 'ewo_15min_avg', 'rsi', 'rsi_10min_avg',
         'supertrend', 'supertrend_direction',
         'ichimoku_tenkan', 'ichimoku_kijun', 'ichimoku_senkou_a', 'ichimoku_senkou_b',

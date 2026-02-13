@@ -128,7 +128,7 @@ def find_entry_exit(df):
 
 
 def create_trade_chart(df, trade_label, market_hours_only=False, show_ewo=True, show_rsi=True, show_supertrend=False, show_ichimoku=False, show_market_bias=True):
-    """Create dual-axis chart with stock/option prices, error bars, and combined EWO/RSI subplot."""
+    """Create dual-axis chart with stock/option prices, error bars, EWO/RSI subplot, and SPY subplot."""
     df = df.copy()
     df['time'] = df['timestamp'].apply(parse_time)
     df = df.dropna(subset=['time'])
@@ -161,12 +161,28 @@ def create_trade_chart(df, trade_label, market_hours_only=False, show_ewo=True, 
     # Check if market bias data is available (and toggle is on)
     has_market_bias = show_market_bias and 'market_bias' in df.columns and df['market_bias'].notna().any()
 
+    # Check if SPY data is available
+    has_spy = 'spy_price' in df.columns and df['spy_price'].notna().any()
+
     # RSI uses secondary y-axis only when EWO is also shown (they share row 2)
     # When EWO is off, RSI uses the primary y-axis to avoid empty primary axis issues
     rsi_secondary = has_ewo
 
-    # Create subplots: main chart + combined indicator subplot below
-    if has_ewo or has_rsi or has_market_bias:
+    # Determine number of subplot rows
+    has_indicators = has_ewo or has_rsi or has_market_bias
+
+    # Create subplots: main chart + indicators + SPY
+    if has_indicators and has_spy:
+        # 3 rows: main chart, indicators, SPY
+        row2_spec = {"secondary_y": True} if has_ewo else {"secondary_y": False}
+        fig = make_subplots(
+            rows=3, cols=1,
+            shared_xaxes=True,
+            vertical_spacing=0.04,
+            row_heights=[0.50, 0.25, 0.25],
+            specs=[[{"secondary_y": True}], [row2_spec], [{"secondary_y": True}]]
+        )
+    elif has_indicators:
         # 2 rows: main chart, indicators
         row2_spec = {"secondary_y": True} if has_ewo else {"secondary_y": False}
         fig = make_subplots(
@@ -175,6 +191,15 @@ def create_trade_chart(df, trade_label, market_hours_only=False, show_ewo=True, 
             vertical_spacing=0.05,
             row_heights=[0.60, 0.40],
             specs=[[{"secondary_y": True}], [row2_spec]]
+        )
+    elif has_spy:
+        # 2 rows: main chart, SPY
+        fig = make_subplots(
+            rows=2, cols=1,
+            shared_xaxes=True,
+            vertical_spacing=0.05,
+            row_heights=[0.60, 0.40],
+            specs=[[{"secondary_y": True}], [{"secondary_y": True}]]
         )
     else:
         fig = make_subplots(specs=[[{"secondary_y": True}]])
@@ -608,8 +633,96 @@ def create_trade_chart(df, trade_label, market_hours_only=False, show_ewo=True, 
             row=2, col=1
         )
 
+    # SPY subplot (row 3 if indicators present, row 2 if no indicators)
+    spy_row = 3 if has_indicators and has_spy else (2 if has_spy else None)
+    if has_spy and spy_row:
+        # SPY price line
+        fig.add_trace(
+            go.Scatter(
+                x=df['time'],
+                y=df['spy_price'],
+                name='SPY',
+                line=dict(color='#FFD700', width=2),
+                hovertemplate='SPY: $%{y:.2f}<extra></extra>'
+            ),
+            row=spy_row, col=1, secondary_y=False
+        )
+
+        # SPY gauge sentiment as color-coded markers on secondary axis
+        # Map gauge columns to display
+        spy_gauge_cols = {
+            'spy_since_open': 'Open',
+            'spy_1m': '1m',
+            'spy_5m': '5m',
+            'spy_15m': '15m',
+            'spy_30m': '30m',
+            'spy_1h': '1h',
+        }
+
+        # Show the 5m gauge as a background fill for quick visual reference
+        if 'spy_5m' in df.columns and df['spy_5m'].notna().any():
+            spy_bull = df['spy_price'].where(df['spy_5m'] == 'Bullish')
+            spy_bear = df['spy_price'].where(df['spy_5m'] == 'Bearish')
+
+            if spy_bull.notna().any():
+                fig.add_trace(
+                    go.Scatter(
+                        x=df['time'], y=spy_bull,
+                        name='SPY Bull(5m)',
+                        mode='lines',
+                        line=dict(color='#00C853', width=0),
+                        fill='tozeroy',
+                        fillcolor='rgba(0, 200, 83, 0.08)',
+                        connectgaps=False,
+                        showlegend=False,
+                        hoverinfo='skip',
+                    ),
+                    row=spy_row, col=1, secondary_y=False
+                )
+            if spy_bear.notna().any():
+                fig.add_trace(
+                    go.Scatter(
+                        x=df['time'], y=spy_bear,
+                        name='SPY Bear(5m)',
+                        mode='lines',
+                        line=dict(color='#FF1744', width=0),
+                        fill='tozeroy',
+                        fillcolor='rgba(255, 23, 68, 0.08)',
+                        connectgaps=False,
+                        showlegend=False,
+                        hoverinfo='skip',
+                    ),
+                    row=spy_row, col=1, secondary_y=False
+                )
+
+        # Build hover text showing all gauge timeframes
+        def build_spy_hover(row):
+            parts = [f"SPY: ${row['spy_price']:.2f}" if pd.notna(row.get('spy_price')) else "SPY: N/A"]
+            for col, label in spy_gauge_cols.items():
+                val = row.get(col)
+                if pd.notna(val) and val:
+                    icon = '+' if val == 'Bullish' else '-'
+                    parts.append(f"{label}:{icon}")
+            return '<br>'.join([parts[0], ' | '.join(parts[1:])])
+
+        hover_texts = df.apply(build_spy_hover, axis=1)
+        fig.add_trace(
+            go.Scatter(
+                x=df['time'],
+                y=df['spy_price'],
+                name='SPY Gauge',
+                mode='none',
+                hovertemplate='%{text}<extra></extra>',
+                text=hover_texts,
+                showlegend=False,
+            ),
+            row=spy_row, col=1, secondary_y=False
+        )
+
     # Layout
-    if has_ewo or has_rsi or has_market_bias:
+    if has_indicators and has_spy:
+        chart_height = 1000
+    elif has_indicators or has_spy:
         chart_height = 800
     else:
         chart_height = 500
@@ -636,7 +749,7 @@ def create_trade_chart(df, trade_label, market_hours_only=False, show_ewo=True, 
     fig.update_yaxes(title_text="Price ($)", secondary_y=False, tickformat='$.2f', row=1, col=1)
     fig.update_yaxes(title_text="Option ($)", secondary_y=True, tickformat='$.2f', row=1, col=1)
 
-    if has_ewo or has_rsi or has_market_bias:
+    if has_indicators:
         fig.update_xaxes(title_text="Time", tickformat='%H:%M', row=2, col=1)
 
     if has_ewo:
@@ -653,6 +766,10 @@ def create_trade_chart(df, trade_label, market_hours_only=False, show_ewo=True, 
             title_text="RSI", secondary_y=rsi_secondary, row=2, col=1,
             range=[0, 100], tickvals=[0, 30, 50, 70, 100]
         )
+
+    if has_spy and spy_row:
+        fig.update_xaxes(title_text="Time", tickformat='%H:%M', row=spy_row, col=1)
+        fig.update_yaxes(title_text="SPY ($)", secondary_y=False, tickformat='$.2f', row=spy_row, col=1)
 
     return fig
 
@@ -711,6 +828,25 @@ def get_trade_summary(df):
             if pd.notna(last_bias):
                 market_bias = BIAS_LABELS.get(int(last_bias), 'N/A')
 
+    # Risk level at entry
+    risk = 'N/A'
+    risk_reasons = ''
+    risk_trend = ''
+    if 'risk' in df.columns and 'holding' in df.columns:
+        holding_df = df[df['holding'] == True]
+        if not holding_df.empty:
+            first_risk = holding_df['risk'].iloc[0]
+            if pd.notna(first_risk):
+                risk = str(first_risk)
+            first_reasons = holding_df['risk_reasons'].iloc[0] if 'risk_reasons' in holding_df.columns else None
+            if pd.notna(first_reasons) and first_reasons:
+                risk_reasons = str(first_reasons)
+            # Get last risk trend
+            if 'risk_trend' in holding_df.columns:
+                last_trend = holding_df['risk_trend'].iloc[-1]
+                if pd.notna(last_trend):
+                    risk_trend = str(last_trend)
+
     return {
         'entry': entry_price,
         'exit': exit_price,
@@ -722,7 +858,10 @@ def get_trade_summary(df):
         'max_profit_pct': max_profit_pct,
         'min_profit_pct': min_profit_pct,
         'profit_min': profit_min,
-        'market_bias': market_bias
+        'market_bias': market_bias,
+        'risk': risk,
+        'risk_reasons': risk_reasons,
+        'risk_trend': risk_trend,
     }
 
 
@@ -809,8 +948,6 @@ def get_trade_table(df):
 
 
 def main():
-    st.title("Trade Dashboard")
-
     matrices = load_data()
 
     if not matrices:
@@ -909,22 +1046,22 @@ def main():
     st.subheader("Trade Summary")
     summary = get_trade_summary(df)
 
-    # Row 1: Entry | Exit | P&L | Market | Profit[min] TBD | TBD | TBD
+    # Row 1: Entry | Exit | P&L | Market | Risk | Risk Trend | Profit[min]
     row1 = st.columns(7)
     row1[0].metric("Entry", f"${summary['entry']:.2f}")
     row1[1].metric("Exit", f"${summary['exit']:.2f}")
     row1[2].metric("P&L", f"{summary['pnl_pct']:+.1f}%")
     row1[3].metric("Market", summary['market_bias'])
-    row1[4].metric("Profit[min] TBD", f"${summary['profit_min']:+.2f}")
-    row1[5].metric("TBD", "1")
-    row1[6].metric("TBD", "1")
+    row1[4].metric("Risk", summary['risk'])
+    row1[5].metric("Risk Trend", summary['risk_trend'] or 'N/A')
+    row1[6].metric("Profit[min]", f"${summary['profit_min']:+.2f}")
 
-    # Row 2: Min Profit | Exit Reason | Max Profit | TBD | TBD | TBD | TBD
+    # Row 2: Min Profit | Exit Reason | Max Profit | Risk Reasons | TBD | TBD | TBD
     row2 = st.columns(7)
     row2[0].metric("Min Profit", f"{summary['min_profit_pct']:+.1f}%")
     row2[1].metric("Exit Reason", summary['exit_reason'])
     row2[2].metric("Max Profit", f"{summary['max_profit_pct']:+.1f}%")
-    row2[3].metric("TBD", "1")
+    row2[3].metric("Risk Reasons", summary['risk_reasons'] or 'N/A')
     row2[4].metric("TBD", "1")
     row2[5].metric("TBD", "1")
     row2[6].metric("TBD", "1")
@@ -1040,6 +1177,10 @@ def main():
             matrix_df['market_bias'] = matrix_df['market_bias'].apply(
                 lambda x: bias_map.get(int(x), '') if pd.notna(x) else ""
             )
+
+        # Format SPY price
+        if 'spy_price' in matrix_df.columns:
+            matrix_df['spy_price'] = matrix_df['spy_price'].apply(lambda x: f"${x:.2f}" if pd.notna(x) else "")
 
         if 'ewo' in matrix_df.columns:
             matrix_df['ewo'] = matrix_df['ewo'].apply(lambda x: f"{x:.3f}" if pd.notna(x) else "")
