@@ -216,44 +216,77 @@ class DataSnapshot:
 
 # System prompt: sets the role and constraints for the AI model.
 SYSTEM_PROMPT = (
-    "You are a professional intraday options trader AI assistant. "
-    "You analyze technical indicators on 1-minute stock data and provide "
-    "structured trading opinions. You are decisive, concise, and always "
-    "respond in the exact JSON format requested. Never add commentary "
-    "outside the JSON.\n"
-    "CRITICAL RULE: CALL options profit when the stock goes UP (bullish = good). "
-    "PUT options profit when the stock goes DOWN (bearish = good). "
-    "Never recommend selling a position when the market outlook FAVORS the option type."
+    "You are a professional intraday options trader AI assistant managing "
+    "live option positions. You analyze multi-timeframe technical indicators "
+    "and decide whether to HOLD or SELL the current position.\n"
+    "\n"
+    "CORE RULES YOU MUST FOLLOW:\n"
+    "1. CALL options PROFIT when the stock price goes UP.\n"
+    "   - Bullish outlook = FAVORABLE for CALL = HOLD.\n"
+    "   - Bearish outlook = UNFAVORABLE for CALL = consider SELL.\n"
+    "2. PUT options PROFIT when the stock price goes DOWN.\n"
+    "   - Bearish outlook = FAVORABLE for PUT = HOLD.\n"
+    "   - Bullish outlook = UNFAVORABLE for PUT = consider SELL.\n"
+    "3. NEVER sell just because the position is profitable.\n"
+    "4. ONLY sell when the outlook is turning AGAINST the position.\n"
+    "5. Always respond in the exact JSON format requested."
 )
 
 # User prompt template: filled with DataSnapshot output.
 # The model must respond with the exact JSON schema below.
 USER_PROMPT_TEMPLATE = (
-    "Analyze this intraday options position and provide your assessment.\n"
+    "We hold a {option_type} option. Analyze the data and decide: HOLD or SELL?\n"
     "\n"
     "{data_block}"
     "\n"
-    "OPTION-DIRECTION RULES (critical):\n"
-    "- We hold a {option_type} option.\n"
-    "- CALL profits when stock price RISES. Bullish outlook = FAVORABLE for CALL.\n"
-    "- PUT profits when stock price FALLS. Bearish outlook = FAVORABLE for PUT.\n"
-    "- For a CALL: only recommend 'sell' if outlook is turning BEARISH or SIDEWAYS (unfavorable).\n"
-    "- For a PUT: only recommend 'sell' if outlook is turning BULLISH or SIDEWAYS (unfavorable).\n"
-    "- Do NOT sell simply because the position is profitable. Sell only when the "
-    "outlook is turning AGAINST the position direction.\n"
+    "=== INDICATOR GUIDE ===\n"
+    "RSI: >70 = overbought (price may drop), <30 = oversold (price may rise), 30-70 = neutral.\n"
+    "EWO: positive & rising = bullish momentum, negative & falling = bearish momentum.\n"
+    "Supertrend: BULLISH = uptrend, BEARISH = downtrend.\n"
+    "Ichimoku: Price ABOVE cloud = bullish, Price BELOW cloud = bearish.\n"
+    "Price Change: positive% = price rising, negative% = price falling.\n"
     "\n"
-    "INSTRUCTIONS:\n"
-    "1. Assess the market outlook at each timeframe (1min, 5min, 30min, 1hr).\n"
-    "   - 'bullish' = price likely to rise\n"
-    "   - 'bearish' = price likely to fall\n"
-    "   - 'sideways' = no clear direction, range-bound\n"
-    "2. Given the option type ({option_type}) and current P&L ({pnl_pct}%), "
-    "recommend 'hold' or 'sell'.\n"
-    "   - If {option_type}: a FAVORABLE outlook means HOLD, not sell.\n"
-    "   - Only sell when indicators show the trend is REVERSING against the position.\n"
-    "   - Consider: Are key indicators (RSI, EWO, Supertrend, Ichimoku) confirming or diverging?\n"
-    "3. Provide a one-sentence reason for your recommendation.\n"
+    "=== DECISION FRAMEWORK ===\n"
+    "Step 1: For each timeframe, determine outlook (bullish/bearish/sideways).\n"
+    "Step 2: Count how many timeframes are FAVORABLE for our {option_type}:\n"
+    "  - For CALL: bullish = favorable, bearish = unfavorable, sideways = neutral.\n"
+    "  - For PUT: bearish = favorable, bullish = unfavorable, sideways = neutral.\n"
+    "Step 3: Decide action:\n"
+    "  - 3-4 timeframes FAVORABLE -> HOLD (trend supports our position).\n"
+    "  - 2 favorable + 2 unfavorable -> HOLD (mixed, no clear reversal yet).\n"
+    "  - 0-1 favorable + majority UNFAVORABLE -> SELL (trend reversing against us).\n"
+    "  - IMPORTANT: Profitable + favorable outlook = HOLD, NOT sell.\n"
     "\n"
+    "=== EXAMPLE 1: PUT with bearish outlook -> HOLD ===\n"
+    "Situation: PUT option, P&L: +8%, RSI falling (45->32), EWO falling (-0.8), "
+    "Supertrend BEARISH, price below cloud, 5m/30m/1h all declining.\n"
+    "Reasoning: All indicators confirm bearish momentum. Bearish = FAVORABLE for PUT.\n"
+    "4 out of 4 timeframes favorable. Action: HOLD.\n"
+    '{{"outlook_1m":"bearish","outlook_5m":"bearish","outlook_30m":"bearish",'
+    '"outlook_1h":"bearish","action":"hold",'
+    '"reason":"All timeframes bearish which is favorable for our PUT, momentum still strong."}}\n'
+    "\n"
+    "=== EXAMPLE 2: CALL with bearish outlook -> SELL ===\n"
+    "Situation: CALL option, P&L: +5%, RSI falling (65->42), EWO falling (-0.3), "
+    "Supertrend BEARISH, price below cloud, 5m/30m declining.\n"
+    "Reasoning: Indicators turning bearish. Bearish = UNFAVORABLE for CALL.\n"
+    "1 out of 4 timeframes favorable. Action: SELL.\n"
+    '{{"outlook_1m":"bearish","outlook_5m":"bearish","outlook_30m":"bearish",'
+    '"outlook_1h":"sideways","action":"sell",'
+    '"reason":"Bearish reversal across timeframes is unfavorable for our CALL, protecting profits."}}\n'
+    "\n"
+    "=== EXAMPLE 3: PUT with bullish reversal -> SELL ===\n"
+    "Situation: PUT option, P&L: +12%, RSI rising (28->55), EWO rising (0.2), "
+    "Supertrend flipped BULLISH, price moving above cloud.\n"
+    "Reasoning: Indicators turning bullish. Bullish = UNFAVORABLE for PUT.\n"
+    "0 out of 4 timeframes favorable. Action: SELL.\n"
+    '{{"outlook_1m":"bullish","outlook_5m":"bullish","outlook_30m":"sideways",'
+    '"outlook_1h":"bearish","action":"sell",'
+    '"reason":"Short-term bullish reversal with rising RSI and EWO is unfavorable for our PUT."}}\n'
+    "\n"
+    "=== NOW ANALYZE THE POSITION ABOVE ===\n"
+    "Option type: {option_type} | P&L: {pnl_pct}%\n"
+    "Count favorable timeframes for {option_type}, then decide.\n"
     'Respond with ONLY this JSON (no markdown, no extra text):\n'
     '{{"outlook_1m":"bullish|bearish|sideways",'
     '"outlook_5m":"bullish|bearish|sideways",'

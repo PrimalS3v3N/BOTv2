@@ -246,9 +246,9 @@ BACKTEST_CONFIG = {
         'enabled': True,                               # Disabled by default (requires model file)
         'model_path': 'models/Meta-Llama-3-8B-Instruct.Q5_K_M.gguf',  # Absolute path to GGUF model file
         'n_gpu_layers': -1,                            # GPU layers to offload (-1 = all)
-        'n_ctx': 2048,                                 # Context window (tokens)
+        'n_ctx': 4096,                                 # Context window (tokens)
         'temperature': 0.1,                            # Low = deterministic (good for backtesting)
-        'max_tokens': 256,                             # Max response tokens
+        'max_tokens': 512,                             # Max response tokens
         'seed': 42,                                    # Fixed seed for reproducible backtests
         'eval_interval': 5,                            # Evaluate every N bars (1 = every bar, 5 = every 5 min)
         'min_bars_before_eval': 5,                     # Minimum bars held before first AI evaluation
