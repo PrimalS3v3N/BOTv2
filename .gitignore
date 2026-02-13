@@ -26,3 +26,10 @@ paper_trading_state.json
 
 # Local settings with credentials
 Setting.xlsx
+
+# AI model files (multi-GB GGUF files)
+models/
+*.gguf
+
+# AI training data logs
+ai_training_data/

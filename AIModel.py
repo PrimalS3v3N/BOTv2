@@ -805,6 +805,140 @@ class OptimalExitLogger:
 
 
 # =============================================================================
+# EXTERNAL - Model Downloader
+# =============================================================================
+
+# Pre-configured models. Each entry has the HuggingFace repo, filename, and VRAM usage.
+AVAILABLE_MODELS = {
+    # 3080Ti (12GB) — leaves ~7GB headroom for other apps
+    'mistral-7b-q4': {
+        'repo_id': 'bartowski/Mistral-7B-Instruct-v0.3-GGUF',
+        'filename': 'Mistral-7B-Instruct-v0.3-Q4_K_M.gguf',
+        'vram_gb': 4.4,
+        'description': 'Mistral 7B Instruct Q4_K_M — best balance of speed and quality for 3080Ti',
+    },
+    'llama3.1-8b-q4': {
+        'repo_id': 'bartowski/Meta-Llama-3.1-8B-Instruct-GGUF',
+        'filename': 'Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf',
+        'vram_gb': 4.9,
+        'description': 'Llama 3.1 8B Instruct Q4_K_M — strong reasoning, slightly larger',
+    },
+    # 4090 (24GB) — can run higher quant for better quality
+    'mistral-7b-q8': {
+        'repo_id': 'bartowski/Mistral-7B-Instruct-v0.3-GGUF',
+        'filename': 'Mistral-7B-Instruct-v0.3-Q8_0.gguf',
+        'vram_gb': 7.7,
+        'description': 'Mistral 7B Instruct Q8 — higher quality, needs 4090',
+    },
+    'llama3.1-8b-q8': {
+        'repo_id': 'bartowski/Meta-Llama-3.1-8B-Instruct-GGUF',
+        'filename': 'Meta-Llama-3.1-8B-Instruct-Q8_0.gguf',
+        'vram_gb': 8.5,
+        'description': 'Llama 3.1 8B Instruct Q8 — best quality for 4090',
+    },
+}
+
+
+def download_model(model_key='mistral-7b-q4', models_dir=None):
+    """
+    Download a GGUF model from HuggingFace to the local models directory.
+
+    Run this from Spyder's console:
+        >>> import AIModel
+        >>> AIModel.download_model()                    # Default: Mistral 7B Q4
+        >>> AIModel.download_model('llama3.1-8b-q4')   # Llama 3.1 8B Q4
+
+    Available model keys:
+        'mistral-7b-q4'   — Mistral 7B Q4_K_M  (4.4 GB, recommended for 3080Ti)
+        'llama3.1-8b-q4'  — Llama 3.1 8B Q4_K_M (4.9 GB, strong reasoning)
+        'mistral-7b-q8'   — Mistral 7B Q8_0     (7.7 GB, for 4090)
+        'llama3.1-8b-q8'  — Llama 3.1 8B Q8_0   (8.5 GB, for 4090)
+
+    Args:
+        model_key: Key from AVAILABLE_MODELS dict.
+        models_dir: Where to save. Defaults to ./models/ in the project root.
+
+    Returns:
+        str: Absolute path to the downloaded model file (use this for Config model_path).
+    """
+    if model_key not in AVAILABLE_MODELS:
+        print(f"Unknown model key: '{model_key}'")
+        print(f"Available: {list(AVAILABLE_MODELS.keys())}")
+        return None
+
+    model_info = AVAILABLE_MODELS[model_key]
+
+    # Default to project_root/models/
+    if models_dir is None:
+        project_root = os.path.dirname(os.path.abspath(__file__))
+        models_dir = os.path.join(project_root, 'models')
+    os.makedirs(models_dir, exist_ok=True)
+
+    dest_path = os.path.join(models_dir, model_info['filename'])
+
+    # Skip if already downloaded
+    if os.path.exists(dest_path):
+        size_gb = os.path.getsize(dest_path) / (1024 ** 3)
+        print(f"[OK] Model already exists: {dest_path} ({size_gb:.1f} GB)")
+        print(f"     Set Config model_path to: {dest_path}")
+        return dest_path
+
+    # Install huggingface_hub if not present
+    try:
+        from huggingface_hub import hf_hub_download
+    except ImportError:
+        print("Installing huggingface_hub...")
+        import subprocess
+        subprocess.check_call(['pip', 'install', 'huggingface_hub'])
+        from huggingface_hub import hf_hub_download
+
+    print(f"Downloading: {model_info['description']}")
+    print(f"  Repo:   {model_info['repo_id']}")
+    print(f"  File:   {model_info['filename']}")
+    print(f"  Size:   ~{model_info['vram_gb']} GB")
+    print(f"  Dest:   {dest_path}")
+    print()
+    print("This may take several minutes depending on your connection...")
+    print()
+
+    # Download to HuggingFace cache, then symlink/copy to our models dir
+    downloaded_path = hf_hub_download(
+        repo_id=model_info['repo_id'],
+        filename=model_info['filename'],
+        local_dir=models_dir,
+        local_dir_use_symlinks=False,  # Actual file copy, not symlink
+    )
+
+    # hf_hub_download may place it in a subfolder; move to expected location
+    if os.path.exists(downloaded_path) and downloaded_path != dest_path:
+        import shutil
+        shutil.move(downloaded_path, dest_path)
+
+    size_gb = os.path.getsize(dest_path) / (1024 ** 3)
+    print()
+    print(f"[OK] Download complete: {dest_path} ({size_gb:.1f} GB)")
+    print()
+    print(f"Next step — set your Config.py model_path:")
+    print(f"    'model_path': r'{dest_path}',")
+    print(f"    'enabled': True,")
+
+    return dest_path
+
+
+def list_models():
+    """Print available models for download. Run from Spyder console."""
+    print("\nAvailable GGUF Models for Download")
+    print("=" * 65)
+    for key, info in AVAILABLE_MODELS.items():
+        print(f"\n  '{key}'")
+        print(f"    {info['description']}")
+        print(f"    VRAM: ~{info['vram_gb']} GB | File: {info['filename']}")
+    print()
+    print("Download with:  import AIModel; AIModel.download_model('model-key')")
+    print()
+
+
+# =============================================================================
 # EXTERNAL - Module Interface
 # =============================================================================
 
@@ -816,4 +950,7 @@ __all__ = [
     'OptimalExitLogger',
     'SYSTEM_PROMPT',
     'USER_PROMPT_TEMPLATE',
+    'AVAILABLE_MODELS',
+    'download_model',
+    'list_models',
 ]
