@@ -728,7 +728,6 @@ def create_trade_chart(df, trade_label, market_hours_only=False, show_ewo=True, 
         chart_height = 500
 
     fig.update_layout(
-        title=trade_label,
         template='plotly_dark',
         height=chart_height,
         hovermode='x unified',
@@ -741,7 +740,7 @@ def create_trade_chart(df, trade_label, market_hours_only=False, show_ewo=True, 
             bgcolor='rgba(0,0,0,0)',
             font=dict(size=11),
         ),
-        margin=dict(l=60, r=180, t=60, b=40)
+        margin=dict(l=60, r=180, t=30, b=40)
     )
 
     # Update axes
@@ -769,7 +768,18 @@ def create_trade_chart(df, trade_label, market_hours_only=False, show_ewo=True, 
 
     if has_spy and spy_row:
         fig.update_xaxes(title_text="Time", tickformat='%H:%M', row=spy_row, col=1)
-        fig.update_yaxes(title_text="SPY ($)", secondary_y=False, tickformat='$.2f', row=spy_row, col=1)
+        # Set explicit y-axis range to match main graph tight auto-range
+        # (tozeroy fills would otherwise extend axis down to 0)
+        spy_prices = df['spy_price'].dropna()
+        if not spy_prices.empty:
+            spy_min = spy_prices.min()
+            spy_max = spy_prices.max()
+            spy_padding = (spy_max - spy_min) * 0.05 if spy_max > spy_min else 0.5
+            fig.update_yaxes(title_text="SPY ($)", secondary_y=False, tickformat='$.2f',
+                             range=[spy_min - spy_padding, spy_max + spy_padding],
+                             row=spy_row, col=1)
+        else:
+            fig.update_yaxes(title_text="SPY ($)", secondary_y=False, tickformat='$.2f', row=spy_row, col=1)
 
     return fig
 
@@ -958,11 +968,6 @@ def main():
     with st.sidebar:
         st.header("Trades")
 
-        if st.button("Reload Data"):
-            st.session_state.pop('matrices', None)
-            st.session_state.pop('statsbooks', None)
-            st.rerun()
-
         trade_list = []
         for pos_id, df in matrices.items():
             if df.empty:
@@ -993,6 +998,11 @@ def main():
             range(len(trade_list)),
             format_func=lambda i: f"{trade_list[i][0]} ({trade_list[i][2]:+.1f}%)"
         )
+
+        if st.button("Reload Data"):
+            st.session_state.pop('matrices', None)
+            st.session_state.pop('statsbooks', None)
+            st.rerun()
 
         st.markdown("---")
         market_hours_only = st.toggle("Market Hours", value=True, help="ON: Full market hours view | OFF: Holding period only")
