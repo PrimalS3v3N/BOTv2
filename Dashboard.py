@@ -54,7 +54,9 @@ def load_data():
         with open(DATA_PATH, 'rb') as f:
             data = pickle.load(f)
         matrices = data.get('matrices', {})
+        statsbooks = data.get('statsbooks', {})
         st.session_state.matrices = matrices
+        st.session_state.statsbooks = statsbooks
         return matrices
     except Exception as e:
         st.error(f"Error loading data: {e}")
@@ -821,6 +823,7 @@ def main():
 
         if st.button("Reload Data"):
             st.session_state.pop('matrices', None)
+            st.session_state.pop('statsbooks', None)
             st.rerun()
 
         trade_list = []
@@ -926,10 +929,37 @@ def main():
     row2[5].metric("TBD", "1")
     row2[6].metric("TBD", "1")
 
-    # Data table
+    # StatsBook table
     st.subheader("Trade Details")
-    table_df = get_trade_table(df)
-    st.dataframe(table_df, use_container_width=True, hide_index=True)
+    ticker = df['ticker'].iloc[0] if 'ticker' in df.columns else None
+    statsbooks = st.session_state.get('statsbooks', {})
+    if ticker and ticker in statsbooks:
+        sb_df = statsbooks[ticker]
+        if isinstance(sb_df, pd.DataFrame) and not sb_df.empty:
+            # Format the statsbook for display
+            display_df = sb_df.copy()
+            display_df.index.name = 'Stats'
+            display_df = display_df.reset_index()
+
+            # Format numeric values: volume rows as integers, others to 3 decimals
+            vol_metrics = {'Max(Vol)', 'Median.Max(Vol)', 'Median(Vol)', 'Min(Vol)', 'Median.Min(Vol)'}
+            ratio_metrics = {'Max(Vol)x'}
+            for col in ['5m', '1h', '1d']:
+                if col in display_df.columns:
+                    display_df[col] = display_df.apply(
+                        lambda row: (
+                            f"{int(row[col]):,}" if row['Stats'] in vol_metrics and pd.notna(row[col])
+                            else f"{row[col]:.2f}" if row['Stats'] in ratio_metrics and pd.notna(row[col])
+                            else f"{row[col]:.3f}" if pd.notna(row[col])
+                            else ""
+                        ), axis=1
+                    )
+
+            st.dataframe(display_df, use_container_width=True, hide_index=True)
+        else:
+            st.info(f"No StatsBook data available for {ticker}.")
+    else:
+        st.info(f"No StatsBook data available{f' for {ticker}' if ticker else ''}.")
 
     # Databook section
     st.subheader("Databook")
