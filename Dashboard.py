@@ -659,41 +659,18 @@ def create_trade_chart(df, trade_label, market_hours_only=False, show_ewo=True, 
             'spy_1h': '1h',
         }
 
-        # Show the 5m gauge as a background fill for quick visual reference
+        # Show the 5m gauge as background shading for quick visual reference
         if 'spy_5m' in df.columns and df['spy_5m'].notna().any():
-            spy_bull = df['spy_price'].where(df['spy_5m'] == 'Bullish')
-            spy_bear = df['spy_price'].where(df['spy_5m'] == 'Bearish')
-
-            if spy_bull.notna().any():
-                fig.add_trace(
-                    go.Scatter(
-                        x=df['time'], y=spy_bull,
-                        name='SPY Bull(5m)',
-                        mode='lines',
-                        line=dict(color='#00C853', width=0),
-                        fill='tozeroy',
-                        fillcolor='rgba(0, 200, 83, 0.08)',
-                        connectgaps=False,
-                        showlegend=False,
-                        hoverinfo='skip',
-                    ),
-                    row=spy_row, col=1, secondary_y=False
-                )
-            if spy_bear.notna().any():
-                fig.add_trace(
-                    go.Scatter(
-                        x=df['time'], y=spy_bear,
-                        name='SPY Bear(5m)',
-                        mode='lines',
-                        line=dict(color='#FF1744', width=0),
-                        fill='tozeroy',
-                        fillcolor='rgba(255, 23, 68, 0.08)',
-                        connectgaps=False,
-                        showlegend=False,
-                        hoverinfo='skip',
-                    ),
-                    row=spy_row, col=1, secondary_y=False
-                )
+            sentiment = df[['time', 'spy_5m']].dropna(subset=['spy_5m']).copy()
+            if not sentiment.empty:
+                sentiment['group'] = (sentiment['spy_5m'] != sentiment['spy_5m'].shift()).cumsum()
+                for _, grp in sentiment.groupby('group'):
+                    color = 'rgba(0, 200, 83, 0.10)' if grp['spy_5m'].iloc[0] == 'Bullish' else 'rgba(255, 23, 68, 0.10)'
+                    fig.add_vrect(
+                        x0=grp['time'].iloc[0], x1=grp['time'].iloc[-1],
+                        fillcolor=color, layer='below', line_width=0,
+                        row=spy_row, col=1
+                    )
 
         # Build hover text showing all gauge timeframes
         def build_spy_hover(row):
@@ -768,8 +745,7 @@ def create_trade_chart(df, trade_label, market_hours_only=False, show_ewo=True, 
 
     if has_spy and spy_row:
         fig.update_xaxes(title_text="Time", tickformat='%H:%M', row=spy_row, col=1)
-        # Set explicit y-axis range to match main graph tight auto-range
-        # (tozeroy fills would otherwise extend axis down to 0)
+        # Set explicit y-axis range for tight fit around price data
         spy_prices = df['spy_price'].dropna()
         if not spy_prices.empty:
             spy_min = spy_prices.min()
@@ -777,7 +753,7 @@ def create_trade_chart(df, trade_label, market_hours_only=False, show_ewo=True, 
             spy_padding = (spy_max - spy_min) * 0.05 if spy_max > spy_min else 0.5
             fig.update_yaxes(title_text="SPY ($)", secondary_y=False, tickformat='$.2f',
                              range=[spy_min - spy_padding, spy_max + spy_padding],
-                             row=spy_row, col=1)
+                             autorange=False, row=spy_row, col=1)
         else:
             fig.update_yaxes(title_text="SPY ($)", secondary_y=False, tickformat='$.2f', row=spy_row, col=1)
 
