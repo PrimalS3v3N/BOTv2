@@ -243,8 +243,8 @@ BACKTEST_CONFIG = {
     # Runs a quantized model via llama-cpp-python on GPU during backtesting.
     # The model analyzes multi-timeframe technical data and recommends hold/sell.
     'ai_exit_signal': {
-        'enabled': False,                              # Disabled by default (requires model file)
-        'model_path': '',                              # Absolute path to GGUF model file
+        'enabled': True,                               # Disabled by default (requires model file)
+        'model_path': 'models/Meta-Llama-3-8B-Instruct.Q5_K_M.gguf',  # Absolute path to GGUF model file
         'n_gpu_layers': -1,                            # GPU layers to offload (-1 = all)
         'n_ctx': 2048,                                 # Context window (tokens)
         'temperature': 0.1,                            # Low = deterministic (good for backtesting)

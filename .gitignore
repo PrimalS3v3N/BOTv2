@@ -24,5 +24,8 @@ Thumbs.db
 paper_trading_state.json
 *.pickle
 
+# AI model files (large GGUF binaries)
+models/*.gguf
+
 # Local settings with credentials
 Setting.xlsx
