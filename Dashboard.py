@@ -54,7 +54,9 @@ def load_data():
         with open(DATA_PATH, 'rb') as f:
             data = pickle.load(f)
         matrices = data.get('matrices', {})
+        statsbooks = data.get('statsbooks', {})
         st.session_state.matrices = matrices
+        st.session_state.statsbooks = statsbooks
         return matrices
     except Exception as e:
         st.error(f"Error loading data: {e}")
@@ -821,6 +823,7 @@ def main():
 
         if st.button("Reload Data"):
             st.session_state.pop('matrices', None)
+            st.session_state.pop('statsbooks', None)
             st.rerun()
 
         trade_list = []
@@ -926,10 +929,53 @@ def main():
     row2[5].metric("TBD", "1")
     row2[6].metric("TBD", "1")
 
-    # Data table
+    # StatsBook table
     st.subheader("Trade Details")
-    table_df = get_trade_table(df)
-    st.dataframe(table_df, use_container_width=True, hide_index=True)
+    ticker = df['ticker'].iloc[0] if 'ticker' in df.columns else None
+    statsbooks = st.session_state.get('statsbooks', {})
+    if ticker and ticker in statsbooks:
+        sb_df = statsbooks[ticker]
+        if isinstance(sb_df, pd.DataFrame) and not sb_df.empty:
+            # Build display DataFrame with 1-minute normalized columns
+            # Divisors: 5m/5, 1h/60, 1d/390 (trading day = 6.5h = 390 min)
+            display_df = sb_df.copy()
+            display_df.index.name = 'Stats'
+
+            # Compute 1-minute reference columns from raw numeric data
+            norm_map = {'1m:5m': ('5m', 5), '1m:1h': ('1h', 60), '1m:1d': ('1d', 390)}
+            for norm_col, (src_col, divisor) in norm_map.items():
+                if src_col in display_df.columns:
+                    display_df[norm_col] = display_df[src_col] / divisor
+
+            # Arrange columns: 5m | 1m:5m | 1h | 1m:1h | 1d | 1m:1d
+            ordered_cols = []
+            for tf in ['5m', '1h', '1d']:
+                if tf in display_df.columns:
+                    ordered_cols.append(tf)
+                norm = f"1m:{tf}"
+                if norm in display_df.columns:
+                    ordered_cols.append(norm)
+            display_df = display_df[ordered_cols]
+            display_df = display_df.reset_index()
+
+            # Format numeric values: volume rows as integers, ratio row to 2 decimals, rest to 3 decimals
+            vol_metrics = {'Max(Vol)', 'Median.Max(Vol)', 'Median(Vol)', 'Min(Vol)', 'Median.Min(Vol)'}
+            ratio_metrics = {'Max(Vol)x'}
+            for col in ordered_cols:
+                display_df[col] = display_df.apply(
+                    lambda row, c=col: (
+                        f"{int(row[c]):,}" if row['Stats'] in vol_metrics and pd.notna(row[c])
+                        else f"{row[c]:.2f}" if row['Stats'] in ratio_metrics and pd.notna(row[c])
+                        else f"{row[c]:.3f}" if pd.notna(row[c])
+                        else ""
+                    ), axis=1
+                )
+
+            st.dataframe(display_df, use_container_width=True, hide_index=True)
+        else:
+            st.info(f"No StatsBook data available for {ticker}.")
+    else:
+        st.info(f"No StatsBook data available{f' for {ticker}' if ticker else ''}.")
 
     # Databook section
     st.subheader("Databook")
