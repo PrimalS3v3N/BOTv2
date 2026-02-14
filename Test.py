@@ -639,7 +639,10 @@ class Databook:
                    spy_price=np.nan, spy_gauge=None,
                    ai_outlook_1m=None, ai_outlook_5m=None,
                    ai_outlook_30m=None, ai_outlook_1h=None,
-                   ai_action=None, ai_reason=None):
+                   ai_action=None, ai_reason=None,
+                   exit_sig_tp=None, exit_sig_sb=None, exit_sig_mp=None,
+                   exit_sig_ai=None, exit_sig_reversal=None, exit_sig_downtrend=None,
+                   exit_sig_sl=None, exit_sig_closure_peak=None):
         """Add a tracking record."""
         pnl_pct = self.position.get_pnl_pct(option_price) if holding else np.nan
 
@@ -727,6 +730,15 @@ class Databook:
             'ai_outlook_1h': ai_outlook_1h,
             'ai_action': ai_action,
             'ai_reason': ai_reason,
+            # Exit signal flags (per-bar: which signals would fire)
+            'exit_sig_tp': exit_sig_tp,
+            'exit_sig_sb': exit_sig_sb,
+            'exit_sig_mp': exit_sig_mp,
+            'exit_sig_ai': exit_sig_ai,
+            'exit_sig_reversal': exit_sig_reversal,
+            'exit_sig_downtrend': exit_sig_downtrend,
+            'exit_sig_sl': exit_sig_sl,
+            'exit_sig_closure_peak': exit_sig_closure_peak,
         }
 
         self.records.append(record)
@@ -1470,6 +1482,20 @@ class Backtest:
                         cur_milestone_pct = tp_tracker.current_milestone_pct
                         cur_trailing_price = tp_tracker.trailing_exit_price
 
+                # Update momentum peak detector
+                mp_exit = False
+                mp_reason = None
+                if mp_detector and not position.is_closed:
+                    mp_pnl = position.get_pnl_pct(option_price)
+                    mp_exit, mp_reason = mp_detector.update(mp_pnl, rsi, rsi_10min_avg, ewo)
+
+                # Update StatsBook detector
+                sb_exit = False
+                sb_reason = None
+                if sb_detector and not position.is_closed:
+                    sb_pnl = position.get_pnl_pct(option_price)
+                    sb_exit, sb_reason = sb_detector.update(sb_pnl, ewo, stock_high, stock_low)
+
                 # Update AI exit signal detector
                 ai_exit = False
                 ai_reason = None
@@ -1505,7 +1531,15 @@ class Backtest:
                     )
                     ai_signal_data = ai_detector.current_signal
 
-                # Record tracking data with stop loss, indicators, risk, SPY, and AI signals
+                # Compute Closure-Peak signal flag (last 30 min RSI-based)
+                cp_signal = False
+                if CP_enabled and not np.isnan(rsi_10min_avg) and timestamp.time() >= CP_start_time:
+                    if position.option_type.upper() in ['CALL', 'CALLS', 'C'] and rsi_10min_avg >= CP_rsi_call:
+                        cp_signal = True
+                    elif position.option_type.upper() in ['PUT', 'PUTS', 'P'] and rsi_10min_avg <= CP_rsi_put:
+                        cp_signal = True
+
+                # Record tracking data with stop loss, indicators, risk, SPY, AI signals, and exit signal flags
                 matrix.add_record(
                     timestamp=timestamp,
                     stock_price=stock_price,
@@ -1543,21 +1577,16 @@ class Backtest:
                     ai_outlook_1h=ai_signal_data.get('outlook_1h'),
                     ai_action=ai_signal_data.get('action'),
                     ai_reason=ai_signal_data.get('reason'),
+                    # Exit signal flags: which signals would fire this bar
+                    exit_sig_tp=tp_exit,
+                    exit_sig_sb=sb_exit,
+                    exit_sig_mp=mp_exit,
+                    exit_sig_ai=ai_exit,
+                    exit_sig_reversal=SL_enabled and SL_reversal_exit_enabled and SL_reversal,
+                    exit_sig_downtrend=SL_enabled and SL_downtrend_exit_enabled and SL_downtrend,
+                    exit_sig_sl=SL_enabled and SL_triggered,
+                    exit_sig_closure_peak=cp_signal,
                 )
-
-                # Update momentum peak detector
-                mp_exit = False
-                mp_reason = None
-                if mp_detector and not position.is_closed:
-                    mp_pnl = position.get_pnl_pct(option_price)
-                    mp_exit, mp_reason = mp_detector.update(mp_pnl, rsi, rsi_10min_avg, ewo)
-
-                # Update StatsBook detector
-                sb_exit = False
-                sb_reason = None
-                if sb_detector and not position.is_closed:
-                    sb_pnl = position.get_pnl_pct(option_price)
-                    sb_exit, sb_reason = sb_detector.update(sb_pnl, ewo, stock_high, stock_low)
 
                 # Take Profit - Milestones: trailing stop triggered
                 if tp_exit and not position.is_closed:

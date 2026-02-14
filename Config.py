@@ -391,6 +391,10 @@ DATAFRAME_COLUMNS = {
         'ichimoku_tenkan', 'ichimoku_kijun', 'ichimoku_senkou_a', 'ichimoku_senkou_b',
         'ai_outlook_1m', 'ai_outlook_5m', 'ai_outlook_30m', 'ai_outlook_1h',
         'ai_action', 'ai_reason',
+        # Exit signal flags (per-bar boolean: which signals would fire)
+        'exit_sig_tp', 'exit_sig_sb', 'exit_sig_mp', 'exit_sig_ai',
+        'exit_sig_reversal', 'exit_sig_downtrend', 'exit_sig_sl',
+        'exit_sig_closure_peak',
     ],
 
     # Metadata columns appended to databook (Test.py)
@@ -415,6 +419,10 @@ DATAFRAME_COLUMNS = {
         'ichimoku_tenkan', 'ichimoku_kijun', 'ichimoku_senkou_a', 'ichimoku_senkou_b',
         'ai_outlook_1m', 'ai_outlook_5m', 'ai_outlook_30m', 'ai_outlook_1h',
         'ai_action', 'ai_reason',
+        # Exit signal flags (per-bar boolean: which signals would fire)
+        'exit_sig_tp', 'exit_sig_sb', 'exit_sig_mp', 'exit_sig_ai',
+        'exit_sig_reversal', 'exit_sig_downtrend', 'exit_sig_sl',
+        'exit_sig_closure_peak',
     ],
 }
 
