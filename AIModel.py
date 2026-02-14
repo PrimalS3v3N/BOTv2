@@ -388,6 +388,38 @@ class LocalAIModel:
         self.seed = seed
         self._llm = None
 
+    @staticmethod
+    def _check_gpu_backend():
+        """
+        Check whether the installed llama-cpp-python was built with GPU support.
+
+        Returns:
+            tuple: (backend_name: str, gpu_available: bool)
+                   backend_name is 'cuda', 'metal', 'vulkan', 'cpu', etc.
+        """
+        try:
+            import llama_cpp
+            # llama-cpp-python >= 0.2.58 exposes llama_supports_gpu_offload()
+            if hasattr(llama_cpp, 'llama_supports_gpu_offload'):
+                gpu_ok = llama_cpp.llama_supports_gpu_offload()
+                if gpu_ok:
+                    # Try to identify the specific backend
+                    backend = 'gpu'
+                    for attr in ('GGML_USE_CUDA', 'GGML_USE_CUBLAS', 'GGML_USE_METAL',
+                                 'GGML_USE_VULKAN', 'GGML_USE_SYCL', 'GGML_USE_KOMPUTE'):
+                        if getattr(llama_cpp, attr, False):
+                            backend = attr.replace('GGML_USE_', '').lower()
+                            break
+                    return backend, True
+                return 'cpu', False
+
+            # Older builds: attempt a small allocation check
+            # If n_gpu_layers > 0 doesn't crash, it likely has GPU support, but
+            # we can't be certain. Flag as unknown.
+            return 'unknown', False
+        except Exception:
+            return 'unknown', False
+
     def load(self):
         """Load the model into GPU memory. Call once before backtesting."""
         if self._llm is not None:
@@ -410,13 +442,50 @@ class LocalAIModel:
                 "Recommended: Mistral-7B-Instruct-v0.3-Q4_K_M.gguf from https://huggingface.co/TheBloke"
             )
 
+        # --- GPU backend detection ---
+        backend, gpu_available = self._check_gpu_backend()
+        gpu_requested = self.n_gpu_layers != 0
+
+        if gpu_requested and not gpu_available:
+            print(
+                "\n"
+                "=" * 72 + "\n"
+                "  WARNING: GPU acceleration requested but NOT available.\n"
+                f"  Detected backend: {backend}\n"
+                "  The model will run on CPU — this is significantly slower.\n"
+                "\n"
+                "  To fix this, reinstall llama-cpp-python with CUDA support:\n"
+                "\n"
+                "    pip uninstall llama-cpp-python -y\n"
+                "    CMAKE_ARGS=\"-DGGML_CUDA=on\" pip install llama-cpp-python --no-cache-dir\n"
+                "\n"
+                "  Prerequisites:\n"
+                "    - NVIDIA GPU with CUDA support\n"
+                "    - CUDA Toolkit installed  (nvcc --version to verify)\n"
+                "    - cuBLAS / CUDA drivers   (nvidia-smi to verify)\n"
+                "=" * 72 + "\n"
+            )
+        elif gpu_requested and gpu_available:
+            print(f"[AIModel] GPU backend detected: {backend} — offloading {self.n_gpu_layers} layers "
+                  f"({'all' if self.n_gpu_layers == -1 else self.n_gpu_layers})")
+
+        # Load with verbose=True on first load so llama.cpp prints device info,
+        # then suppress on subsequent calls.
         self._llm = Llama(
             model_path=self.model_path,
             n_gpu_layers=self.n_gpu_layers,
             n_ctx=self.n_ctx,
             seed=self.seed,
-            verbose=False,
+            verbose=True,
         )
+
+        # After loading, report the effective device
+        if gpu_requested and gpu_available:
+            print(f"[AIModel] Model loaded successfully on GPU ({backend})")
+        elif gpu_requested:
+            print("[AIModel] Model loaded on CPU (GPU unavailable — see warning above)")
+        else:
+            print("[AIModel] Model loaded on CPU (n_gpu_layers=0, GPU offloading disabled)")
 
     def unload(self):
         """Free the model from memory."""
