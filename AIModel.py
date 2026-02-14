@@ -437,8 +437,13 @@ class LocalAIModel:
         except ImportError:
             raise ImportError(
                 "llama-cpp-python is required for AI exit signals.\n"
-                "Install with GPU support:\n"
-                "  CMAKE_ARGS=\"-DGGML_CUDA=on\" pip install llama-cpp-python\n"
+                "Install with GPU support (use pre-built CUDA wheels):\n"
+                "\n"
+                "  pip install llama-cpp-python \\\n"
+                "    --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu124 \\\n"
+                "    --no-cache-dir --force-reinstall\n"
+                "\n"
+                "  (Use cu124 for CUDA 12.x, or cu118 for CUDA 11.x)\n"
                 "See: https://github.com/abetlen/llama-cpp-python#installation"
             )
 
@@ -461,15 +466,16 @@ class LocalAIModel:
                 f"  Detected backend: {backend}\n"
                 "  The model will run on CPU — this is significantly slower.\n"
                 "\n"
-                "  To fix this, reinstall llama-cpp-python with CUDA support:\n"
+                "  To fix this, reinstall with pre-built CUDA wheels:\n"
                 "\n"
                 "    pip uninstall llama-cpp-python -y\n"
-                "    CMAKE_ARGS=\"-DGGML_CUDA=on\" pip install llama-cpp-python --no-cache-dir\n"
+                "    pip install llama-cpp-python --extra-index-url \\\n"
+                "      https://abetlen.github.io/llama-cpp-python/whl/cu124 \\\n"
+                "      --no-cache-dir --force-reinstall\n"
                 "\n"
-                "  Prerequisites:\n"
-                "    - NVIDIA GPU with CUDA support\n"
-                "    - CUDA Toolkit installed  (nvcc --version to verify)\n"
-                "    - cuBLAS / CUDA drivers   (nvidia-smi to verify)\n"
+                "  (Use cu124 for CUDA 12.x, or cu118 for CUDA 11.x)\n"
+                "  Check your CUDA version: nvcc --version\n"
+                "  Check your GPU driver:   nvidia-smi\n"
                 "=" * 72 + "\n"
             )
         elif gpu_requested and gpu_available:
