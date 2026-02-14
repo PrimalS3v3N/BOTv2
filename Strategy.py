@@ -9,6 +9,7 @@ INTERNAL - Strategy Decision Logic
 ================================================================================
 """
 
+import time
 import numpy as np
 
 
@@ -693,6 +694,18 @@ class AIExitSignal:
     def unload_model(self):
         """Free model from GPU memory. Call after backtesting."""
         if self._model is not None:
+            stats = self._model.inference_stats
+            if stats['count'] > 0:
+                print(
+                    f"\n{'=' * 60}\n"
+                    f"  AI MODEL PERFORMANCE SUMMARY\n"
+                    f"  Total inferences: {stats['count']}\n"
+                    f"  Total AI time:    {stats['total_s']:.1f}s\n"
+                    f"  Avg per call:     {stats['avg_s']:.2f}s\n"
+                    f"  Fastest:          {stats['min_s']:.2f}s\n"
+                    f"  Slowest:          {stats['max_s']:.2f}s\n"
+                    f"{'=' * 60}\n"
+                )
             self._model.unload()
             self._model = None
         if self._logger is not None:
@@ -761,6 +774,8 @@ class AIExitSignalDetector:
 
         self._bars_since_eval = 0
         self._total_bars = 0
+        self._inference_count = 0
+        self._trade_inference_time = 0.0
 
         # Last AI signal (persists between evaluations)
         self._current_signal = {
@@ -827,12 +842,22 @@ class AIExitSignalDetector:
         )
 
         try:
+            t0 = time.perf_counter()
             raw_response = self._model.inference(AIModel.SYSTEM_PROMPT, user_prompt)
+            elapsed = time.perf_counter() - t0
             signal = self._parser.parse(raw_response)
         except Exception:
+            elapsed = 0.0
             signal = self._parser.parse(None)
 
+        self._inference_count += 1
+        self._trade_inference_time += elapsed
         self._current_signal = signal
+
+        action = signal.get('action', '?')
+        print(f"[AI] {self.trade_label} | inference #{self._inference_count} "
+              f"| {elapsed:.1f}s | action={action} | bar {self._total_bars} "
+              f"| P&L {pnl_pct:+.1f}%")
 
         # Log inference for self-training
         if self._logger is not None:
@@ -847,6 +872,8 @@ class AIExitSignalDetector:
 
         # Check exit
         if self.exit_on_sell and signal.get('action') == 'sell':
+            print(f"[AI] {self.trade_label} | EXIT SELL after {self._inference_count} inferences "
+                  f"({self._trade_inference_time:.1f}s total AI time)")
             return True, 'AI Exit Signal'
 
         return False, None
@@ -855,3 +882,12 @@ class AIExitSignalDetector:
     def current_signal(self):
         """Current AI signal dict (last evaluation result, cached between evals)."""
         return self._current_signal
+
+    @property
+    def trade_ai_stats(self):
+        """Per-trade AI performance stats."""
+        return {
+            'inferences': self._inference_count,
+            'total_ai_time_s': round(self._trade_inference_time, 2),
+            'avg_inference_s': round(self._trade_inference_time / self._inference_count, 2) if self._inference_count > 0 else 0,
+        }

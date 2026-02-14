@@ -16,6 +16,7 @@ INTERNAL - AI Inference Engine
 
 import json
 import os
+import time
 import datetime as dt
 import hashlib
 import uuid
@@ -388,6 +389,12 @@ class LocalAIModel:
         self.seed = seed
         self._llm = None
 
+        # Inference performance tracking
+        self._inference_count = 0
+        self._total_inference_time = 0.0
+        self._min_inference_time = float('inf')
+        self._max_inference_time = 0.0
+
     @staticmethod
     def _check_gpu_backend():
         """
@@ -507,6 +514,8 @@ class LocalAIModel:
         if self._llm is None:
             raise RuntimeError("Model not loaded. Call .load() first.")
 
+        t0 = time.perf_counter()
+
         response = self._llm.create_chat_completion(
             messages=[
                 {"role": "system", "content": system_prompt},
@@ -515,6 +524,14 @@ class LocalAIModel:
             temperature=self.temperature,
             max_tokens=self.max_tokens,
         )
+
+        elapsed = time.perf_counter() - t0
+
+        # Track stats
+        self._inference_count += 1
+        self._total_inference_time += elapsed
+        self._min_inference_time = min(self._min_inference_time, elapsed)
+        self._max_inference_time = max(self._max_inference_time, elapsed)
 
         # Extract text from the response
         try:
@@ -525,6 +542,19 @@ class LocalAIModel:
     @property
     def is_loaded(self):
         return self._llm is not None
+
+    @property
+    def inference_stats(self):
+        """Return cumulative inference performance stats."""
+        if self._inference_count == 0:
+            return {'count': 0, 'total_s': 0, 'avg_s': 0, 'min_s': 0, 'max_s': 0}
+        return {
+            'count': self._inference_count,
+            'total_s': round(self._total_inference_time, 2),
+            'avg_s': round(self._total_inference_time / self._inference_count, 2),
+            'min_s': round(self._min_inference_time, 2),
+            'max_s': round(self._max_inference_time, 2),
+        }
 
 
 # =============================================================================
