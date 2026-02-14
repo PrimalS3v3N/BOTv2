@@ -41,6 +41,27 @@ COLORS = {
     'ichimoku_cloud_bear': 'rgba(255, 23, 68, 0.15)',  # Red cloud fill
     'ichimoku_senkou_a': '#26A69A',  # Teal (Leading Span A)
     'ichimoku_senkou_b': '#EF5350',  # Red (Leading Span B)
+    # Exit signal markers
+    'sig_tp': '#FFD700',           # Gold (Take Profit)
+    'sig_sb': '#FF9800',           # Orange (StatsBook)
+    'sig_mp': '#E040FB',           # Purple (Momentum Peak)
+    'sig_ai': '#00BCD4',           # Cyan (AI Exit)
+    'sig_reversal': '#F44336',     # Red (Reversal)
+    'sig_downtrend': '#D32F2F',    # Dark Red (DownTrend)
+    'sig_sl': '#FF5722',           # Deep Orange (Stop Loss)
+    'sig_closure_peak': '#7C4DFF', # Deep Purple (Closure Peak)
+}
+
+# Exit signal definitions: column name -> (display label, color key, marker symbol)
+EXIT_SIGNAL_DEFS = {
+    'exit_sig_tp':           ('TP',           'sig_tp',           'diamond'),
+    'exit_sig_sb':           ('StatsBook',    'sig_sb',           'diamond'),
+    'exit_sig_mp':           ('Mom. Peak',    'sig_mp',           'diamond'),
+    'exit_sig_ai':           ('AI Exit',      'sig_ai',           'diamond'),
+    'exit_sig_reversal':     ('Reversal',     'sig_reversal',     'diamond'),
+    'exit_sig_downtrend':    ('DownTrend',    'sig_downtrend',    'diamond'),
+    'exit_sig_sl':           ('Stop Loss',    'sig_sl',           'diamond'),
+    'exit_sig_closure_peak': ('Closure Peak', 'sig_closure_peak', 'diamond'),
 }
 
 def load_data():
@@ -475,6 +496,39 @@ def create_trade_chart(df, trade_label, market_hours_only=False, show_ewo=True, 
             row=1, col=1, secondary_y=True
         )
 
+    # Exit signal markers on main chart (right y-axis, aligned with option price)
+    # Show diamond markers at the top of the option price axis where each exit signal fires
+    if opt_col in df.columns:
+        opt_max = df[opt_col].max() if df[opt_col].notna().any() else 1
+        opt_min = df[opt_col].min() if df[opt_col].notna().any() else 0
+        opt_range = opt_max - opt_min if opt_max > opt_min else opt_max * 0.1
+        # Stack signals vertically above the chart area
+        sig_offset_step = opt_range * 0.04
+
+        for sig_idx, (sig_col, (sig_label, sig_color_key, sig_symbol)) in enumerate(EXIT_SIGNAL_DEFS.items()):
+            if sig_col in df.columns and df[sig_col].notna().any():
+                sig_mask = df[sig_col] == True
+                if sig_mask.any():
+                    sig_y = opt_max + sig_offset_step * (sig_idx + 1)
+                    fig.add_trace(
+                        go.Scatter(
+                            x=df.loc[sig_mask, 'time'],
+                            y=[sig_y] * sig_mask.sum(),
+                            mode='markers',
+                            name=f'Sig: {sig_label}',
+                            marker=dict(
+                                symbol=sig_symbol,
+                                size=8,
+                                color=COLORS[sig_color_key],
+                                line=dict(color='white', width=0.5),
+                            ),
+                            hovertemplate=f'{sig_label} signal<br>%{{x}}<extra></extra>',
+                            legendgroup='exit_signals',
+                            visible='legendonly',
+                        ),
+                        row=1, col=1, secondary_y=True
+                    )
+
     # EWO subplot (row 2) — displayed as histogram bars
     if has_ewo:
         # Color each bar green (positive) or red (negative)
@@ -833,6 +887,15 @@ def get_trade_summary(df):
                 if pd.notna(last_trend):
                     risk_trend = str(last_trend)
 
+    # Count exit signal activations during holding period
+    exit_signal_counts = {}
+    if 'holding' in df.columns:
+        holding_df = df[df['holding'] == True]
+        for sig_col, (sig_label, _, _) in EXIT_SIGNAL_DEFS.items():
+            if sig_col in holding_df.columns:
+                count = (holding_df[sig_col] == True).sum()
+                exit_signal_counts[sig_label] = int(count)
+
     return {
         'entry': entry_price,
         'exit': exit_price,
@@ -848,6 +911,7 @@ def get_trade_summary(df):
         'risk': risk,
         'risk_reasons': risk_reasons,
         'risk_trend': risk_trend,
+        'exit_signal_counts': exit_signal_counts,
     }
 
 
@@ -1042,15 +1106,39 @@ def main():
     row1[5].metric("Risk Trend", summary['risk_trend'] or 'N/A')
     row1[6].metric("Profit[min]", f"${summary['profit_min']:+.2f}")
 
-    # Row 2: Min Profit | Exit Reason | Max Profit | Risk Reasons | TBD | TBD | TBD
+    # Row 2: Min Profit | Exit Reason | Max Profit | Risk Reasons
     row2 = st.columns(7)
     row2[0].metric("Min Profit", f"{summary['min_profit_pct']:+.1f}%")
     row2[1].metric("Exit Reason", summary['exit_reason'])
     row2[2].metric("Max Profit", f"{summary['max_profit_pct']:+.1f}%")
     row2[3].metric("Risk Reasons", summary['risk_reasons'] or 'N/A')
-    row2[4].metric("TBD", "1")
-    row2[5].metric("TBD", "1")
-    row2[6].metric("TBD", "1")
+
+    # Show exit signal counts in remaining columns
+    sig_counts = summary.get('exit_signal_counts', {})
+    active_sigs = {k: v for k, v in sig_counts.items() if v > 0}
+    active_sig_items = list(active_sigs.items())
+    for col_idx in range(3):
+        if col_idx < len(active_sig_items):
+            sig_name, sig_count = active_sig_items[col_idx]
+            row2[4 + col_idx].metric(f"Sig: {sig_name}", f"{sig_count} bars")
+        else:
+            # Show combined summary if more signals exist
+            if col_idx == 0 and not active_sig_items:
+                row2[4].metric("Signals", "None")
+            elif col_idx == 0 and len(active_sig_items) > 3:
+                remaining = len(active_sig_items) - 3
+                row2[4 + col_idx].metric(f"+{remaining} more", "...")
+            else:
+                row2[4 + col_idx].metric("", "")
+
+    # Row 3: Exit signal bar counts (all signals that fired during holding)
+    if active_sig_items:
+        st.subheader("Exit Signals")
+        # Show all exit signal counts in a dynamic row
+        num_sigs = len(active_sig_items)
+        sig_cols = st.columns(max(num_sigs, 1))
+        for i, (sig_name, sig_count) in enumerate(active_sig_items):
+            sig_cols[i].metric(sig_name, f"{sig_count} bars")
 
     # StatsBook table
     st.subheader("Statsbook")
@@ -1185,6 +1273,13 @@ def main():
 
         if 'rsi_10min_avg' in matrix_df.columns:
             matrix_df['rsi_10min_avg'] = matrix_df['rsi_10min_avg'].apply(lambda x: f"{x:.1f}" if pd.notna(x) else "")
+
+        # Format exit signal flags as checkmarks
+        for sig_col in EXIT_SIGNAL_DEFS:
+            if sig_col in matrix_df.columns:
+                matrix_df[sig_col] = matrix_df[sig_col].apply(
+                    lambda x: 'Y' if x is True else '' if pd.isna(x) else ''
+                )
 
         st.dataframe(matrix_df, use_container_width=True, hide_index=True)
     else:
