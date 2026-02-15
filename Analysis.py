@@ -1,7 +1,7 @@
 """
 Analysis.py - Technical Analysis
 
-Module Goal: Process all math here (RSI, MACD, VPOC, VWAP, EWO, etc.)
+Module Goal: Process all math here (EMA, VWAP, options pricing)
 
 ================================================================================
 INTERNAL - Indicator Calculations
@@ -12,6 +12,10 @@ import pandas as pd
 import numpy as np
 
 
+# Default EMA periods (days)
+EMA_PERIODS = [10, 21, 50, 100, 200]
+
+
 def EMA(df, column='close', period=30):
     """
     Calculate Exponential Moving Average.
@@ -19,7 +23,7 @@ def EMA(df, column='close', period=30):
     Args:
         df: DataFrame with price data
         column: Column name to calculate EMA on (default: 'close')
-        period: EMA period in bars (default: 30 for 30-minute EMA on 1-min data)
+        period: EMA period in bars (default: 30)
 
     Returns:
         Series with EMA values
@@ -80,35 +84,6 @@ def VWAP(df, price_col='close', volume_col='volume'):
     return vwap
 
 
-def EWO(df, column='close', fast_period=5, slow_period=35):
-    """
-    Calculate Elliott Wave Oscillator.
-
-    EWO = EMA(fast) - EMA(slow)
-
-    The EWO helps identify wave patterns and momentum:
-    - Positive EWO: Bullish momentum
-    - Negative EWO: Bearish momentum
-    - Zero crossings: Potential trend changes
-
-    Args:
-        df: DataFrame with price data
-        column: Column name to calculate EWO on (default: 'close')
-        fast_period: Fast EMA period (default: 5)
-        slow_period: Slow EMA period (default: 35)
-
-    Returns:
-        Series with EWO values
-    """
-    if column not in df.columns:
-        return pd.Series(index=df.index, dtype=float)
-
-    ema_fast = df[column].ewm(span=fast_period, adjust=False).mean()
-    ema_slow = df[column].ewm(span=slow_period, adjust=False).mean()
-
-    return ema_fast - ema_slow
-
-
 def true_price(stock_price, stock_high, stock_low):
     """Calculate True Price as the average of high, low, and stock price at each interval."""
     if pd.notna(stock_high) and pd.notna(stock_low):
@@ -116,285 +91,36 @@ def true_price(stock_price, stock_high, stock_low):
     return stock_price
 
 
-def RSI(df, column='close', period=14):
-    """
-    Calculate Relative Strength Index.
-
-    RSI = 100 - (100 / (1 + RS))
-    where RS = Average Gain / Average Loss over period
-
-    RSI interpretation:
-    - RSI > 70: Overbought (potential sell signal)
-    - RSI < 30: Oversold (potential buy signal)
-    - RSI = 50: Neutral momentum
-
-    Args:
-        df: DataFrame with price data
-        column: Column name to calculate RSI on (default: 'close')
-        period: RSI lookback period (default: 14)
-
-    Returns:
-        Series with RSI values (0-100 scale)
-    """
-    if column not in df.columns:
-        return pd.Series(index=df.index, dtype=float)
-
-    # Calculate price changes
-    delta = df[column].diff()
-
-    # Separate gains and losses
-    gains = delta.where(delta > 0, 0.0)
-    losses = (-delta).where(delta < 0, 0.0)
-
-    # Calculate exponential moving average of gains and losses
-    avg_gains = gains.ewm(span=period, adjust=False).mean()
-    avg_losses = losses.ewm(span=period, adjust=False).mean()
-
-    # Calculate RS and RSI
-    rs = avg_gains / avg_losses
-    rsi = 100 - (100 / (1 + rs))
-
-    # Handle division by zero (when avg_losses is 0)
-    rsi = rsi.replace([np.inf, -np.inf], 100)
-    rsi = rsi.fillna(50)  # Neutral when no data
-
-    return rsi
-
-
-def Supertrend(df, atr_period=10, multiplier=3.0):
-    """
-    Calculate Supertrend indicator.
-
-    Supertrend uses ATR (Average True Range) to create dynamic support/resistance
-    bands around the price. The indicator flips between upper and lower bands
-    based on trend direction.
-
-    - When price closes above the upper band: Uptrend (bullish)
-    - When price closes below the lower band: Downtrend (bearish)
-
-    Args:
-        df: DataFrame with 'high', 'low', 'close' columns
-        atr_period: Period for ATR calculation (default: 10)
-        multiplier: ATR multiplier for band width (default: 3.0)
-
-    Returns:
-        tuple: (supertrend Series, direction Series)
-            - supertrend: the Supertrend line values
-            - direction: 1 for uptrend (bullish), -1 for downtrend (bearish)
-    """
-    if not all(col in df.columns for col in ['high', 'low', 'close']):
-        return pd.Series(index=df.index, dtype=float), pd.Series(index=df.index, dtype=float)
-
-    high = df['high']
-    low = df['low']
-    close = df['close']
-
-    # Calculate True Range and ATR
-    tr1 = high - low
-    tr2 = (high - close.shift(1)).abs()
-    tr3 = (low - close.shift(1)).abs()
-    true_range = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = true_range.ewm(span=atr_period, adjust=False).mean()
-
-    # HL2 (midpoint)
-    hl2 = (high + low) / 2
-
-    # Basic bands
-    basic_upper = hl2 + multiplier * atr
-    basic_lower = hl2 - multiplier * atr
-
-    # Initialize final bands and direction
-    final_upper = basic_upper.copy()
-    final_lower = basic_lower.copy()
-    supertrend = pd.Series(index=df.index, dtype=float)
-    direction = pd.Series(index=df.index, dtype=float)
-
-    for i in range(1, len(df)):
-        # Final upper band: use previous final upper if current basic upper is lower
-        # and previous close was above previous final upper
-        if basic_upper.iloc[i] < final_upper.iloc[i - 1] or close.iloc[i - 1] > final_upper.iloc[i - 1]:
-            final_upper.iloc[i] = basic_upper.iloc[i]
-        else:
-            final_upper.iloc[i] = final_upper.iloc[i - 1]
-
-        # Final lower band: use previous final lower if current basic lower is higher
-        # and previous close was below previous final lower
-        if basic_lower.iloc[i] > final_lower.iloc[i - 1] or close.iloc[i - 1] < final_lower.iloc[i - 1]:
-            final_lower.iloc[i] = basic_lower.iloc[i]
-        else:
-            final_lower.iloc[i] = final_lower.iloc[i - 1]
-
-    # Determine direction and supertrend line
-    # Start with initial direction based on first valid close vs bands
-    direction.iloc[0] = 1  # Assume uptrend initially
-
-    for i in range(1, len(df)):
-        prev_dir = direction.iloc[i - 1]
-
-        if prev_dir == 1:  # Was uptrend
-            if close.iloc[i] < final_lower.iloc[i]:
-                direction.iloc[i] = -1  # Flip to downtrend
-            else:
-                direction.iloc[i] = 1
-        else:  # Was downtrend
-            if close.iloc[i] > final_upper.iloc[i]:
-                direction.iloc[i] = 1  # Flip to uptrend
-            else:
-                direction.iloc[i] = -1
-
-        # Supertrend line follows lower band in uptrend, upper band in downtrend
-        if direction.iloc[i] == 1:
-            supertrend.iloc[i] = final_lower.iloc[i]
-        else:
-            supertrend.iloc[i] = final_upper.iloc[i]
-
-    # Set first value
-    supertrend.iloc[0] = final_lower.iloc[0] if direction.iloc[0] == 1 else final_upper.iloc[0]
-
-    return supertrend, direction
-
-
-def IchimokuCloud(df, tenkan_period=9, kijun_period=26, senkou_b_period=52, displacement=26):
-    """
-    Calculate Ichimoku Cloud indicator.
-
-    The Ichimoku Cloud (Ichimoku Kinko Hyo) is a comprehensive indicator that defines
-    support/resistance, trend direction, momentum, and trading signals.
-
-    Components:
-    - Tenkan-sen (Conversion Line): Midpoint of highest high and lowest low over tenkan_period
-    - Kijun-sen (Base Line): Midpoint of highest high and lowest low over kijun_period
-    - Senkou Span A (Leading Span A): Average of Tenkan and Kijun, displaced forward
-    - Senkou Span B (Leading Span B): Midpoint of highest high and lowest low over senkou_b_period, displaced forward
-    - Chikou Span (Lagging Span): Current close displaced backward (not included - only useful visually)
-
-    Cloud interpretation:
-    - Price above cloud: Bullish trend
-    - Price below cloud: Bearish trend
-    - Price inside cloud: Consolidation/no trend
-    - Span A above Span B: Bullish cloud (green)
-    - Span A below Span B: Bearish cloud (red)
-
-    Args:
-        df: DataFrame with 'high', 'low', 'close' columns
-        tenkan_period: Period for Tenkan-sen / Conversion Line (default: 9)
-        kijun_period: Period for Kijun-sen / Base Line (default: 26)
-        senkou_b_period: Period for Senkou Span B (default: 52)
-        displacement: Forward displacement for Senkou spans (default: 26)
-
-    Returns:
-        tuple: (tenkan_sen, kijun_sen, senkou_span_a, senkou_span_b)
-            - tenkan_sen: Conversion Line values
-            - kijun_sen: Base Line values
-            - senkou_span_a: Leading Span A (displaced forward by displacement periods)
-            - senkou_span_b: Leading Span B (displaced forward by displacement periods)
-    """
-    empty = pd.Series(index=df.index, dtype=float)
-    if not all(col in df.columns for col in ['high', 'low', 'close']):
-        return empty.copy(), empty.copy(), empty.copy(), empty.copy()
-
-    high = df['high']
-    low = df['low']
-
-    # Tenkan-sen (Conversion Line): (highest high + lowest low) / 2 over tenkan_period
-    tenkan_sen = (high.rolling(window=tenkan_period, min_periods=tenkan_period).max() +
-                  low.rolling(window=tenkan_period, min_periods=tenkan_period).min()) / 2
-
-    # Kijun-sen (Base Line): (highest high + lowest low) / 2 over kijun_period
-    kijun_sen = (high.rolling(window=kijun_period, min_periods=kijun_period).max() +
-                 low.rolling(window=kijun_period, min_periods=kijun_period).min()) / 2
-
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2, displaced forward
-    senkou_span_a = ((tenkan_sen + kijun_sen) / 2).shift(displacement)
-
-    # Senkou Span B (Leading Span B): (highest high + lowest low) / 2 over senkou_b_period, displaced forward
-    senkou_span_b = ((high.rolling(window=senkou_b_period, min_periods=senkou_b_period).max() +
-                      low.rolling(window=senkou_b_period, min_periods=senkou_b_period).min()) / 2).shift(displacement)
-
-    return tenkan_sen, kijun_sen, senkou_span_a, senkou_span_b
-
-
-def add_indicators(df, ema_period=30, ewo_fast=5, ewo_slow=35, ewo_avg_period=15, rsi_period=14, rsi_avg_period=10,
-                   supertrend_period=10, supertrend_multiplier=3.0,
-                   ichimoku_tenkan=9, ichimoku_kijun=26, ichimoku_senkou_b=52, ichimoku_displacement=26):
+def add_indicators(df, ema_periods=None):
     """
     Add all standard indicators to a DataFrame.
 
     Args:
         df: DataFrame with OHLCV data (must have 'close', 'volume' columns)
-        ema_period: Period for EMA calculation (default: 30)
-        ewo_fast: Fast period for EWO (default: 5)
-        ewo_slow: Slow period for EWO (default: 35)
-        ewo_avg_period: Period for EWO rolling average (default: 15 for 15-min avg on 1-min data)
-        rsi_period: Period for RSI calculation (default: 14)
-        rsi_avg_period: Period for RSI rolling average (default: 10 for 10-min avg on 1-min data)
-        supertrend_period: ATR period for Supertrend (default: 10)
-        supertrend_multiplier: ATR multiplier for Supertrend bands (default: 3.0)
-        ichimoku_tenkan: Tenkan-sen period (default: 9)
-        ichimoku_kijun: Kijun-sen period (default: 26)
-        ichimoku_senkou_b: Senkou Span B period (default: 52)
-        ichimoku_displacement: Forward displacement for cloud spans (default: 26)
+        ema_periods: List of EMA periods to calculate (default: [10, 21, 50, 100, 200])
 
     Returns:
         DataFrame with added indicator columns:
-        - ema_30: 30-period EMA
+        - ema_10, ema_21, ema_50, ema_100, ema_200: EMAs at each period
         - vwap: Volume Weighted Average Price
-        - vwap_ema_avg: (VWAP + EMA + High) / 3
-        - emavwap: (EMA + VWAP) / 2
-        - ewo: Elliott Wave Oscillator
-        - ewo_15min_avg: 15-minute rolling average of EWO
-        - rsi: Relative Strength Index (0-100 scale)
-        - rsi_10min_avg: 10-minute rolling average of RSI
-        - supertrend: Supertrend line value
-        - supertrend_direction: 1 (uptrend/bullish) or -1 (downtrend/bearish)
-        - ichimoku_tenkan: Tenkan-sen (Conversion Line)
-        - ichimoku_kijun: Kijun-sen (Base Line)
-        - ichimoku_senkou_a: Senkou Span A (Leading Span A)
-        - ichimoku_senkou_b: Senkou Span B (Leading Span B)
     """
+    if ema_periods is None:
+        ema_periods = EMA_PERIODS
+
     df = df.copy()
 
     # Calculate true price column: (high + low + close) / 3
-    # All indicators use true price instead of raw stock close price
     if 'high' in df.columns and 'low' in df.columns:
         df['_true_price'] = (df['high'] + df['low'] + df['close']) / 3
     else:
         df['_true_price'] = df['close']
 
-    # Add EMA (based on true price)
-    df['ema_30'] = EMA(df, column='_true_price', period=ema_period)
+    # Add EMAs at each period (based on true price)
+    for period in ema_periods:
+        df[f'ema_{period}'] = EMA(df, column='_true_price', period=period)
 
     # Add VWAP (based on true price)
     df['vwap'] = VWAP(df, price_col='_true_price', volume_col='volume')
-
-    # Add EWO (based on true price)
-    df['ewo'] = EWO(df, column='_true_price', fast_period=ewo_fast, slow_period=ewo_slow)
-
-    # Add EWO 15-minute rolling average (simple moving average over ewo_avg_period bars)
-    df['ewo_15min_avg'] = df['ewo'].rolling(window=ewo_avg_period, min_periods=1).mean()
-
-    # Add RSI (based on true price)
-    df['rsi'] = RSI(df, column='_true_price', period=rsi_period)
-
-    # Add RSI 10-minute rolling average (simple moving average over rsi_avg_period bars)
-    df['rsi_10min_avg'] = df['rsi'].rolling(window=rsi_avg_period, min_periods=1).mean()
-
-    # Add VWAP-EMA-High Average: (VWAP + EMA + High) / 3
-    df['vwap_ema_avg'] = (df['vwap'] + df['ema_30'] + df['high']) / 3
-
-    # Add EMAVWAP: (EMA + VWAP) / 2
-    df['emavwap'] = (df['ema_30'] + df['vwap']) / 2
-
-    # Add Supertrend
-    df['supertrend'], df['supertrend_direction'] = Supertrend(
-        df, atr_period=supertrend_period, multiplier=supertrend_multiplier
-    )
-
-    # Add Ichimoku Cloud
-    df['ichimoku_tenkan'], df['ichimoku_kijun'], df['ichimoku_senkou_a'], df['ichimoku_senkou_b'] = IchimokuCloud(
-        df, tenkan_period=ichimoku_tenkan, kijun_period=ichimoku_kijun,
-        senkou_b_period=ichimoku_senkou_b, displacement=ichimoku_displacement
-    )
 
     # Clean up temporary column
     df = df.drop(columns=['_true_price'])
@@ -619,6 +345,6 @@ def estimate_option_price_bs(stock_price, strike, option_type, days_to_expiry,
 
 
 # Export functions for use by other modules
-__all__ = ['EMA', 'VWAP', 'EWO', 'true_price', 'RSI', 'Supertrend', 'IchimokuCloud', 'add_indicators',
+__all__ = ['EMA', 'VWAP', 'true_price', 'add_indicators', 'EMA_PERIODS',
            'black_scholes_call', 'black_scholes_put', 'black_scholes_price',
            'calculate_greeks', 'estimate_option_price_bs']
