@@ -378,7 +378,39 @@ def ATR_SL(df, atr_period=5, hhv_period=10, multiplier=2.5):
     return ts
 
 
-def add_indicators(df, ema_periods=None, ewo_fast=5, ewo_slow=35, ewo_avg_period=15,
+def compute_daily_emas(daily_df, periods=None):
+    """
+    Compute daily EMAs from daily OHLCV data.
+
+    Calculates EMA at each period using daily close prices. Returns the
+    most recent (last) EMA value for each period, suitable for passing
+    as daily_ema_prev to add_indicators().
+
+    Args:
+        daily_df: DataFrame with daily OHLCV data (must have 'close' column)
+        periods: List of EMA periods in days (default: [10, 21, 50, 100, 200])
+
+    Returns:
+        dict: {period: float} mapping each period to its most recent daily EMA value.
+              Returns empty dict if daily_df is empty or missing 'close' column.
+    """
+    if periods is None:
+        periods = [10, 21, 50, 100, 200]
+
+    if daily_df is None or daily_df.empty or 'close' not in daily_df.columns:
+        return {}
+
+    result = {}
+    for period in periods:
+        ema_series = daily_df['close'].ewm(span=period, adjust=False).mean()
+        if not ema_series.empty and pd.notna(ema_series.iloc[-1]):
+            result[period] = ema_series.iloc[-1]
+
+    return result
+
+
+def add_indicators(df, ema_periods=None, daily_ema_prev=None,
+                   ewo_fast=5, ewo_slow=35, ewo_avg_period=15,
                    rsi_period=14, rsi_avg_period=10,
                    supertrend_period=10, supertrend_multiplier=3.0,
                    ichimoku_tenkan=9, ichimoku_kijun=26, ichimoku_senkou_b=52, ichimoku_displacement=26,
@@ -388,7 +420,11 @@ def add_indicators(df, ema_periods=None, ewo_fast=5, ewo_slow=35, ewo_avg_period
 
     Args:
         df: DataFrame with OHLCV data (must have 'close', 'volume' columns)
-        ema_periods: List of EMA periods (default: [10, 21, 50, 100, 200])
+        ema_periods: List of EMA periods in days (default: [10, 21, 50, 100, 200])
+        daily_ema_prev: dict of {period: float} with previous trading day's daily EMA values.
+            When provided, computes live daily EMAs per bar using:
+                ema_live = alpha * close + (1 - alpha) * prev_day_ema
+            When None, falls back to computing EMAs on the intraday bars directly.
         ewo_fast: Fast period for EWO (default: 5)
         ewo_slow: Slow period for EWO (default: 35)
         ewo_avg_period: Period for EWO rolling average (default: 15 for 15-min avg on 1-min data)
@@ -406,7 +442,7 @@ def add_indicators(df, ema_periods=None, ewo_fast=5, ewo_slow=35, ewo_avg_period
 
     Returns:
         DataFrame with added indicator columns:
-        - ema_10, ema_21, ema_50, ema_100, ema_200: EMAs at various periods
+        - ema_10, ema_21, ema_50, ema_100, ema_200: Daily EMAs (live-updating per bar)
         - vwap: Volume Weighted Average Price
         - vwap_ema_avg: (VWAP + EMA_21 + High) / 3
         - emavwap: (EMA_21 + VWAP) / 2
@@ -434,9 +470,23 @@ def add_indicators(df, ema_periods=None, ewo_fast=5, ewo_slow=35, ewo_avg_period
     else:
         df['_true_price'] = df['close']
 
-    # Add EMAs at multiple periods (based on true price)
-    for period in ema_periods:
-        df[f'ema_{period}'] = EMA(df, column='_true_price', period=period)
+    # Add EMAs - daily timeframe with live intraday updates
+    if daily_ema_prev is not None:
+        # Live daily EMAs: for each bar, compute what the daily EMA would be
+        # if the market closed at this bar's price.
+        # Formula: ema_live = alpha * close + (1 - alpha) * prev_day_ema
+        # This matches TradingView's behavior of overlaying daily EMAs on intraday charts.
+        for period in ema_periods:
+            prev_ema = daily_ema_prev.get(period)
+            if prev_ema is not None and not np.isnan(prev_ema):
+                alpha = 2.0 / (period + 1)
+                df[f'ema_{period}'] = alpha * df['close'] + (1 - alpha) * prev_ema
+            else:
+                df[f'ema_{period}'] = np.nan
+    else:
+        # Fallback: intraday EMAs (when no daily data available)
+        for period in ema_periods:
+            df[f'ema_{period}'] = EMA(df, column='_true_price', period=period)
 
     # Add VWAP (based on true price)
     df['vwap'] = VWAP(df, price_col='_true_price', volume_col='volume')
@@ -698,5 +748,6 @@ def estimate_option_price_bs(stock_price, strike, option_type, days_to_expiry,
 
 # Export functions for use by other modules
 __all__ = ['EMA', 'VWAP', 'EWO', 'true_price', 'RSI', 'Supertrend', 'IchimokuCloud', 'ATR_SL',
-           'add_indicators', 'black_scholes_call', 'black_scholes_put', 'black_scholes_price',
+           'add_indicators', 'compute_daily_emas',
+           'black_scholes_call', 'black_scholes_put', 'black_scholes_price',
            'calculate_greeks', 'estimate_option_price_bs']

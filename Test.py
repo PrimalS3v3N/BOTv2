@@ -473,7 +473,9 @@ class HistoricalDataFetcher:
             else:
                 df.index = df.index.tz_convert(EASTERN)
 
-            df = df[(df.index.time >= dt.time(9, 0)) & (df.index.time <= dt.time(16, 0))]
+            # Filter to market hours for intraday data only (not daily)
+            if interval not in ('1d', '1wk', '1mo'):
+                df = df[(df.index.time >= dt.time(9, 0)) & (df.index.time <= dt.time(16, 0))]
 
             self._cache[cache_key] = df
 
@@ -482,6 +484,26 @@ class HistoricalDataFetcher:
         except Exception as e:
             print(f"Error fetching data for {ticker}: {e}")
             return None
+
+    def fetch_daily_data(self, ticker, signal_time, lookback_days=400):
+        """
+        Fetch daily historical data for computing daily EMAs.
+
+        Fetches daily OHLCV data ending the trading day BEFORE signal_time,
+        going back lookback_days calendar days (default: 400 = ~280 trading days,
+        sufficient for EMA 200 to warm up).
+
+        Args:
+            ticker: Stock ticker symbol
+            signal_time: Signal datetime (daily data will end the day before this)
+            lookback_days: Number of calendar days to look back (default: 400)
+
+        Returns:
+            DataFrame with daily OHLCV data, or None if unavailable
+        """
+        end_date = signal_time - timedelta(days=1)
+        start_date = signal_time - timedelta(days=lookback_days)
+        return self.fetch_stock_data(ticker, start_date, end_date, interval='1d')
 
     def fetch_data_around_signal(self, ticker, signal_time, hours_after=8):
         """Fetch data around a signal time."""
@@ -1240,8 +1262,16 @@ class Backtest:
         atr_sl_hhv = indicator_config.get('atr_sl_hhv', 10)
         atr_sl_multiplier = indicator_config.get('atr_sl_multiplier', 2.5)
 
+        # Fetch daily historical data and compute previous day's daily EMAs
+        # EMAs (10, 21, 50, 100, 200) are daily timeframe indicators.
+        # Daily data ends the day BEFORE the signal so EMAs reflect prior closes.
+        # For each intraday bar, live daily EMA = alpha * close + (1 - alpha) * prev_day_ema.
+        daily_data = self.data_fetcher.fetch_daily_data(position.ticker, signal_time)
+        daily_ema_prev = Analysis.compute_daily_emas(daily_data, ema_periods)
+
         # Add technical indicators to stock data
         stock_data = Analysis.add_indicators(stock_data, ema_periods=ema_periods,
+                                             daily_ema_prev=daily_ema_prev,
                                              supertrend_period=supertrend_period,
                                              supertrend_multiplier=supertrend_multiplier,
                                              ichimoku_tenkan=ichimoku_tenkan,
