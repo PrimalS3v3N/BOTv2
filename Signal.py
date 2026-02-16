@@ -52,6 +52,8 @@ def validate_ticker(ticker):
         if not ticker_match:
             return None
         ticker_sym = ticker_match.group(0).upper()
+        # Normalize tickers: remove dots (e.g. BRK.B -> BRKB)
+        ticker_sym = ticker_sym.replace('.', '')
         # Index symbols (SPX, NDX, etc.) are valid option underlyings but
         # not tradeable stocks — Robinhood's /quotes/ endpoint returns 404.
         if ticker_sym in Config.INDEX_SYMBOLS:
