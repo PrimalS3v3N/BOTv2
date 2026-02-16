@@ -542,7 +542,7 @@ def create_trade_chart(df, trade_label, market_hours_only=False, show_ewo=True, 
             if not sentiment.empty:
                 sentiment['group'] = (sentiment['ticker_5m'] != sentiment['ticker_5m'].shift()).cumsum()
                 for _, grp in sentiment.groupby('group'):
-                    color = 'rgba(0, 200, 83, 0.10)' if grp['ticker_5m'].iloc[0] == 'Bullish' else 'rgba(255, 23, 68, 0.10)'
+                    color = 'rgba(0, 200, 83, 0.18)' if grp['ticker_5m'].iloc[0] == 'Bullish' else 'rgba(255, 23, 68, 0.18)'
                     fig.add_vrect(
                         x0=grp['time'].iloc[0], x1=grp['time'].iloc[-1],
                         fillcolor=color, layer='below', line_width=0,
