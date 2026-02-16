@@ -265,6 +265,78 @@ BACKTEST_CONFIG = {
     # Smaller = more sensitive (more bull/bear signals), Larger = wider band (more sideways).
     # Default was 0.10, reduced to 0.05 for higher sensitivity.
     'bias_sideways_band': 0.05,
+
+    # ==========================================================================
+    # Options Exit System (Primary TP/SL)
+    # ==========================================================================
+    # Core exit system: take profit via trailing stop loss, hard stop loss on
+    # option contract price.  Differentiates CALLs vs PUTs — a rising stock is
+    # good for calls / bad for puts, and vice-versa.
+    #
+    # Flow:
+    #   1. At entry → set initial hard SL at -20 % of option price
+    #   2. Assess entry favorability (30-min lookback, EMA positioning, ATR-SL)
+    #   3. Once profit >= trail_activation_pct → engage trailing SL
+    #   4. Trailing SL scales continuously with profit margin
+    #   5. Monitor for reversals against our contract type
+    'options_exit': {
+        'enabled': True,
+
+        # --- Initial Stop Loss ---
+        'initial_sl_pct': 20,              # Hard SL: exit if option drops X% below entry (adjustable)
+
+        # --- Trailing Stop Loss ---
+        'trail_activation_pct': 10,        # Engage trailing SL when profit margin >= X%
+        'trail_base_floor_pct': 5,         # At activation: lock in X% above entry as floor
+
+        # Continuous trailing SL scaling parameters (logarithmic curve)
+        # trail_sl = base + scale * ln(1 + profit / norm)
+        # At 10% profit  → SL ~5%   (just above entry)
+        # At 50% profit  → SL ~35%
+        # At 100% profit → SL ~70%
+        # At 200% profit → SL ~115%
+        'trail_scale': 25.0,               # Controls slope of the trailing curve
+        'trail_norm': 30.0,                # Normalisation factor (higher = slower ramp)
+
+        # High-risk addon: extra % locked in when entry is flagged HIGH risk
+        # addon = risk_addon_base + risk_addon_scale * ln(1 + profit / risk_addon_norm)
+        # At 10% profit → +2%, at 100% profit → +15%
+        'risk_addon_base': 2.0,
+        'risk_addon_scale': 5.0,
+        'risk_addon_norm': 30.0,
+
+        # --- RiskOutlook (Entry Favorability Assessment) ---
+        # Two time horizons:
+        #   Primary: past 30 minutes (ROC over roc_period bars)
+        #   Secondary: since market open (computed dynamically from first bar of day)
+        # Confirmation window: first N minutes after purchase to confirm direction
+        'confirmation_window_bars': 10,    # Observe 5-10 bars post-entry
+
+        # RSI thresholds for overbought/oversold (stock-level)
+        'rsi_overbought': 70,              # Stock RSI above = overbought zone
+        'rsi_oversold': 30,                # Stock RSI below = oversold zone
+
+        # --- EMA Reversal Detection ---
+        # Price below short EMAs = higher reversal risk for calls (lower for puts).
+        # Sensitivity: how many EMAs must be breached to flag a reversal.
+        'ema_reversal_periods': [10, 21, 50],     # EMAs to check for reversal
+        'ema_reversal_sensitivity': 2,             # N of those EMAs breached = reversal (adjustable)
+
+        # --- ATR-SL Favorability ---
+        # If stock price is below ATR-SL at entry → unfavorable for calls, favorable for puts
+        'atr_sl_enabled': True,
+
+        # --- MACD Confirmation ---
+        # Use MACD histogram direction to confirm trend alignment with contract type
+        'macd_enabled': True,
+        'macd_fast': 12,
+        'macd_slow': 26,
+        'macd_signal': 9,
+
+        # --- Price Momentum (ROC) ---
+        # Rate of change over lookback to quantify 30-min trend strength
+        'roc_period': 30,                  # 30-bar ROC for trend strength
+    },
 }
 
 
@@ -309,11 +381,24 @@ DATAFRAME_COLUMNS = {
         'supertrend', 'supertrend_direction',
         'ichimoku_tenkan', 'ichimoku_kijun', 'ichimoku_senkou_a', 'ichimoku_senkou_b',
         'atr_sl',
+        # MACD indicator columns
+        'macd_line', 'macd_signal', 'macd_histogram',
+        # Price momentum (ROC)
+        'roc',
         'ai_outlook_1m', 'ai_outlook_5m', 'ai_outlook_30m', 'ai_outlook_1h',
         'ai_action', 'ai_reason',
+        # Options Exit System columns (SL = stop loss, TP = take profit)
+        'sl_trailing',             # Current trailing SL price level
+        'sl_hard',                 # Hard stop loss price level
+        'tp_risk_outlook',         # RiskOutlook score: LOW / MEDIUM / HIGH
+        'tp_risk_reasons',         # Pipe-separated reasons
+        'tp_trend_30m',            # 30-min trend: Uptrend / Downtrend / Sideways
+        'sl_ema_reversal',         # EMA reversal flag (True/False)
+        'tp_confirmed',            # Post-entry confirmation: Confirmed / Denied / Pending
         # Exit signal flags (per-bar boolean: which signals would fire)
         'exit_sig_sb', 'exit_sig_mp', 'exit_sig_ai',
         'exit_sig_closure_peak',
+        'exit_sig_oe',             # Options Exit system SL/TP triggered
     ],
 
     # Metadata columns appended to databook (Test.py)
@@ -337,11 +422,24 @@ DATAFRAME_COLUMNS = {
         'supertrend', 'supertrend_direction',
         'ichimoku_tenkan', 'ichimoku_kijun', 'ichimoku_senkou_a', 'ichimoku_senkou_b',
         'atr_sl',
+        # MACD indicator columns
+        'macd_line', 'macd_signal', 'macd_histogram',
+        # Price momentum (ROC)
+        'roc',
         'ai_outlook_1m', 'ai_outlook_5m', 'ai_outlook_30m', 'ai_outlook_1h',
         'ai_action', 'ai_reason',
+        # Options Exit System columns (SL = stop loss, TP = take profit)
+        'sl_trailing',
+        'sl_hard',
+        'tp_risk_outlook',
+        'tp_risk_reasons',
+        'tp_trend_30m',
+        'sl_ema_reversal',
+        'tp_confirmed',
         # Exit signal flags (per-bar boolean: which signals would fire)
         'exit_sig_sb', 'exit_sig_mp', 'exit_sig_ai',
         'exit_sig_closure_peak',
+        'exit_sig_oe',
     ],
 }
 

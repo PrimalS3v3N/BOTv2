@@ -624,14 +624,18 @@ class Databook:
                    ichimoku_tenkan=np.nan, ichimoku_kijun=np.nan,
                    ichimoku_senkou_a=np.nan, ichimoku_senkou_b=np.nan,
                    atr_sl=np.nan,
+                   macd_line=np.nan, macd_signal_line=np.nan, macd_histogram=np.nan,
+                   roc=np.nan,
                    risk=None, risk_reasons=None, risk_trend=None,
                    spy_price=np.nan, spy_gauge=None, ticker_gauge=None,
                    ai_outlook_1m=None, ai_outlook_5m=None,
                    ai_outlook_30m=None, ai_outlook_1h=None,
                    ai_action=None, ai_reason=None,
+                   oe_state=None,
                    exit_sig_sb=None, exit_sig_mp=None,
                    exit_sig_ai=None,
-                   exit_sig_closure_peak=None):
+                   exit_sig_closure_peak=None,
+                   exit_sig_oe=None):
         """Add a tracking record."""
         pnl_pct = self.position.get_pnl_pct(option_price) if holding else np.nan
 
@@ -719,6 +723,12 @@ class Databook:
             'ichimoku_senkou_a': ichimoku_senkou_a,
             'ichimoku_senkou_b': ichimoku_senkou_b,
             'atr_sl': atr_sl,
+            # MACD indicator columns
+            'macd_line': macd_line,
+            'macd_signal': macd_signal_line,
+            'macd_histogram': macd_histogram,
+            # Price momentum (ROC)
+            'roc': roc,
             # AI exit signal tracking
             'ai_outlook_1m': ai_outlook_1m,
             'ai_outlook_5m': ai_outlook_5m,
@@ -726,11 +736,20 @@ class Databook:
             'ai_outlook_1h': ai_outlook_1h,
             'ai_action': ai_action,
             'ai_reason': ai_reason,
+            # Options Exit System columns (SL = stop loss, TP = take profit)
+            'sl_trailing': (oe_state or {}).get('sl_trailing', np.nan),
+            'sl_hard': (oe_state or {}).get('sl_hard', np.nan),
+            'tp_risk_outlook': (oe_state or {}).get('tp_risk_outlook'),
+            'tp_risk_reasons': (oe_state or {}).get('tp_risk_reasons'),
+            'tp_trend_30m': (oe_state or {}).get('tp_trend_30m'),
+            'sl_ema_reversal': (oe_state or {}).get('sl_ema_reversal'),
+            'tp_confirmed': (oe_state or {}).get('tp_confirmed'),
             # Exit signal flags (per-bar: which signals would fire)
             'exit_sig_sb': exit_sig_sb,
             'exit_sig_mp': exit_sig_mp,
             'exit_sig_ai': exit_sig_ai,
             'exit_sig_closure_peak': exit_sig_closure_peak,
+            'exit_sig_oe': exit_sig_oe,
         }
 
         self.records.append(record)
@@ -1283,6 +1302,12 @@ class Backtest:
         atr_sl_hhv = indicator_config.get('atr_sl_hhv', 10)
         atr_sl_multiplier = indicator_config.get('atr_sl_multiplier', 2.5)
 
+        # Get MACD and ROC settings
+        macd_fast = oe_config.get('macd_fast', 12)
+        macd_slow = oe_config.get('macd_slow', 26)
+        macd_signal_period = oe_config.get('macd_signal', 9)
+        roc_period = oe_config.get('roc_period', 30)
+
         # Add technical indicators to stock data
         stock_data = Analysis.add_indicators(stock_data, ema_periods=ema_periods,
                                              supertrend_period=supertrend_period,
@@ -1293,7 +1318,11 @@ class Backtest:
                                              ichimoku_displacement=ichimoku_displacement,
                                              atr_sl_period=atr_sl_period,
                                              atr_sl_hhv=atr_sl_hhv,
-                                             atr_sl_multiplier=atr_sl_multiplier)
+                                             atr_sl_multiplier=atr_sl_multiplier,
+                                             macd_fast=macd_fast,
+                                             macd_slow=macd_slow,
+                                             macd_signal=macd_signal_period,
+                                             roc_period=roc_period)
 
         # Get Momentum Peak settings from config
         mp_strategy = Strategy.MomentumPeak(self.config.get('momentum_peak', {}))
@@ -1309,6 +1338,14 @@ class Backtest:
             option_type=position.option_type,
             strike=position.strike,
         )
+
+        # Get Options Exit System (primary TP/SL) settings from config
+        oe_strategy = Strategy.OptionsExit(self.config.get('options_exit', {}))
+        oe_detector = oe_strategy.create_detector(position.entry_price, position.option_type)
+        oe_favorability_assessed = False
+
+        # Get MACD and ROC settings from options_exit config for add_indicators
+        oe_config = self.config.get('options_exit', {})
 
         # Get Closure - Peak settings from config
         CP_config = self.config.get('closure_peak', {})
@@ -1372,6 +1409,10 @@ class Backtest:
             ichi_senkou_a = bar.get('ichimoku_senkou_a', np.nan)
             ichi_senkou_b = bar.get('ichimoku_senkou_b', np.nan)
             atr_sl_value = bar.get('atr_sl', np.nan)
+            macd_line_val = bar.get('macd_line', np.nan)
+            macd_signal_val = bar.get('macd_signal', np.nan)
+            macd_histogram_val = bar.get('macd_histogram', np.nan)
+            roc_val = bar.get('roc', np.nan)
 
             current_days_to_expiry = max(0, (expiry_dt - timestamp).total_seconds() / 86400)
 
@@ -1414,6 +1455,46 @@ class Backtest:
                     )
                     if risk_level == 'HIGH':
                         print(f"    RISK: HIGH [{risk_reasons}]")
+
+                # --- Options Exit: RiskOutlook (once at entry) ---
+                oe_state = {}
+                oe_exit = False
+                oe_reason = None
+                if oe_detector and not oe_favorability_assessed:
+                    oe_favorability_assessed = True
+                    # Build EMA values dict for the detector
+                    ema_vals = {10: ema_10, 21: ema_21, 50: ema_50, 100: ema_100, 200: ema_200}
+                    # Compute since-open ROC (secondary time horizon)
+                    # First bar of the day is index 0 in stock_data
+                    open_price = stock_data.iloc[0]['close']
+                    roc_day = ((stock_price - open_price) / open_price) * 100 if open_price > 0 else np.nan
+                    fav_level, fav_reasons = oe_detector.RiskOutlook(
+                        rsi=rsi,
+                        rsi_avg=rsi_10min_avg,
+                        ema_values=ema_vals,
+                        stock_price=stock_price,
+                        atr_sl_value=atr_sl_value,
+                        macd_histogram=macd_histogram_val,
+                        roc_30m=roc_val,
+                        roc_day=roc_day,
+                        supertrend_direction=st_direction,
+                        ewo=ewo,
+                        ewo_avg=ewo_15min_avg,
+                    )
+                    # Feed risk info from existing risk assessment into OE detector
+                    if risk_level == 'HIGH':
+                        oe_detector.is_high_risk = True
+                    if fav_level == 'HIGH':
+                        print(f"    RISK OUTLOOK: HIGH [{fav_reasons}]")
+
+                # --- Options Exit: Per-bar update (hard SL + trailing SL + reversal) ---
+                if oe_detector and not position.is_closed:
+                    ema_vals = {10: ema_10, 21: ema_21, 50: ema_50, 100: ema_100, 200: ema_200}
+                    oe_exit, oe_reason, oe_state = oe_detector.update(
+                        option_price=option_price,
+                        stock_price=stock_price,
+                        ema_values=ema_vals,
+                    )
 
                 # --- Risk trend monitoring (only for HIGH risk trades) ---
                 if risk_level == 'HIGH' and not position.is_closed:
@@ -1526,6 +1607,10 @@ class Backtest:
                     ichimoku_senkou_a=ichi_senkou_a,
                     ichimoku_senkou_b=ichi_senkou_b,
                     atr_sl=atr_sl_value,
+                    macd_line=macd_line_val,
+                    macd_signal_line=macd_signal_val,
+                    macd_histogram=macd_histogram_val,
+                    roc=roc_val,
                     risk=risk_level,
                     risk_reasons=risk_reasons,
                     risk_trend=risk_trend,
@@ -1538,29 +1623,37 @@ class Backtest:
                     ai_outlook_1h=ai_signal_data.get('outlook_1h'),
                     ai_action=ai_signal_data.get('action'),
                     ai_reason=ai_signal_data.get('reason'),
+                    oe_state=oe_state,
                     # Exit signal flags: which signals would fire this bar
                     exit_sig_sb=sb_exit,
                     exit_sig_mp=mp_exit,
                     exit_sig_ai=ai_exit,
                     exit_sig_closure_peak=cp_signal,
+                    exit_sig_oe=oe_exit,
                 )
 
-                # StatsBook Exit: EWO or H-L range at historical extreme
-                if sb_exit and not position.is_closed:
+                # === EXIT PRIORITY CHAIN ===
+                # 1. Options Exit (Primary TP/SL) — hard SL and trailing SL
+                if oe_exit and not position.is_closed:
+                    exit_price = option_price * (1 - self.slippage_pct)
+                    position.close(exit_price, timestamp, oe_reason)
+
+                # 2. StatsBook Exit: EWO or H-L range at historical extreme
+                elif sb_exit and not position.is_closed:
                     exit_price = option_price * (1 - self.slippage_pct)
                     position.close(exit_price, timestamp, sb_reason)
 
-                # Momentum Peak: RSI overbought reversal + EWO decline
+                # 3. Momentum Peak: RSI overbought reversal + EWO decline
                 elif mp_exit and not position.is_closed:
                     exit_price = option_price * (1 - self.slippage_pct)
                     position.close(exit_price, timestamp, mp_reason)
 
-                # AI Exit Signal: local LLM recommends selling
+                # 4. AI Exit Signal: local LLM recommends selling
                 elif ai_exit and not position.is_closed:
                     exit_price = option_price * (1 - self.slippage_pct)
                     position.close(exit_price, timestamp, 'AI Exit Signal')
 
-                # Closure - Peak: Avg RSI (10min) based exit in last 30 minutes of trading day
+                # 5. Closure - Peak: Avg RSI (10min) based exit in last 30 minutes of trading day
                 elif CP_enabled and not position.is_closed and not np.isnan(rsi_10min_avg) and timestamp.time() >= CP_start_time:
                     if position.option_type.upper() in ['CALL', 'CALLS', 'C'] and rsi_10min_avg >= CP_rsi_call:
                         exit_price = option_price * (1 - self.slippage_pct)
@@ -1569,7 +1662,7 @@ class Backtest:
                         exit_price = option_price * (1 - self.slippage_pct)
                         position.close(exit_price, timestamp, 'Closure - Peak')
 
-                # Exit at market close
+                # 6. Exit at market close
                 elif timestamp.time() >= dt.time(15, 55) and not position.is_closed:
                     exit_price = option_price * (1 - self.slippage_pct)
                     position.close(exit_price, timestamp, 'Closure-Market')
@@ -1602,6 +1695,10 @@ class Backtest:
                     ichimoku_senkou_a=ichi_senkou_a,
                     ichimoku_senkou_b=ichi_senkou_b,
                     atr_sl=atr_sl_value,
+                    macd_line=macd_line_val,
+                    macd_signal_line=macd_signal_val,
+                    macd_histogram=macd_histogram_val,
+                    roc=roc_val,
                     spy_price=spy_price,
                     spy_gauge=spy_gauge_data,
                     ticker_gauge=ticker_gauge_data,
