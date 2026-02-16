@@ -23,7 +23,7 @@ import Config
 
 # Export for use by other modules
 __all__ = ['MomentumPeak', 'MomentumPeakDetector', 'StatsBookExit', 'StatsBookDetector',
-           'AIExitSignal', 'AIExitSignalDetector']
+           'AIExitSignal', 'AIExitSignalDetector', 'OptionsExit', 'OptionsExitDetector']
 
 
 # =============================================================================
@@ -509,3 +509,423 @@ class AIExitSignalDetector:
     def current_signal(self):
         """Current AI signal dict (last evaluation result, cached between evals)."""
         return self._current_signal
+
+
+# =============================================================================
+# INTERNAL - Options Exit System (Primary TP / SL)
+# =============================================================================
+
+import math
+
+
+class OptionsExit:
+    """
+    Factory for creating OptionsExitDetector instances.
+
+    Primary exit system that manages take-profit and stop-loss for options
+    contracts.  Differentiates between CALLs and PUTs:
+      - CALL profits when stock rises  → stock drop = bad
+      - PUT  profits when stock drops   → stock rise = bad
+
+    Three layers:
+      1. Hard stop loss (initial_sl_pct below entry option price)
+      2. Trailing stop loss (engages at trail_activation_pct, scales with profit)
+      3. Entry favorability assessment + reversal detection
+
+    Config: BACKTEST_CONFIG['options_exit']
+    """
+
+    def __init__(self, config=None):
+        oe_config = config or Config.get_setting('backtest', 'options_exit', {})
+        self.enabled = oe_config.get('enabled', False)
+        self.config = oe_config
+
+    def create_detector(self, entry_option_price, option_type):
+        """
+        Create a new OptionsExitDetector for a position.
+
+        Args:
+            entry_option_price: Option price at entry
+            option_type: 'CALL' or 'PUT'
+
+        Returns:
+            OptionsExitDetector instance, or None if disabled.
+        """
+        if not self.enabled:
+            return None
+        return OptionsExitDetector(self.config, entry_option_price, option_type)
+
+
+class OptionsExitDetector:
+    """
+    Per-position detector that tracks trailing SL, hard SL, entry favorability,
+    and reversal detection.
+
+    Trailing SL uses a continuous logarithmic scaling function so the stop
+    ratchets smoothly with profit instead of jumping at fixed milestones:
+
+        trail_sl_pct = base_floor + scale * ln(1 + profit_pct / norm)
+
+    For high-risk entries an addon is layered on top:
+
+        addon = addon_base + addon_scale * ln(1 + profit_pct / addon_norm)
+
+    The trailing SL price is:
+
+        sl_price = entry_price * (1 + trail_sl_pct / 100)
+
+    It only moves up (for profit protection), never down.
+    """
+
+    def __init__(self, config, entry_option_price, option_type):
+        self.entry_option_price = entry_option_price
+        self.is_call = option_type.upper() in ['CALL', 'CALLS', 'C']
+
+        # Hard SL
+        self.initial_sl_pct = config.get('initial_sl_pct', 20)
+        self.hard_sl_price = entry_option_price * (1 - self.initial_sl_pct / 100)
+
+        # Trailing SL parameters
+        self.trail_activation_pct = config.get('trail_activation_pct', 10)
+        self.trail_base_floor_pct = config.get('trail_base_floor_pct', 5)
+        self.trail_scale = config.get('trail_scale', 25.0)
+        self.trail_norm = config.get('trail_norm', 30.0)
+
+        # High-risk addon
+        self.risk_addon_base = config.get('risk_addon_base', 2.0)
+        self.risk_addon_scale = config.get('risk_addon_scale', 5.0)
+        self.risk_addon_norm = config.get('risk_addon_norm', 30.0)
+
+        # Entry favorability
+        self.favorability_lookback = config.get('favorability_lookback_bars', 30)
+        self.confirmation_window = config.get('confirmation_window_bars', 10)
+        self.rsi_overbought = config.get('rsi_overbought', 70)
+        self.rsi_oversold = config.get('rsi_oversold', 30)
+
+        # EMA reversal
+        self.ema_reversal_periods = config.get('ema_reversal_periods', [10, 21, 50])
+        self.ema_reversal_sensitivity = config.get('ema_reversal_sensitivity', 2)
+
+        # ATR-SL
+        self.atr_sl_enabled = config.get('atr_sl_enabled', True)
+
+        # MACD
+        self.macd_enabled = config.get('macd_enabled', True)
+
+        # State
+        self.trailing_sl_price = None       # Current trailing SL price (None until activated)
+        self.trailing_active = False
+        self.highest_profit_pct = 0.0       # Watermark: best profit seen so far
+        self.bar_count = 0
+        self.is_high_risk = False
+
+        # Entry favorability assessment (computed once)
+        self.favorability = None             # 'LOW' / 'MEDIUM' / 'HIGH' risk
+        self.favorability_reasons = None
+        self._favorability_assessed = False
+
+        # Confirmation state
+        self.confirmed = 'Pending'           # 'Pending' / 'Confirmed' / 'Denied'
+        self._confirmation_bars = []         # Track option prices during confirmation window
+
+        # Trend assessment
+        self.trend_30m = None                # 'Uptrend' / 'Downtrend' / 'Sideways'
+        self.ema_reversal = False
+
+    # ------------------------------------------------------------------
+    # Trailing SL math
+    # ------------------------------------------------------------------
+
+    def _calculate_trail_sl_pct(self, profit_pct):
+        """
+        Continuous trailing SL as a percentage *above entry* to lock in.
+
+        Returns the % of entry price that the SL should sit at.
+        E.g. if entry = $2.00 and this returns 35, SL = $2.00 * 1.35 = $2.70.
+        """
+        if profit_pct < self.trail_activation_pct:
+            return 0.0  # Not yet active
+
+        base = self.trail_base_floor_pct
+        scaled = self.trail_scale * math.log(1 + profit_pct / self.trail_norm)
+        sl_pct = base + scaled
+
+        # High-risk addon
+        if self.is_high_risk:
+            addon = self.risk_addon_base + self.risk_addon_scale * math.log(
+                1 + profit_pct / self.risk_addon_norm
+            )
+            sl_pct += addon
+
+        # SL can never exceed current profit (leave at least 2% buffer)
+        sl_pct = min(sl_pct, profit_pct - 2.0)
+
+        return max(0.0, sl_pct)
+
+    # ------------------------------------------------------------------
+    # Entry favorability assessment
+    # ------------------------------------------------------------------
+
+    def assess_favorability(self, stock_prices_30m, rsi, rsi_avg,
+                            ema_values, stock_price, atr_sl_value,
+                            macd_histogram, roc_value,
+                            supertrend_direction, ewo, ewo_avg):
+        """
+        Assess whether the entry is in a favorable region.
+
+        Looks at the past 30 minutes of stock data plus current indicators
+        to determine risk level.
+
+        Args:
+            stock_prices_30m: list/array of recent stock close prices (up to 30 bars)
+            rsi: Current RSI value
+            rsi_avg: Current RSI 10-min average
+            ema_values: dict mapping period -> EMA value (e.g. {10: 450.2, 21: 449.8, ...})
+            stock_price: Current stock price
+            atr_sl_value: Current ATR trailing stoploss value
+            macd_histogram: Current MACD histogram value
+            roc_value: 30-bar Rate of Change value
+            supertrend_direction: 1 (uptrend) or -1 (downtrend)
+            ewo: Current EWO value
+            ewo_avg: Current EWO 15-min average
+
+        Returns:
+            (risk_label, reasons_list): risk_label is 'LOW'/'MEDIUM'/'HIGH'
+        """
+        if self._favorability_assessed:
+            return self.favorability, self.favorability_reasons
+
+        self._favorability_assessed = True
+        reasons = []
+        risk_score = 0  # Higher = more risk
+
+        # --- 1. 30-minute trend direction via ROC ---
+        if not np.isnan(roc_value):
+            if self.is_call:
+                if roc_value > 0.3:
+                    # Stock already moved up a lot → buying at top risk
+                    reasons.append(f'ROC(+{roc_value:.2f}=top)')
+                    risk_score += 2
+                    self.trend_30m = 'Uptrend'
+                elif roc_value < -0.1:
+                    # Stock dropping → calls are risky
+                    reasons.append(f'ROC({roc_value:.2f}=downtrend)')
+                    risk_score += 3
+                    self.trend_30m = 'Downtrend'
+                else:
+                    self.trend_30m = 'Sideways'
+            else:  # PUT
+                if roc_value < -0.3:
+                    # Stock already moved down a lot → buying put at bottom risk
+                    reasons.append(f'ROC({roc_value:.2f}=bottom)')
+                    risk_score += 2
+                    self.trend_30m = 'Downtrend'
+                elif roc_value > 0.1:
+                    # Stock rising → puts are risky
+                    reasons.append(f'ROC(+{roc_value:.2f}=uptrend)')
+                    risk_score += 3
+                    self.trend_30m = 'Uptrend'
+                else:
+                    self.trend_30m = 'Sideways'
+
+        # --- 2. RSI overbought/oversold ---
+        combined_rsi = rsi
+        if not np.isnan(rsi) and not np.isnan(rsi_avg):
+            combined_rsi = (rsi + rsi_avg) / 2
+
+        if not np.isnan(combined_rsi):
+            if self.is_call and combined_rsi >= self.rsi_overbought:
+                reasons.append(f'RSI({combined_rsi:.0f}=overbought)')
+                risk_score += 3
+            elif not self.is_call and combined_rsi <= self.rsi_oversold:
+                reasons.append(f'RSI({combined_rsi:.0f}=oversold)')
+                risk_score += 3
+            elif self.is_call and combined_rsi <= self.rsi_oversold:
+                # Oversold = good for calls (potential bounce)
+                risk_score -= 1
+            elif not self.is_call and combined_rsi >= self.rsi_overbought:
+                # Overbought = good for puts (potential drop)
+                risk_score -= 1
+
+        # --- 3. EMA positioning (price vs EMAs) ---
+        emas_breached = 0
+        for period in self.ema_reversal_periods:
+            ema_val = ema_values.get(period, np.nan)
+            if np.isnan(ema_val):
+                continue
+            if self.is_call and stock_price < ema_val:
+                emas_breached += 1
+            elif not self.is_call and stock_price > ema_val:
+                emas_breached += 1
+
+        if emas_breached > 0:
+            # Smaller EMAs breached = more concerning (recent reversal)
+            risk_per_ema = 1 if emas_breached < self.ema_reversal_sensitivity else 2
+            risk_score += emas_breached * risk_per_ema
+            breached_label = f'{emas_breached}EMAs_against'
+            reasons.append(breached_label)
+
+        # --- 4. ATR-SL favorability ---
+        if self.atr_sl_enabled and not np.isnan(atr_sl_value):
+            if self.is_call and stock_price < atr_sl_value:
+                reasons.append('Below_ATR-SL')
+                risk_score += 2
+            elif not self.is_call and stock_price > atr_sl_value:
+                reasons.append('Above_ATR-SL')
+                risk_score += 2
+
+        # --- 5. Supertrend direction ---
+        if not np.isnan(supertrend_direction):
+            if self.is_call and supertrend_direction == -1:
+                reasons.append('ST_bearish')
+                risk_score += 2
+            elif not self.is_call and supertrend_direction == 1:
+                reasons.append('ST_bullish')
+                risk_score += 2
+
+        # --- 6. MACD histogram alignment ---
+        if self.macd_enabled and not np.isnan(macd_histogram):
+            if self.is_call and macd_histogram < 0:
+                reasons.append(f'MACD_neg({macd_histogram:.3f})')
+                risk_score += 1
+            elif not self.is_call and macd_histogram > 0:
+                reasons.append(f'MACD_pos({macd_histogram:.3f})')
+                risk_score += 1
+
+        # --- 7. EWO momentum alignment ---
+        if not np.isnan(ewo):
+            if self.is_call and ewo < 0:
+                reasons.append(f'EWO_neg({ewo:.3f})')
+                risk_score += 1
+            elif not self.is_call and ewo > 0:
+                reasons.append(f'EWO_pos({ewo:.3f})')
+                risk_score += 1
+
+        # --- Score to label ---
+        if risk_score >= 6:
+            self.favorability = 'HIGH'
+        elif risk_score >= 3:
+            self.favorability = 'MEDIUM'
+        else:
+            self.favorability = 'LOW'
+
+        self.favorability_reasons = '|'.join(reasons) if reasons else None
+        self.is_high_risk = self.favorability == 'HIGH'
+
+        return self.favorability, self.favorability_reasons
+
+    # ------------------------------------------------------------------
+    # Per-bar update
+    # ------------------------------------------------------------------
+
+    def update(self, option_price, stock_price, ema_values=None):
+        """
+        Per-bar update: check hard SL, update trailing SL, check EMA reversal.
+
+        Args:
+            option_price: Current estimated option price
+            stock_price: Current stock price
+            ema_values: dict mapping period -> EMA value (for reversal detection)
+
+        Returns:
+            (should_exit, exit_reason, state_dict)
+            state_dict contains per-bar state for the databook.
+        """
+        self.bar_count += 1
+        ema_values = ema_values or {}
+
+        profit_pct = ((option_price - self.entry_option_price) / self.entry_option_price) * 100
+
+        # Track confirmation window
+        if self.bar_count <= self.confirmation_window:
+            self._confirmation_bars.append(option_price)
+            if self.bar_count == self.confirmation_window:
+                self._evaluate_confirmation()
+
+        # --- EMA reversal check ---
+        emas_against = 0
+        for period in self.ema_reversal_periods:
+            ema_val = ema_values.get(period, np.nan)
+            if np.isnan(ema_val):
+                continue
+            if self.is_call and stock_price < ema_val:
+                emas_against += 1
+            elif not self.is_call and stock_price > ema_val:
+                emas_against += 1
+        self.ema_reversal = emas_against >= self.ema_reversal_sensitivity
+
+        # --- Hard stop loss ---
+        if option_price <= self.hard_sl_price:
+            state = self._build_state(option_price, profit_pct)
+            return True, 'OE-Hard-SL', state
+
+        # --- Trailing stop loss ---
+        if profit_pct > self.highest_profit_pct:
+            self.highest_profit_pct = profit_pct
+
+        # Calculate where trailing SL should be based on watermark profit
+        trail_sl_pct = self._calculate_trail_sl_pct(self.highest_profit_pct)
+
+        if trail_sl_pct > 0:
+            self.trailing_active = True
+            new_trailing_sl = self.entry_option_price * (1 + trail_sl_pct / 100)
+
+            # Ratchet: only move SL up, never down
+            if self.trailing_sl_price is None or new_trailing_sl > self.trailing_sl_price:
+                self.trailing_sl_price = new_trailing_sl
+
+            # Check if price hit trailing SL
+            if option_price <= self.trailing_sl_price:
+                state = self._build_state(option_price, profit_pct)
+                return True, 'OE-Trail-SL', state
+
+        state = self._build_state(option_price, profit_pct)
+        return False, None, state
+
+    # ------------------------------------------------------------------
+    # Confirmation
+    # ------------------------------------------------------------------
+
+    def _evaluate_confirmation(self):
+        """
+        After the confirmation window, determine if the trade direction
+        is confirmed or denied based on option price trajectory.
+        """
+        if len(self._confirmation_bars) < 2:
+            self.confirmed = 'Pending'
+            return
+
+        # Compare last price to first price in window
+        first = self._confirmation_bars[0]
+        last = self._confirmation_bars[-1]
+        change_pct = ((last - first) / first) * 100
+
+        # Count positive bars
+        positive_bars = sum(
+            1 for i in range(1, len(self._confirmation_bars))
+            if self._confirmation_bars[i] > self._confirmation_bars[i - 1]
+        )
+        positive_ratio = positive_bars / (len(self._confirmation_bars) - 1)
+
+        if change_pct > 0 and positive_ratio >= 0.5:
+            self.confirmed = 'Confirmed'
+        elif change_pct < -3 or positive_ratio < 0.3:
+            self.confirmed = 'Denied'
+        else:
+            self.confirmed = 'Pending'
+
+    # ------------------------------------------------------------------
+    # State builder
+    # ------------------------------------------------------------------
+
+    def _build_state(self, option_price, profit_pct):
+        """Build state dict for databook recording."""
+        return {
+            'oe_trailing_sl': self.trailing_sl_price if self.trailing_sl_price else np.nan,
+            'oe_hard_sl': self.hard_sl_price,
+            'oe_favorability': self.favorability,
+            'oe_favorability_reasons': self.favorability_reasons,
+            'oe_trend_30m': self.trend_30m,
+            'oe_ema_reversal': self.ema_reversal,
+            'oe_confirmed': self.confirmed,
+        }

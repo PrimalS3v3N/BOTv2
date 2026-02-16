@@ -314,6 +314,68 @@ def IchimokuCloud(df, tenkan_period=9, kijun_period=26, senkou_b_period=52, disp
     return tenkan_sen, kijun_sen, senkou_span_a, senkou_span_b
 
 
+def MACD(df, column='close', fast_period=12, slow_period=26, signal_period=9):
+    """
+    Calculate Moving Average Convergence Divergence.
+
+    MACD Line = EMA(fast) - EMA(slow)
+    Signal Line = EMA(MACD Line, signal_period)
+    Histogram = MACD Line - Signal Line
+
+    Interpretation:
+    - Histogram > 0: Bullish momentum
+    - Histogram < 0: Bearish momentum
+    - Histogram crossing zero: Momentum shift
+
+    Args:
+        df: DataFrame with price data
+        column: Column name to calculate MACD on (default: 'close')
+        fast_period: Fast EMA period (default: 12)
+        slow_period: Slow EMA period (default: 26)
+        signal_period: Signal line EMA period (default: 9)
+
+    Returns:
+        tuple: (macd_line, signal_line, histogram)
+    """
+    empty = pd.Series(index=df.index, dtype=float)
+    if column not in df.columns:
+        return empty.copy(), empty.copy(), empty.copy()
+
+    ema_fast = df[column].ewm(span=fast_period, adjust=False).mean()
+    ema_slow = df[column].ewm(span=slow_period, adjust=False).mean()
+    macd_line = ema_fast - ema_slow
+    signal_line = macd_line.ewm(span=signal_period, adjust=False).mean()
+    histogram = macd_line - signal_line
+
+    return macd_line, signal_line, histogram
+
+
+def ROC(df, column='close', period=30):
+    """
+    Calculate Rate of Change (price momentum).
+
+    ROC = (current - N bars ago) / N bars ago * 100
+
+    Positive ROC = upward momentum, Negative = downward momentum.
+    Magnitude indicates trend strength.
+
+    Args:
+        df: DataFrame with price data
+        column: Column name to calculate ROC on (default: 'close')
+        period: Lookback period (default: 30 for 30-min trend on 1-min data)
+
+    Returns:
+        Series with ROC values (percentage)
+    """
+    if column not in df.columns:
+        return pd.Series(index=df.index, dtype=float)
+
+    shifted = df[column].shift(period)
+    roc = ((df[column] - shifted) / shifted) * 100
+
+    return roc
+
+
 def ATR_SL(df, atr_period=5, hhv_period=10, multiplier=2.5):
     """
     ATR Trailing Stoploss indicator.
@@ -382,7 +444,9 @@ def add_indicators(df, ema_periods=None, ewo_fast=5, ewo_slow=35, ewo_avg_period
                    rsi_period=14, rsi_avg_period=10,
                    supertrend_period=10, supertrend_multiplier=3.0,
                    ichimoku_tenkan=9, ichimoku_kijun=26, ichimoku_senkou_b=52, ichimoku_displacement=26,
-                   atr_sl_period=5, atr_sl_hhv=10, atr_sl_multiplier=2.5):
+                   atr_sl_period=5, atr_sl_hhv=10, atr_sl_multiplier=2.5,
+                   macd_fast=12, macd_slow=26, macd_signal=9,
+                   roc_period=30):
     """
     Add all standard indicators to a DataFrame.
 
@@ -403,6 +467,10 @@ def add_indicators(df, ema_periods=None, ewo_fast=5, ewo_slow=35, ewo_avg_period
         atr_sl_period: ATR period for ATR-SL indicator (default: 5)
         atr_sl_hhv: HHV lookback period for ATR-SL (default: 10)
         atr_sl_multiplier: ATR multiplier for ATR-SL (default: 2.5)
+        macd_fast: MACD fast EMA period (default: 12)
+        macd_slow: MACD slow EMA period (default: 26)
+        macd_signal: MACD signal line EMA period (default: 9)
+        roc_period: Rate of Change lookback period (default: 30)
 
     Returns:
         DataFrame with added indicator columns:
@@ -421,6 +489,10 @@ def add_indicators(df, ema_periods=None, ewo_fast=5, ewo_slow=35, ewo_avg_period
         - ichimoku_senkou_a: Senkou Span A (Leading Span A)
         - ichimoku_senkou_b: Senkou Span B (Leading Span B)
         - atr_sl: ATR Trailing Stoploss
+        - macd_line: MACD line (fast EMA - slow EMA)
+        - macd_signal: MACD signal line
+        - macd_histogram: MACD histogram (line - signal)
+        - roc: Rate of Change (price momentum %)
     """
     if ema_periods is None:
         ema_periods = [10, 21, 50, 100, 200]
@@ -473,6 +545,14 @@ def add_indicators(df, ema_periods=None, ewo_fast=5, ewo_slow=35, ewo_avg_period
 
     # Add ATR Trailing Stoploss
     df['atr_sl'] = ATR_SL(df, atr_period=atr_sl_period, hhv_period=atr_sl_hhv, multiplier=atr_sl_multiplier)
+
+    # Add MACD (based on true price)
+    df['macd_line'], df['macd_signal'], df['macd_histogram'] = MACD(
+        df, column='_true_price', fast_period=macd_fast, slow_period=macd_slow, signal_period=macd_signal
+    )
+
+    # Add Rate of Change / Price Momentum (based on true price)
+    df['roc'] = ROC(df, column='_true_price', period=roc_period)
 
     # Clean up temporary column
     df = df.drop(columns=['_true_price'])
@@ -697,6 +777,7 @@ def estimate_option_price_bs(stock_price, strike, option_type, days_to_expiry,
 
 
 # Export functions for use by other modules
-__all__ = ['EMA', 'VWAP', 'EWO', 'true_price', 'RSI', 'Supertrend', 'IchimokuCloud', 'ATR_SL',
+__all__ = ['EMA', 'VWAP', 'EWO', 'true_price', 'RSI', 'MACD', 'ROC',
+           'Supertrend', 'IchimokuCloud', 'ATR_SL',
            'add_indicators', 'black_scholes_call', 'black_scholes_put', 'black_scholes_price',
            'calculate_greeks', 'estimate_option_price_bs']
