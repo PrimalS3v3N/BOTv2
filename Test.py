@@ -736,14 +736,14 @@ class Databook:
             'ai_outlook_1h': ai_outlook_1h,
             'ai_action': ai_action,
             'ai_reason': ai_reason,
-            # Options Exit System columns
-            'oe_trailing_sl': (oe_state or {}).get('oe_trailing_sl', np.nan),
-            'oe_hard_sl': (oe_state or {}).get('oe_hard_sl', np.nan),
-            'oe_favorability': (oe_state or {}).get('oe_favorability'),
-            'oe_favorability_reasons': (oe_state or {}).get('oe_favorability_reasons'),
-            'oe_trend_30m': (oe_state or {}).get('oe_trend_30m'),
-            'oe_ema_reversal': (oe_state or {}).get('oe_ema_reversal'),
-            'oe_confirmed': (oe_state or {}).get('oe_confirmed'),
+            # Options Exit System columns (SL = stop loss, TP = take profit)
+            'sl_trailing': (oe_state or {}).get('sl_trailing', np.nan),
+            'sl_hard': (oe_state or {}).get('sl_hard', np.nan),
+            'tp_risk_outlook': (oe_state or {}).get('tp_risk_outlook'),
+            'tp_risk_reasons': (oe_state or {}).get('tp_risk_reasons'),
+            'tp_trend_30m': (oe_state or {}).get('tp_trend_30m'),
+            'sl_ema_reversal': (oe_state or {}).get('sl_ema_reversal'),
+            'tp_confirmed': (oe_state or {}).get('tp_confirmed'),
             # Exit signal flags (per-bar: which signals would fire)
             'exit_sig_sb': exit_sig_sb,
             'exit_sig_mp': exit_sig_mp,
@@ -1456,7 +1456,7 @@ class Backtest:
                     if risk_level == 'HIGH':
                         print(f"    RISK: HIGH [{risk_reasons}]")
 
-                # --- Options Exit: Entry Favorability (once at entry) ---
+                # --- Options Exit: RiskOutlook (once at entry) ---
                 oe_state = {}
                 oe_exit = False
                 oe_reason = None
@@ -1464,18 +1464,19 @@ class Backtest:
                     oe_favorability_assessed = True
                     # Build EMA values dict for the detector
                     ema_vals = {10: ema_10, 21: ema_21, 50: ema_50, 100: ema_100, 200: ema_200}
-                    # Collect recent stock prices for 30-min lookback
-                    lookback_start = max(0, i - oe_detector.favorability_lookback)
-                    recent_prices = [stock_data.iloc[j]['close'] for j in range(lookback_start, i + 1)]
-                    fav_level, fav_reasons = oe_detector.assess_favorability(
-                        stock_prices_30m=recent_prices,
+                    # Compute since-open ROC (secondary time horizon)
+                    # First bar of the day is index 0 in stock_data
+                    open_price = stock_data.iloc[0]['close']
+                    roc_day = ((stock_price - open_price) / open_price) * 100 if open_price > 0 else np.nan
+                    fav_level, fav_reasons = oe_detector.RiskOutlook(
                         rsi=rsi,
                         rsi_avg=rsi_10min_avg,
                         ema_values=ema_vals,
                         stock_price=stock_price,
                         atr_sl_value=atr_sl_value,
                         macd_histogram=macd_histogram_val,
-                        roc_value=roc_val,
+                        roc_30m=roc_val,
+                        roc_day=roc_day,
                         supertrend_direction=st_direction,
                         ewo=ewo,
                         ewo_avg=ewo_15min_avg,
@@ -1484,7 +1485,7 @@ class Backtest:
                     if risk_level == 'HIGH':
                         oe_detector.is_high_risk = True
                     if fav_level == 'HIGH':
-                        print(f"    OE FAVORABILITY: HIGH risk [{fav_reasons}]")
+                        print(f"    RISK OUTLOOK: HIGH [{fav_reasons}]")
 
                 # --- Options Exit: Per-bar update (hard SL + trailing SL + reversal) ---
                 if oe_detector and not position.is_closed:

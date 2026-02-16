@@ -305,12 +305,10 @@ BACKTEST_CONFIG = {
         'risk_addon_scale': 5.0,
         'risk_addon_norm': 30.0,
 
-        # --- Entry Favorability Assessment ---
-        # Look back 30 minutes of stock data to gauge trend direction,
-        # whether we are buying at bottom (low risk) or top (high risk),
-        # and overbought/oversold conditions relative to contract type.
-        'favorability_lookback_bars': 30,  # 30 bars @ 1-min = 30 minutes
-
+        # --- RiskOutlook (Entry Favorability Assessment) ---
+        # Two time horizons:
+        #   Primary: past 30 minutes (ROC over roc_period bars)
+        #   Secondary: since market open (computed dynamically from first bar of day)
         # Confirmation window: first N minutes after purchase to confirm direction
         'confirmation_window_bars': 10,    # Observe 5-10 bars post-entry
 
@@ -389,14 +387,14 @@ DATAFRAME_COLUMNS = {
         'roc',
         'ai_outlook_1m', 'ai_outlook_5m', 'ai_outlook_30m', 'ai_outlook_1h',
         'ai_action', 'ai_reason',
-        # Options Exit System columns
-        'oe_trailing_sl',          # Current trailing SL price level
-        'oe_hard_sl',              # Hard stop loss price level
-        'oe_favorability',         # Entry favorability score: LOW / MEDIUM / HIGH risk
-        'oe_favorability_reasons', # Pipe-separated reasons
-        'oe_trend_30m',            # 30-min trend: Uptrend / Downtrend / Sideways
-        'oe_ema_reversal',         # EMA reversal flag (True/False)
-        'oe_confirmed',            # Post-entry confirmation: Confirmed / Denied / Pending
+        # Options Exit System columns (SL = stop loss, TP = take profit)
+        'sl_trailing',             # Current trailing SL price level
+        'sl_hard',                 # Hard stop loss price level
+        'tp_risk_outlook',         # RiskOutlook score: LOW / MEDIUM / HIGH
+        'tp_risk_reasons',         # Pipe-separated reasons
+        'tp_trend_30m',            # 30-min trend: Uptrend / Downtrend / Sideways
+        'sl_ema_reversal',         # EMA reversal flag (True/False)
+        'tp_confirmed',            # Post-entry confirmation: Confirmed / Denied / Pending
         # Exit signal flags (per-bar boolean: which signals would fire)
         'exit_sig_sb', 'exit_sig_mp', 'exit_sig_ai',
         'exit_sig_closure_peak',
@@ -430,14 +428,14 @@ DATAFRAME_COLUMNS = {
         'roc',
         'ai_outlook_1m', 'ai_outlook_5m', 'ai_outlook_30m', 'ai_outlook_1h',
         'ai_action', 'ai_reason',
-        # Options Exit System columns
-        'oe_trailing_sl',
-        'oe_hard_sl',
-        'oe_favorability',
-        'oe_favorability_reasons',
-        'oe_trend_30m',
-        'oe_ema_reversal',
-        'oe_confirmed',
+        # Options Exit System columns (SL = stop loss, TP = take profit)
+        'sl_trailing',
+        'sl_hard',
+        'tp_risk_outlook',
+        'tp_risk_reasons',
+        'tp_trend_30m',
+        'sl_ema_reversal',
+        'tp_confirmed',
         # Exit signal flags (per-bar boolean: which signals would fire)
         'exit_sig_sb', 'exit_sig_mp', 'exit_sig_ai',
         'exit_sig_closure_peak',

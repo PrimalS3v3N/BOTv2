@@ -596,8 +596,7 @@ class OptionsExitDetector:
         self.risk_addon_scale = config.get('risk_addon_scale', 5.0)
         self.risk_addon_norm = config.get('risk_addon_norm', 30.0)
 
-        # Entry favorability
-        self.favorability_lookback = config.get('favorability_lookback_bars', 30)
+        # Entry favorability / RiskOutlook
         self.confirmation_window = config.get('confirmation_window_bars', 10)
         self.rsi_overbought = config.get('rsi_overbought', 70)
         self.rsi_oversold = config.get('rsi_oversold', 30)
@@ -663,34 +662,37 @@ class OptionsExitDetector:
         return max(0.0, sl_pct)
 
     # ------------------------------------------------------------------
-    # Entry favorability assessment
+    # RiskOutlook — entry favorability assessment
     # ------------------------------------------------------------------
 
-    def assess_favorability(self, stock_prices_30m, rsi, rsi_avg,
-                            ema_values, stock_price, atr_sl_value,
-                            macd_histogram, roc_value,
-                            supertrend_direction, ewo, ewo_avg):
+    def RiskOutlook(self, rsi, rsi_avg,
+                    ema_values, stock_price, atr_sl_value,
+                    macd_histogram, roc_30m, roc_day,
+                    supertrend_direction, ewo, ewo_avg):
         """
         Assess whether the entry is in a favorable region.
 
-        Looks at the past 30 minutes of stock data plus current indicators
-        to determine risk level.
+        Uses two time horizons for trend context:
+          - Primary: past 30 minutes (roc_30m) — immediate momentum
+          - Secondary: since market open (roc_day) — broader session context
+
+        Evaluates current indicators against contract type to score risk.
 
         Args:
-            stock_prices_30m: list/array of recent stock close prices (up to 30 bars)
             rsi: Current RSI value
             rsi_avg: Current RSI 10-min average
             ema_values: dict mapping period -> EMA value (e.g. {10: 450.2, 21: 449.8, ...})
             stock_price: Current stock price
             atr_sl_value: Current ATR trailing stoploss value
             macd_histogram: Current MACD histogram value
-            roc_value: 30-bar Rate of Change value
+            roc_30m: 30-minute Rate of Change (primary trend)
+            roc_day: Since-open Rate of Change (secondary / session trend)
             supertrend_direction: 1 (uptrend) or -1 (downtrend)
             ewo: Current EWO value
             ewo_avg: Current EWO 15-min average
 
         Returns:
-            (risk_label, reasons_list): risk_label is 'LOW'/'MEDIUM'/'HIGH'
+            (risk_label, reasons_string): risk_label is 'LOW'/'MEDIUM'/'HIGH'
         """
         if self._favorability_assessed:
             return self.favorability, self.favorability_reasons
@@ -699,34 +701,47 @@ class OptionsExitDetector:
         reasons = []
         risk_score = 0  # Higher = more risk
 
-        # --- 1. 30-minute trend direction via ROC ---
-        if not np.isnan(roc_value):
+        # --- 1. Primary: 30-minute trend direction via ROC ---
+        if not np.isnan(roc_30m):
             if self.is_call:
-                if roc_value > 0.3:
-                    # Stock already moved up a lot → buying at top risk
-                    reasons.append(f'ROC(+{roc_value:.2f}=top)')
+                if roc_30m > 0.3:
+                    reasons.append(f'ROC30(+{roc_30m:.2f}=top)')
                     risk_score += 2
                     self.trend_30m = 'Uptrend'
-                elif roc_value < -0.1:
-                    # Stock dropping → calls are risky
-                    reasons.append(f'ROC({roc_value:.2f}=downtrend)')
+                elif roc_30m < -0.1:
+                    reasons.append(f'ROC30({roc_30m:.2f}=downtrend)')
                     risk_score += 3
                     self.trend_30m = 'Downtrend'
                 else:
                     self.trend_30m = 'Sideways'
             else:  # PUT
-                if roc_value < -0.3:
-                    # Stock already moved down a lot → buying put at bottom risk
-                    reasons.append(f'ROC({roc_value:.2f}=bottom)')
+                if roc_30m < -0.3:
+                    reasons.append(f'ROC30({roc_30m:.2f}=bottom)')
                     risk_score += 2
                     self.trend_30m = 'Downtrend'
-                elif roc_value > 0.1:
-                    # Stock rising → puts are risky
-                    reasons.append(f'ROC(+{roc_value:.2f}=uptrend)')
+                elif roc_30m > 0.1:
+                    reasons.append(f'ROC30(+{roc_30m:.2f}=uptrend)')
                     risk_score += 3
                     self.trend_30m = 'Uptrend'
                 else:
                     self.trend_30m = 'Sideways'
+
+        # --- 1b. Secondary: since-open session trend ---
+        if not np.isnan(roc_day):
+            if self.is_call:
+                if roc_day > 0.5:
+                    reasons.append(f'ROCday(+{roc_day:.2f}=extended)')
+                    risk_score += 1
+                elif roc_day < -0.3:
+                    reasons.append(f'ROCday({roc_day:.2f}=bearish_session)')
+                    risk_score += 2
+            else:  # PUT
+                if roc_day < -0.5:
+                    reasons.append(f'ROCday({roc_day:.2f}=extended)')
+                    risk_score += 1
+                elif roc_day > 0.3:
+                    reasons.append(f'ROCday(+{roc_day:.2f}=bullish_session)')
+                    risk_score += 2
 
         # --- 2. RSI overbought/oversold ---
         combined_rsi = rsi
@@ -921,11 +936,11 @@ class OptionsExitDetector:
     def _build_state(self, option_price, profit_pct):
         """Build state dict for databook recording."""
         return {
-            'oe_trailing_sl': self.trailing_sl_price if self.trailing_sl_price else np.nan,
-            'oe_hard_sl': self.hard_sl_price,
-            'oe_favorability': self.favorability,
-            'oe_favorability_reasons': self.favorability_reasons,
-            'oe_trend_30m': self.trend_30m,
-            'oe_ema_reversal': self.ema_reversal,
-            'oe_confirmed': self.confirmed,
+            'sl_trailing': self.trailing_sl_price if self.trailing_sl_price else np.nan,
+            'sl_hard': self.hard_sl_price,
+            'tp_risk_outlook': self.favorability,
+            'tp_risk_reasons': self.favorability_reasons,
+            'tp_trend_30m': self.trend_30m,
+            'sl_ema_reversal': self.ema_reversal,
+            'tp_confirmed': self.confirmed,
         }
