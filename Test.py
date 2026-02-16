@@ -625,7 +625,7 @@ class Databook:
                    ichimoku_senkou_a=np.nan, ichimoku_senkou_b=np.nan,
                    atr_sl=np.nan,
                    risk=None, risk_reasons=None, risk_trend=None,
-                   spy_price=np.nan, spy_gauge=None,
+                   spy_price=np.nan, spy_gauge=None, ticker_gauge=None,
                    ai_outlook_1m=None, ai_outlook_5m=None,
                    ai_outlook_30m=None, ai_outlook_1h=None,
                    ai_action=None, ai_reason=None,
@@ -661,6 +661,7 @@ class Databook:
 
         # Unpack SPY gauge dict into individual columns
         spy_gauge = spy_gauge or {}
+        ticker_gauge = ticker_gauge or {}
 
         record = {
             'timestamp': timestamp,
@@ -691,6 +692,13 @@ class Databook:
             'spy_15m': spy_gauge.get('15m'),
             'spy_30m': spy_gauge.get('30m'),
             'spy_1h': spy_gauge.get('1h'),
+            # Ticker gauge
+            'ticker_since_open': ticker_gauge.get('since_open'),
+            'ticker_1m': ticker_gauge.get('1m'),
+            'ticker_5m': ticker_gauge.get('5m'),
+            'ticker_15m': ticker_gauge.get('15m'),
+            'ticker_30m': ticker_gauge.get('30m'),
+            'ticker_1h': ticker_gauge.get('1h'),
             # Technical indicators
             'vwap': vwap,
             'ema_10': ema_10,
@@ -1094,6 +1102,41 @@ class Backtest:
 
         return spy_price, gauge
 
+    def _calculate_ticker_gauge(self, stock_data, timestamp):
+        """
+        Calculate ticker gauge at a given timestamp.
+
+        Same logic as SPY gauge but applied to the main ticker's stock data.
+        For each timeframe, compare current price to average price over that lookback.
+        Returns dict: {'since_open': 'Bullish'/'Bearish', '1m': ..., '5m': ..., etc.}
+        """
+        available = stock_data[stock_data.index <= timestamp]
+        if available.empty:
+            return {}
+
+        current_price = available['close'].iloc[-1]
+        market_open = timestamp.replace(hour=9, minute=30, second=0, microsecond=0)
+
+        spy_config = self.config.get('spy_gauge', {})
+        timeframes = spy_config.get('timeframes', {})
+        gauge = {}
+
+        for label, minutes in timeframes.items():
+            if minutes == 0:
+                lookback_start = market_open
+            else:
+                lookback_start = timestamp - timedelta(minutes=minutes)
+
+            window = available[(available.index >= lookback_start) & (available.index <= timestamp)]
+            if window.empty or len(window) < 1:
+                gauge[label] = None
+                continue
+
+            avg_price = window['close'].mean()
+            gauge[label] = 'Bullish' if current_price >= avg_price else 'Bearish'
+
+        return gauge
+
     def _assess_risk(self, rsi, rsi_avg, ewo_avg, statsbook, timestamp, signal_time):
         """
         Assess risk at entry time.
@@ -1355,6 +1398,9 @@ class Backtest:
             # Calculate SPY gauge for current bar
             spy_price, spy_gauge_data = self._calculate_spy_gauge(spy_data, timestamp)
 
+            # Calculate ticker gauge for current bar
+            ticker_gauge_data = self._calculate_ticker_gauge(stock_data, timestamp)
+
             if holding:
                 position.update(timestamp, option_price, stock_price)
 
@@ -1485,6 +1531,7 @@ class Backtest:
                     risk_trend=risk_trend,
                     spy_price=spy_price,
                     spy_gauge=spy_gauge_data,
+                    ticker_gauge=ticker_gauge_data,
                     ai_outlook_1m=ai_signal_data.get('outlook_1m'),
                     ai_outlook_5m=ai_signal_data.get('outlook_5m'),
                     ai_outlook_30m=ai_signal_data.get('outlook_30m'),
@@ -1557,6 +1604,7 @@ class Backtest:
                     atr_sl=atr_sl_value,
                     spy_price=spy_price,
                     spy_gauge=spy_gauge_data,
+                    ticker_gauge=ticker_gauge_data,
                 )
 
         # Close at end of data if still open
