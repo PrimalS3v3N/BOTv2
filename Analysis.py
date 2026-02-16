@@ -314,15 +314,81 @@ def IchimokuCloud(df, tenkan_period=9, kijun_period=26, senkou_b_period=52, disp
     return tenkan_sen, kijun_sen, senkou_span_a, senkou_span_b
 
 
-def add_indicators(df, ema_period=30, ewo_fast=5, ewo_slow=35, ewo_avg_period=15, rsi_period=14, rsi_avg_period=10,
+def ATR_SL(df, atr_period=5, hhv_period=10, multiplier=2.5):
+    """
+    ATR Trailing Stoploss indicator.
+
+    Translated from Pine Script (ceyhun, MPL 2.0).
+
+    Creates a trailing stop loss line based on ATR:
+    1. Compute base_level = high - (multiplier * ATR)
+    2. Take the highest base_level over hhv_period bars
+    3. For the first 15 bars, use close as the stop level
+
+    When close > ATR-SL: uptrend (price above stop)
+    When close < ATR-SL: downtrend (price below stop)
+
+    Args:
+        df: DataFrame with 'high', 'low', 'close' columns
+        atr_period: ATR calculation period (default: 5)
+        hhv_period: Highest high value lookback period (default: 10)
+        multiplier: ATR multiplier (default: 2.5)
+
+    Returns:
+        Series with ATR Trailing Stoploss values
+    """
+    if not all(col in df.columns for col in ['high', 'low', 'close']):
+        return pd.Series(index=df.index, dtype=float)
+
+    high = df['high']
+    low = df['low']
+    close = df['close']
+
+    # Calculate True Range
+    tr1 = high - low
+    tr2 = (high - close.shift(1)).abs()
+    tr3 = (low - close.shift(1)).abs()
+    true_range = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+
+    # ATR using Wilder's smoothing (RMA): alpha = 1/period
+    atr = true_range.ewm(alpha=1.0 / atr_period, adjust=False).mean()
+
+    # Base value: high - multiplier * ATR
+    base = high - multiplier * atr
+
+    # Highest base value over hhv_period bars (Prev in Pine Script)
+    hhv = base.rolling(window=hhv_period, min_periods=1).max()
+
+    # Build trailing stop: first 15 bars use close, then use hhv
+    # When close > hhv and close > previous close, update to current hhv
+    # Otherwise hold the previous value (ratcheting behavior)
+    ts = pd.Series(index=df.index, dtype=float)
+
+    for i in range(len(df)):
+        if i < 15:
+            # First 15 bars: use close
+            ts.iloc[i] = close.iloc[i]
+        else:
+            prev_ts = ts.iloc[i - 1]
+            if close.iloc[i] > hhv.iloc[i] and close.iloc[i] > close.iloc[i - 1]:
+                ts.iloc[i] = hhv.iloc[i]
+            else:
+                ts.iloc[i] = max(prev_ts, hhv.iloc[i]) if close.iloc[i] > prev_ts else hhv.iloc[i]
+
+    return ts
+
+
+def add_indicators(df, ema_periods=None, ewo_fast=5, ewo_slow=35, ewo_avg_period=15,
+                   rsi_period=14, rsi_avg_period=10,
                    supertrend_period=10, supertrend_multiplier=3.0,
-                   ichimoku_tenkan=9, ichimoku_kijun=26, ichimoku_senkou_b=52, ichimoku_displacement=26):
+                   ichimoku_tenkan=9, ichimoku_kijun=26, ichimoku_senkou_b=52, ichimoku_displacement=26,
+                   atr_sl_period=5, atr_sl_hhv=10, atr_sl_multiplier=2.5):
     """
     Add all standard indicators to a DataFrame.
 
     Args:
         df: DataFrame with OHLCV data (must have 'close', 'volume' columns)
-        ema_period: Period for EMA calculation (default: 30)
+        ema_periods: List of EMA periods (default: [10, 21, 50, 100, 200])
         ewo_fast: Fast period for EWO (default: 5)
         ewo_slow: Slow period for EWO (default: 35)
         ewo_avg_period: Period for EWO rolling average (default: 15 for 15-min avg on 1-min data)
@@ -334,13 +400,16 @@ def add_indicators(df, ema_period=30, ewo_fast=5, ewo_slow=35, ewo_avg_period=15
         ichimoku_kijun: Kijun-sen period (default: 26)
         ichimoku_senkou_b: Senkou Span B period (default: 52)
         ichimoku_displacement: Forward displacement for cloud spans (default: 26)
+        atr_sl_period: ATR period for ATR-SL indicator (default: 5)
+        atr_sl_hhv: HHV lookback period for ATR-SL (default: 10)
+        atr_sl_multiplier: ATR multiplier for ATR-SL (default: 2.5)
 
     Returns:
         DataFrame with added indicator columns:
-        - ema_30: 30-period EMA
+        - ema_10, ema_21, ema_50, ema_100, ema_200: EMAs at various periods
         - vwap: Volume Weighted Average Price
-        - vwap_ema_avg: (VWAP + EMA + High) / 3
-        - emavwap: (EMA + VWAP) / 2
+        - vwap_ema_avg: (VWAP + EMA_21 + High) / 3
+        - emavwap: (EMA_21 + VWAP) / 2
         - ewo: Elliott Wave Oscillator
         - ewo_15min_avg: 15-minute rolling average of EWO
         - rsi: Relative Strength Index (0-100 scale)
@@ -351,7 +420,11 @@ def add_indicators(df, ema_period=30, ewo_fast=5, ewo_slow=35, ewo_avg_period=15
         - ichimoku_kijun: Kijun-sen (Base Line)
         - ichimoku_senkou_a: Senkou Span A (Leading Span A)
         - ichimoku_senkou_b: Senkou Span B (Leading Span B)
+        - atr_sl: ATR Trailing Stoploss
     """
+    if ema_periods is None:
+        ema_periods = [10, 21, 50, 100, 200]
+
     df = df.copy()
 
     # Calculate true price column: (high + low + close) / 3
@@ -361,8 +434,9 @@ def add_indicators(df, ema_period=30, ewo_fast=5, ewo_slow=35, ewo_avg_period=15
     else:
         df['_true_price'] = df['close']
 
-    # Add EMA (based on true price)
-    df['ema_30'] = EMA(df, column='_true_price', period=ema_period)
+    # Add EMAs at multiple periods (based on true price)
+    for period in ema_periods:
+        df[f'ema_{period}'] = EMA(df, column='_true_price', period=period)
 
     # Add VWAP (based on true price)
     df['vwap'] = VWAP(df, price_col='_true_price', volume_col='volume')
@@ -379,11 +453,12 @@ def add_indicators(df, ema_period=30, ewo_fast=5, ewo_slow=35, ewo_avg_period=15
     # Add RSI 10-minute rolling average (simple moving average over rsi_avg_period bars)
     df['rsi_10min_avg'] = df['rsi'].rolling(window=rsi_avg_period, min_periods=1).mean()
 
-    # Add VWAP-EMA-High Average: (VWAP + EMA + High) / 3
-    df['vwap_ema_avg'] = (df['vwap'] + df['ema_30'] + df['high']) / 3
+    # Add VWAP-EMA-High Average: (VWAP + EMA_21 + High) / 3
+    ema_ref = df.get('ema_21', df.get(f'ema_{ema_periods[1]}', df[f'ema_{ema_periods[0]}']))
+    df['vwap_ema_avg'] = (df['vwap'] + ema_ref + df['high']) / 3
 
-    # Add EMAVWAP: (EMA + VWAP) / 2
-    df['emavwap'] = (df['ema_30'] + df['vwap']) / 2
+    # Add EMAVWAP: (EMA_21 + VWAP) / 2
+    df['emavwap'] = (ema_ref + df['vwap']) / 2
 
     # Add Supertrend
     df['supertrend'], df['supertrend_direction'] = Supertrend(
@@ -395,6 +470,9 @@ def add_indicators(df, ema_period=30, ewo_fast=5, ewo_slow=35, ewo_avg_period=15
         df, tenkan_period=ichimoku_tenkan, kijun_period=ichimoku_kijun,
         senkou_b_period=ichimoku_senkou_b, displacement=ichimoku_displacement
     )
+
+    # Add ATR Trailing Stoploss
+    df['atr_sl'] = ATR_SL(df, atr_period=atr_sl_period, hhv_period=atr_sl_hhv, multiplier=atr_sl_multiplier)
 
     # Clean up temporary column
     df = df.drop(columns=['_true_price'])
@@ -619,6 +697,6 @@ def estimate_option_price_bs(stock_price, strike, option_type, days_to_expiry,
 
 
 # Export functions for use by other modules
-__all__ = ['EMA', 'VWAP', 'EWO', 'true_price', 'RSI', 'Supertrend', 'IchimokuCloud', 'add_indicators',
-           'black_scholes_call', 'black_scholes_put', 'black_scholes_price',
+__all__ = ['EMA', 'VWAP', 'EWO', 'true_price', 'RSI', 'Supertrend', 'IchimokuCloud', 'ATR_SL',
+           'add_indicators', 'black_scholes_call', 'black_scholes_put', 'black_scholes_price',
            'calculate_greeks', 'estimate_option_price_bs']

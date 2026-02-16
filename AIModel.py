@@ -66,7 +66,7 @@ class DataSnapshot:
         Args:
             bar_data: dict with keys matching the databook record format:
                 stock_price, stock_high, stock_low, true_price, volume,
-                option_price, pnl_pct, vwap, ema_30, ewo, ewo_15min_avg,
+                option_price, pnl_pct, vwap, ema_21, ewo, ewo_15min_avg,
                 rsi, rsi_10min_avg, supertrend_direction, market_bias,
                 ichimoku_tenkan, ichimoku_kijun, ichimoku_senkou_a, ichimoku_senkou_b
         """
@@ -183,7 +183,7 @@ class DataSnapshot:
             f"1-MINUTE (current bar):\n"
             f"  Price: ${self._safe(current.get('stock_price'))} | True Price: ${self._safe(current.get('true_price'))}\n"
             f"  RSI: {self._safe(current.get('rsi'), '.1f')} | EWO: {self._safe(current.get('ewo'), '.3f')}\n"
-            f"  VWAP: ${self._safe(current.get('vwap'))} | EMA: ${self._safe(current.get('ema_30'))}\n"
+            f"  VWAP: ${self._safe(current.get('vwap'))} | EMA: ${self._safe(current.get('ema_21'))}\n"
             f"  Supertrend: {self._supertrend_summary(current)} | Bias: {self._safe(current.get('market_bias'), '.0f')}\n"
             f"\n"
             f"5-MINUTE VIEW ({len(bars_5m)} bars):\n"
@@ -649,13 +649,14 @@ class OptimalExitLogger:
     # Indicator columns to capture from each databook bar
     INDICATOR_KEYS = [
         'stock_price', 'true_price', 'option_price', 'volume',
-        'pnl_pct', 'stop_loss', 'stop_loss_mode',
+        'pnl_pct',
         'market_bias',
-        'vwap', 'ema_30', 'vwap_ema_avg', 'emavwap',
+        'vwap', 'ema_10', 'ema_21', 'ema_50', 'ema_100', 'ema_200',
+        'vwap_ema_avg', 'emavwap',
         'ewo', 'ewo_15min_avg', 'rsi', 'rsi_10min_avg',
         'supertrend', 'supertrend_direction',
         'ichimoku_tenkan', 'ichimoku_kijun', 'ichimoku_senkou_a', 'ichimoku_senkou_b',
-        'milestone_pct', 'trailing_stop_price',
+        'atr_sl',
     ]
 
     def __init__(self, log_dir='ai_training_data', context_bars=5):

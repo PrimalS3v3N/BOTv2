@@ -534,10 +534,6 @@ class Position:
 
         # Max profit tracking (entry to end of market day)
         self.max_price_to_eod = entry_price  # Track max price from entry to end of day
-        self.max_stop_loss_price = entry_price  # Track lowest price during holding (worst stop loss point)
-
-        # Take profit milestone tracking
-        self.highest_milestone_pct = None  # Highest milestone reached during holding
 
     def update(self, timestamp, price, stock_price=None):
         """Update position with new price data during holding period."""
@@ -546,8 +542,6 @@ class Position:
         self.lowest_price = min(self.lowest_price, price)
         self.last_update = timestamp
         self.last_stock_price = stock_price
-        # Track lowest price during holding (worst stop loss point)
-        self.max_stop_loss_price = min(self.max_stop_loss_price, price)
 
     def update_eod_price(self, price):
         """Update max price tracking from entry to end of market day (called even after exit)."""
@@ -585,9 +579,6 @@ class Position:
 
     def to_dict(self):
         """Convert position to dictionary."""
-        # Calculate Profit[min] - P&L at the worst stop loss point (lowest price during holding)
-        profit_min = self.get_pnl(self.max_stop_loss_price) if self.max_stop_loss_price else None
-
         return {
             'ticker': self.ticker,
             'strike': self.strike,
@@ -606,9 +597,6 @@ class Position:
             'pnl_pct': self.get_pnl_pct(self.exit_price) if self.exit_price else None,
             'minutes_held': self.get_minutes_held(self.exit_time) if self.exit_time else None,
             'max_price_to_eod': self.max_price_to_eod,
-            'max_stop_loss_price': self.max_stop_loss_price,
-            'profit_min': profit_min,
-            'highest_milestone_pct': self.highest_milestone_pct,
         }
 
 
@@ -627,22 +615,23 @@ class Databook:
         self.day_low = np.inf
 
     def add_record(self, timestamp, stock_price, option_price, volume, holding=True,
-                   stop_loss=np.nan, stop_loss_mode=None, vwap=np.nan, ema_30=np.nan,
+                   vwap=np.nan,
+                   ema_10=np.nan, ema_21=np.nan, ema_50=np.nan, ema_100=np.nan, ema_200=np.nan,
                    vwap_ema_avg=np.nan, emavwap=np.nan, stock_high=np.nan, stock_low=np.nan,
                    ewo=np.nan, ewo_15min_avg=np.nan,
                    rsi=np.nan, rsi_10min_avg=np.nan,
                    supertrend=np.nan, supertrend_direction=np.nan,
                    ichimoku_tenkan=np.nan, ichimoku_kijun=np.nan,
                    ichimoku_senkou_a=np.nan, ichimoku_senkou_b=np.nan,
-                   milestone_pct=np.nan, trailing_stop_price=np.nan,
+                   atr_sl=np.nan,
                    risk=None, risk_reasons=None, risk_trend=None,
                    spy_price=np.nan, spy_gauge=None,
                    ai_outlook_1m=None, ai_outlook_5m=None,
                    ai_outlook_30m=None, ai_outlook_1h=None,
                    ai_action=None, ai_reason=None,
-                   exit_sig_tp=None, exit_sig_sb=None, exit_sig_mp=None,
-                   exit_sig_ai=None, exit_sig_reversal=None, exit_sig_downtrend=None,
-                   exit_sig_sl=None, exit_sig_closure_peak=None):
+                   exit_sig_sb=None, exit_sig_mp=None,
+                   exit_sig_ai=None,
+                   exit_sig_closure_peak=None):
         """Add a tracking record."""
         pnl_pct = self.position.get_pnl_pct(option_price) if holding else np.nan
 
@@ -688,12 +677,6 @@ class Databook:
             'highest_price': self.position.highest_price if holding else np.nan,
             'lowest_price': self.position.lowest_price if holding else np.nan,
             'minutes_held': self.position.get_minutes_held(timestamp) if holding else np.nan,
-            # Stop loss tracking
-            'stop_loss': stop_loss,
-            'stop_loss_mode': stop_loss_mode,
-            # Take profit milestone tracking
-            'milestone_pct': milestone_pct,
-            'trailing_stop_price': trailing_stop_price,
             # Risk assessment
             'risk': risk,
             'risk_reasons': risk_reasons,
@@ -710,7 +693,11 @@ class Databook:
             'spy_1h': spy_gauge.get('1h'),
             # Technical indicators
             'vwap': vwap,
-            'ema_30': ema_30,
+            'ema_10': ema_10,
+            'ema_21': ema_21,
+            'ema_50': ema_50,
+            'ema_100': ema_100,
+            'ema_200': ema_200,
             'vwap_ema_avg': vwap_ema_avg,
             'emavwap': emavwap,
             'ewo': ewo,
@@ -723,6 +710,7 @@ class Databook:
             'ichimoku_kijun': ichimoku_kijun,
             'ichimoku_senkou_a': ichimoku_senkou_a,
             'ichimoku_senkou_b': ichimoku_senkou_b,
+            'atr_sl': atr_sl,
             # AI exit signal tracking
             'ai_outlook_1m': ai_outlook_1m,
             'ai_outlook_5m': ai_outlook_5m,
@@ -731,13 +719,9 @@ class Databook:
             'ai_action': ai_action,
             'ai_reason': ai_reason,
             # Exit signal flags (per-bar: which signals would fire)
-            'exit_sig_tp': exit_sig_tp,
             'exit_sig_sb': exit_sig_sb,
             'exit_sig_mp': exit_sig_mp,
             'exit_sig_ai': exit_sig_ai,
-            'exit_sig_reversal': exit_sig_reversal,
-            'exit_sig_downtrend': exit_sig_downtrend,
-            'exit_sig_sl': exit_sig_sl,
             'exit_sig_closure_peak': exit_sig_closure_peak,
         }
 
@@ -1239,7 +1223,7 @@ class Backtest:
 
         # Get indicator settings from config
         indicator_config = self.config.get('indicators', {})
-        ema_period = indicator_config.get('ema_period', 30)
+        ema_periods = indicator_config.get('ema_periods', [10, 21, 50, 100, 200])
 
         # Get supertrend settings from config
         supertrend_period = indicator_config.get('supertrend_period', 10)
@@ -1251,29 +1235,22 @@ class Backtest:
         ichimoku_senkou_b = indicator_config.get('ichimoku_senkou_b', 52)
         ichimoku_displacement = indicator_config.get('ichimoku_displacement', 26)
 
+        # Get ATR-SL settings from config
+        atr_sl_period = indicator_config.get('atr_sl_period', 5)
+        atr_sl_hhv = indicator_config.get('atr_sl_hhv', 10)
+        atr_sl_multiplier = indicator_config.get('atr_sl_multiplier', 2.5)
+
         # Add technical indicators to stock data
-        stock_data = Analysis.add_indicators(stock_data, ema_period=ema_period,
+        stock_data = Analysis.add_indicators(stock_data, ema_periods=ema_periods,
                                              supertrend_period=supertrend_period,
                                              supertrend_multiplier=supertrend_multiplier,
                                              ichimoku_tenkan=ichimoku_tenkan,
                                              ichimoku_kijun=ichimoku_kijun,
                                              ichimoku_senkou_b=ichimoku_senkou_b,
-                                             ichimoku_displacement=ichimoku_displacement)
-
-        # Get stop loss settings from config
-        SL_config = self.config.get('stop_loss', {})
-        SL_enabled = SL_config.get('enabled', True)
-        SL_pct = SL_config.get('stop_loss_pct', 0.30)
-        SL_trailing_trigger_pct = SL_config.get('trailing_trigger_pct', 0.50)
-        SL_trailing_stop_pct = SL_config.get('trailing_stop_pct', 0.30)
-        SL_breakeven_min_minutes = SL_config.get('breakeven_min_minutes', 30)
-        SL_reversal_exit_enabled = SL_config.get('reversal_exit_enabled', True)
-        SL_downtrend_exit_enabled = SL_config.get('downtrend_exit_enabled', True)
-
-        # Get Take Profit - Milestones settings from config (start with normal)
-        tp_config = self.config.get('take_profit_milestones', {})
-        tp_strategy = Strategy.TakeProfitMilestones(tp_config)
-        tp_tracker = tp_strategy.create_tracker(position.entry_price)
+                                             ichimoku_displacement=ichimoku_displacement,
+                                             atr_sl_period=atr_sl_period,
+                                             atr_sl_hhv=atr_sl_hhv,
+                                             atr_sl_multiplier=atr_sl_multiplier)
 
         # Get Momentum Peak settings from config
         mp_strategy = Strategy.MomentumPeak(self.config.get('momentum_peak', {}))
@@ -1312,20 +1289,9 @@ class Backtest:
         risk_downtrend_drop_pct = risk_config.get('downtrend_drop_pct', 10)
         risk_downtrend_reason = risk_config.get('downtrend_exit_reason', 'SL-DT')
         risk_negative_bar_count = 0  # Consecutive negative bars after entry for HIGH risk
-        risk_tp_switched = False     # Whether TP/SL have been switched for this trade
 
         # Fetch SPY data for this signal's trading day
         spy_data = self._fetch_spy_data(signal['signal_time'])
-
-        # Initialize stop loss manager
-        SL_manager = Strategy.StopLoss(
-            entry_price=position.entry_price,
-            stop_loss_pct=SL_pct,
-            trailing_trigger_pct=SL_trailing_trigger_pct,
-            trailing_stop_pct=SL_trailing_stop_pct,
-            breakeven_min_minutes=SL_breakeven_min_minutes,
-            option_type=position.option_type
-        )
 
         max_vwap_ema_avg = np.nan  # Running max of (VWAP+EMA+High)/3
 
@@ -1337,7 +1303,11 @@ class Backtest:
 
             # Get indicator values for this bar
             vwap = bar.get('vwap', np.nan)
-            ema_30 = bar.get('ema_30', np.nan)
+            ema_10 = bar.get('ema_10', np.nan)
+            ema_21 = bar.get('ema_21', np.nan)
+            ema_50 = bar.get('ema_50', np.nan)
+            ema_100 = bar.get('ema_100', np.nan)
+            ema_200 = bar.get('ema_200', np.nan)
             current_vwap_ema_avg = bar.get('vwap_ema_avg', np.nan)
 
             # Track running max of (VWAP+EMA+High)/3
@@ -1358,6 +1328,7 @@ class Backtest:
             ichi_kijun = bar.get('ichimoku_kijun', np.nan)
             ichi_senkou_a = bar.get('ichimoku_senkou_a', np.nan)
             ichi_senkou_b = bar.get('ichimoku_senkou_b', np.nan)
+            atr_sl_value = bar.get('atr_sl', np.nan)
 
             current_days_to_expiry = max(0, (expiry_dt - timestamp).total_seconds() / 86400)
 
@@ -1408,32 +1379,6 @@ class Backtest:
                     else:
                         risk_trend = 'Downtrend'
 
-                    # Switch TP/SL based on risk trend (once per trend direction change)
-                    if not risk_tp_switched:
-                        risk_tp_switched = True
-                        if risk_trend == 'Uptrend':
-                            # Switch to TIGHT take profit milestones
-                            tight_milestones = tp_config.get('milestones_tight')
-                            if tight_milestones:
-                                tp_tracker = Strategy.MilestoneTracker(
-                                    sorted(tight_milestones, key=lambda m: m['gain_pct']),
-                                    position.entry_price
-                                )
-                                print(f"    RISK: Uptrend -> TP switched to TIGHT")
-                        elif risk_trend == 'Downtrend':
-                            # Switch to TIGHT stop loss
-                            sl_tight = self.config.get('stop_loss_tight', {})
-                            if sl_tight:
-                                SL_manager = Strategy.StopLoss(
-                                    entry_price=position.entry_price,
-                                    stop_loss_pct=sl_tight.get('stop_loss_pct', 0.15),
-                                    trailing_trigger_pct=sl_tight.get('trailing_trigger_pct', 0.15),
-                                    trailing_stop_pct=sl_tight.get('trailing_stop_pct', 0.15),
-                                    breakeven_min_minutes=sl_tight.get('breakeven_min_minutes', 15),
-                                    option_type=position.option_type
-                                )
-                                print(f"    RISK: Downtrend -> SL switched to TIGHT")
-
                     # Track consecutive negative bars for risk downtrend exit
                     if risk_trend == 'Downtrend':
                         if pnl_pct_now < 0:
@@ -1449,38 +1394,6 @@ class Backtest:
                             elif pnl_pct_now <= -risk_downtrend_drop_pct:
                                 exit_price = option_price * (1 - self.slippage_pct)
                                 position.close(exit_price, timestamp, risk_downtrend_reason)
-
-                # Update stop loss and check if triggered
-                SL_price = np.nan
-                SL_mode = None
-                SL_triggered = False
-                SL_reversal = False
-                SL_downtrend = False
-
-                if SL_enabled:
-                    minutes_held = position.get_minutes_held(timestamp)
-                    true_price = Analysis.true_price(stock_price, stock_high, stock_low)
-                    SL_result = SL_manager.update(
-                        option_price, minutes_held=minutes_held,
-                        true_price=true_price, vwap=vwap, ema=ema_30,
-                        emavwap=emavwap, vwap_ema_avg=vwap_ema_avg
-                    )
-                    SL_price = SL_result['stop_loss']
-                    SL_mode = SL_result['mode']
-                    SL_triggered = SL_result['triggered']
-                    SL_reversal = SL_result['reversal']
-                    SL_downtrend = SL_result['downtrend']
-
-                # Update take profit milestone tracker
-                tp_exit = False
-                tp_reason = None
-                cur_milestone_pct = np.nan
-                cur_trailing_price = np.nan
-                if tp_tracker:
-                    tp_exit, tp_reason = tp_tracker.update(option_price)
-                    if tp_tracker.current_milestone_pct is not None:
-                        cur_milestone_pct = tp_tracker.current_milestone_pct
-                        cur_trailing_price = tp_tracker.trailing_exit_price
 
                 # Update momentum peak detector
                 mp_exit = False
@@ -1510,7 +1423,7 @@ class Backtest:
                         'option_price': option_price,
                         'pnl_pct': position.get_pnl_pct(option_price),
                         'vwap': vwap,
-                        'ema_30': ema_30,
+                        'ema_21': ema_21,
                         'ewo': ewo,
                         'ewo_15min_avg': ewo_15min_avg,
                         'rsi': rsi,
@@ -1539,17 +1452,19 @@ class Backtest:
                     elif position.option_type.upper() in ['PUT', 'PUTS', 'P'] and rsi_10min_avg <= CP_rsi_put:
                         cp_signal = True
 
-                # Record tracking data with stop loss, indicators, risk, SPY, AI signals, and exit signal flags
+                # Record tracking data with indicators, risk, SPY, AI signals, and exit signal flags
                 matrix.add_record(
                     timestamp=timestamp,
                     stock_price=stock_price,
                     option_price=option_price,
                     volume=volume,
                     holding=True,
-                    stop_loss=SL_price,
-                    stop_loss_mode=SL_mode,
                     vwap=vwap,
-                    ema_30=ema_30,
+                    ema_10=ema_10,
+                    ema_21=ema_21,
+                    ema_50=ema_50,
+                    ema_100=ema_100,
+                    ema_200=ema_200,
                     vwap_ema_avg=vwap_ema_avg,
                     emavwap=emavwap,
                     stock_high=stock_high,
@@ -1564,8 +1479,7 @@ class Backtest:
                     ichimoku_kijun=ichi_kijun,
                     ichimoku_senkou_a=ichi_senkou_a,
                     ichimoku_senkou_b=ichi_senkou_b,
-                    milestone_pct=cur_milestone_pct,
-                    trailing_stop_price=cur_trailing_price,
+                    atr_sl=atr_sl_value,
                     risk=risk_level,
                     risk_reasons=risk_reasons,
                     risk_trend=risk_trend,
@@ -1578,26 +1492,14 @@ class Backtest:
                     ai_action=ai_signal_data.get('action'),
                     ai_reason=ai_signal_data.get('reason'),
                     # Exit signal flags: which signals would fire this bar
-                    exit_sig_tp=tp_exit,
                     exit_sig_sb=sb_exit,
                     exit_sig_mp=mp_exit,
                     exit_sig_ai=ai_exit,
-                    exit_sig_reversal=SL_enabled and SL_reversal_exit_enabled and SL_reversal,
-                    exit_sig_downtrend=SL_enabled and SL_downtrend_exit_enabled and SL_downtrend,
-                    exit_sig_sl=SL_enabled and SL_triggered,
                     exit_sig_closure_peak=cp_signal,
                 )
 
-                # Take Profit - Milestones: trailing stop triggered
-                if tp_exit and not position.is_closed:
-                    # Fill at the trailing stop price, not the current bar price.
-                    # The stop order triggers at the trailing level; using option_price
-                    # would fill at whatever the bar gapped down to, understating profits.
-                    exit_price = tp_tracker.trailing_exit_price * (1 - self.slippage_pct)
-                    position.close(exit_price, timestamp, tp_reason)
-
                 # StatsBook Exit: EWO or H-L range at historical extreme
-                elif sb_exit and not position.is_closed:
+                if sb_exit and not position.is_closed:
                     exit_price = option_price * (1 - self.slippage_pct)
                     position.close(exit_price, timestamp, sb_reason)
 
@@ -1610,24 +1512,6 @@ class Backtest:
                 elif ai_exit and not position.is_closed:
                     exit_price = option_price * (1 - self.slippage_pct)
                     position.close(exit_price, timestamp, 'AI Exit Signal')
-
-                # Check for reversal exit (True Price < VWAP)
-                elif SL_enabled and SL_reversal_exit_enabled and SL_reversal and not position.is_closed:
-                    exit_price = option_price * (1 - self.slippage_pct)
-                    exit_reason = self._format_exit_reason('stop_loss_reversal')
-                    position.close(exit_price, timestamp, exit_reason)
-
-                # Check for downtrend exit (True Price & EMA < vwap_ema_avg)
-                elif SL_enabled and SL_downtrend_exit_enabled and SL_downtrend and not position.is_closed:
-                    exit_price = option_price * (1 - self.slippage_pct)
-                    exit_reason = self._format_exit_reason('stop_loss_downtrend')
-                    position.close(exit_price, timestamp, exit_reason)
-
-                # Check for stop loss exit (only if stop loss is enabled)
-                elif SL_enabled and SL_triggered and not position.is_closed:
-                    exit_price = option_price * (1 - self.slippage_pct)
-                    exit_reason = self._format_exit_reason(f'stop_loss_{SL_mode}')
-                    position.close(exit_price, timestamp, exit_reason)
 
                 # Closure - Peak: Avg RSI (10min) based exit in last 30 minutes of trading day
                 elif CP_enabled and not position.is_closed and not np.isnan(rsi_10min_avg) and timestamp.time() >= CP_start_time:
@@ -1650,10 +1534,12 @@ class Backtest:
                     option_price=option_price,
                     volume=volume,
                     holding=False,
-                    stop_loss=np.nan,
-                    stop_loss_mode=None,
                     vwap=vwap,
-                    ema_30=ema_30,
+                    ema_10=ema_10,
+                    ema_21=ema_21,
+                    ema_50=ema_50,
+                    ema_100=ema_100,
+                    ema_200=ema_200,
                     vwap_ema_avg=vwap_ema_avg,
                     emavwap=emavwap,
                     stock_high=stock_high,
@@ -1668,6 +1554,7 @@ class Backtest:
                     ichimoku_kijun=ichi_kijun,
                     ichimoku_senkou_a=ichi_senkou_a,
                     ichimoku_senkou_b=ichi_senkou_b,
+                    atr_sl=atr_sl_value,
                     spy_price=spy_price,
                     spy_gauge=spy_gauge_data,
                 )
@@ -1676,10 +1563,6 @@ class Backtest:
         if not position.is_closed:
             exit_price = position.current_price * (1 - self.slippage_pct)
             position.close(exit_price, stock_data.index[-1], 'Closure-Market')
-
-        # Record highest milestone reached during holding
-        if tp_tracker and tp_tracker.current_milestone_pct is not None:
-            position.highest_milestone_pct = tp_tracker.current_milestone_pct
 
         # Finalize AI inference log with trade outcome
         if ai_detector and self.ai_strategy.logger is not None:
@@ -1714,28 +1597,11 @@ class Backtest:
         Format exit reason to user-friendly display string.
 
         Mappings:
-        - stop_loss_initial -> "SL - Initial"
-        - stop_loss_breakeven -> "SL - Breakeven"
-        - stop_loss_trailing -> "SL - Trailing"
-        - stop_loss_reversal -> "SL - Reversal"
-        - stop_loss_downtrend -> "SL - DownTrend"
         - closure_peak -> "Closure - Peak"
         - market_close -> "Closure-Market"
         """
         if reason is None:
             return 'Unknown'
-
-        # Stop loss exits
-        if reason == 'stop_loss_initial':
-            return 'SL - Initial'
-        elif reason == 'stop_loss_breakeven':
-            return 'SL - Breakeven'
-        elif reason == 'stop_loss_trailing':
-            return 'SL - Trailing'
-        elif reason == 'stop_loss_reversal':
-            return 'SL - Reversal'
-        elif reason == 'stop_loss_downtrend':
-            return 'SL - DownTrend'
 
         # Closure - Peak
         elif reason == 'closure_peak':
