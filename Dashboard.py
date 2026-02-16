@@ -527,7 +527,7 @@ def create_trade_chart(df, trade_label, market_hours_only=False, show_ewo=True, 
 
     # Ticker gauge sentiment as background shading + hover on main chart
     ticker_gauge_cols = {
-        'ticker_since_open': 'Open',
+        'ticker_since_open': 'O',
         'ticker_1m': '1m',
         'ticker_5m': '5m',
         'ticker_15m': '15m',
@@ -556,8 +556,8 @@ def create_trade_chart(df, trade_label, market_hours_only=False, show_ewo=True, 
                 val = row.get(col)
                 if pd.notna(val) and val:
                     icon = '+' if val == 'Bullish' else '-'
-                    parts.append(f"{label}:{icon}")
-            return ' | '.join(parts) if parts else ''
+                    parts.append(f"{label}({icon})")
+            return ' '.join(parts) if parts else ''
 
         hover_texts = df.apply(build_ticker_hover, axis=1)
         if hover_texts.str.len().sum() > 0:
@@ -750,7 +750,7 @@ def create_trade_chart(df, trade_label, market_hours_only=False, show_ewo=True, 
         # SPY gauge sentiment as color-coded markers on secondary axis
         # Map gauge columns to display
         spy_gauge_cols = {
-            'spy_since_open': 'Open',
+            'spy_since_open': 'O',
             'spy_1m': '1m',
             'spy_5m': '5m',
             'spy_15m': '15m',
@@ -773,13 +773,14 @@ def create_trade_chart(df, trade_label, market_hours_only=False, show_ewo=True, 
 
         # Build hover text showing all gauge timeframes
         def build_spy_hover(row):
-            parts = [f"SPY: ${row['spy_price']:.2f}" if pd.notna(row.get('spy_price')) else "SPY: N/A"]
+            price_part = f"SPY: ${row['spy_price']:.2f}" if pd.notna(row.get('spy_price')) else "SPY: N/A"
+            gauge_parts = []
             for col, label in spy_gauge_cols.items():
                 val = row.get(col)
                 if pd.notna(val) and val:
                     icon = '+' if val == 'Bullish' else '-'
-                    parts.append(f"{label}:{icon}")
-            return '<br>'.join([parts[0], ' | '.join(parts[1:])])
+                    gauge_parts.append(f"{label}({icon})")
+            return '<br>'.join([price_part, ' '.join(gauge_parts)])
 
         hover_texts = df.apply(build_spy_hover, axis=1)
         fig.add_trace(
