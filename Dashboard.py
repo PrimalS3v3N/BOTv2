@@ -525,6 +525,55 @@ def create_trade_chart(df, trade_label, market_hours_only=False, show_ewo=True, 
                         row=1, col=1, secondary_y=True
                     )
 
+    # Ticker gauge sentiment as background shading + hover on main chart
+    ticker_gauge_cols = {
+        'ticker_since_open': 'O',
+        'ticker_1m': '1m',
+        'ticker_5m': '5m',
+        'ticker_15m': '15m',
+        'ticker_30m': '30m',
+        'ticker_1h': '1h',
+    }
+    has_ticker_gauge = any(col in df.columns and df[col].notna().any() for col in ticker_gauge_cols)
+    if has_ticker_gauge:
+        # Show the 5m gauge as background shading for quick visual reference
+        if 'ticker_5m' in df.columns and df['ticker_5m'].notna().any():
+            sentiment = df[['time', 'ticker_5m']].dropna(subset=['ticker_5m']).copy()
+            if not sentiment.empty:
+                sentiment['group'] = (sentiment['ticker_5m'] != sentiment['ticker_5m'].shift()).cumsum()
+                for _, grp in sentiment.groupby('group'):
+                    color = 'rgba(0, 200, 83, 0.10)' if grp['ticker_5m'].iloc[0] == 'Bullish' else 'rgba(255, 23, 68, 0.10)'
+                    fig.add_vrect(
+                        x0=grp['time'].iloc[0], x1=grp['time'].iloc[-1],
+                        fillcolor=color, layer='below', line_width=0,
+                        row=1, col=1
+                    )
+
+        # Build hover text showing all ticker gauge timeframes
+        def build_ticker_hover(row):
+            parts = []
+            for col, label in ticker_gauge_cols.items():
+                val = row.get(col)
+                if pd.notna(val) and val:
+                    icon = '+' if val == 'Bullish' else '-'
+                    parts.append(f"{label}({icon})")
+            return ' '.join(parts) if parts else ''
+
+        hover_texts = df.apply(build_ticker_hover, axis=1)
+        if hover_texts.str.len().sum() > 0:
+            fig.add_trace(
+                go.Scatter(
+                    x=df['time'],
+                    y=df['true_price'] if 'true_price' in df.columns else df.get('stock_price'),
+                    name='Ticker Gauge',
+                    mode='none',
+                    hovertemplate='%{text}<extra></extra>',
+                    text=hover_texts,
+                    showlegend=False,
+                ),
+                row=1, col=1, secondary_y=False
+            )
+
     # EWO subplot (row 2) — displayed as histogram bars
     if has_ewo:
         # Color each bar green (positive) or red (negative)
@@ -701,7 +750,7 @@ def create_trade_chart(df, trade_label, market_hours_only=False, show_ewo=True, 
         # SPY gauge sentiment as color-coded markers on secondary axis
         # Map gauge columns to display
         spy_gauge_cols = {
-            'spy_since_open': 'Open',
+            'spy_since_open': 'O',
             'spy_1m': '1m',
             'spy_5m': '5m',
             'spy_15m': '15m',
@@ -724,13 +773,14 @@ def create_trade_chart(df, trade_label, market_hours_only=False, show_ewo=True, 
 
         # Build hover text showing all gauge timeframes
         def build_spy_hover(row):
-            parts = [f"SPY: ${row['spy_price']:.2f}" if pd.notna(row.get('spy_price')) else "SPY: N/A"]
+            price_part = f"SPY: ${row['spy_price']:.2f}" if pd.notna(row.get('spy_price')) else "SPY: N/A"
+            gauge_parts = []
             for col, label in spy_gauge_cols.items():
                 val = row.get(col)
                 if pd.notna(val) and val:
                     icon = '+' if val == 'Bullish' else '-'
-                    parts.append(f"{label}:{icon}")
-            return '<br>'.join([parts[0], ' | '.join(parts[1:])])
+                    gauge_parts.append(f"{label}({icon})")
+            return '<br>'.join([price_part, ' '.join(gauge_parts)])
 
         hover_texts = df.apply(build_spy_hover, axis=1)
         fig.add_trace(
@@ -1144,24 +1194,20 @@ def main():
     if ticker and ticker in statsbooks:
         sb_df = statsbooks[ticker]
         if isinstance(sb_df, pd.DataFrame) and not sb_df.empty:
-            # Build display DataFrame with 1-minute normalized columns
-            # Divisors: 5m/5, 1h/60
+            # Build display DataFrame with 1-minute normalized column
             display_df = sb_df.copy()
 
-            # Compute 1-minute reference columns from raw numeric data
-            norm_map = {'1m:5m': ('5m', 5), '1m:1h': ('1h', 60)}
-            for norm_col, (src_col, divisor) in norm_map.items():
-                if src_col in display_df.columns:
-                    display_df[norm_col] = display_df[src_col] / divisor
+            # Compute 1-minute reference column from 5m data (divided by 5)
+            if '5m' in display_df.columns:
+                display_df['1m'] = display_df['5m'] / 5
 
-            # Arrange columns: 5m | 1m:5m | 1h | 1m:1h | 1d
+            # Arrange columns: 1m | 5m | 1h | 1d
             ordered_cols = []
+            if '1m' in display_df.columns:
+                ordered_cols.append('1m')
             for tf in ['5m', '1h', '1d']:
                 if tf in display_df.columns:
                     ordered_cols.append(tf)
-                norm = f"1m:{tf}"
-                if norm in display_df.columns:
-                    ordered_cols.append(norm)
             display_df = display_df[ordered_cols]
 
             # Transpose: timeframes become rows, metrics become columns
