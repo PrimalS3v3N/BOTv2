@@ -525,7 +525,8 @@ def create_trade_chart(df, trade_label, market_hours_only=False, show_ewo=True, 
                         row=1, col=1, secondary_y=True
                     )
 
-    # Ticker gauge sentiment as background shading + hover on main chart
+    # Gauge sentiment as background shading + hover on main chart
+    # Use ticker gauge if available, otherwise fall back to SPY gauge
     ticker_gauge_cols = {
         'ticker_since_open': 'O',
         'ticker_1m': '1m',
@@ -534,25 +535,46 @@ def create_trade_chart(df, trade_label, market_hours_only=False, show_ewo=True, 
         'ticker_30m': '30m',
         'ticker_1h': '1h',
     }
+    spy_gauge_fallback_cols = {
+        'spy_since_open': 'O',
+        'spy_1m': '1m',
+        'spy_5m': '5m',
+        'spy_15m': '15m',
+        'spy_30m': '30m',
+        'spy_1h': '1h',
+    }
     has_ticker_gauge = any(col in df.columns and df[col].notna().any() for col in ticker_gauge_cols)
-    if has_ticker_gauge:
-        # Show the 5m gauge as background shading for quick visual reference
-        if 'ticker_5m' in df.columns and df['ticker_5m'].notna().any():
-            sentiment = df[['time', 'ticker_5m']].dropna(subset=['ticker_5m']).copy()
-            if not sentiment.empty:
-                sentiment['group'] = (sentiment['ticker_5m'] != sentiment['ticker_5m'].shift()).cumsum()
-                for _, grp in sentiment.groupby('group'):
-                    color = 'rgba(0, 200, 83, 0.18)' if grp['ticker_5m'].iloc[0] == 'Bullish' else 'rgba(255, 23, 68, 0.18)'
-                    fig.add_vrect(
-                        x0=grp['time'].iloc[0], x1=grp['time'].iloc[-1],
-                        fillcolor=color, layer='below', line_width=0,
-                        row=1, col=1
-                    )
+    has_spy_fallback = any(col in df.columns and df[col].notna().any() for col in spy_gauge_fallback_cols)
 
-        # Build hover text showing all ticker gauge timeframes
+    # Pick which gauge data to use for main chart shading
+    if has_ticker_gauge:
+        shading_col = 'ticker_5m'
+        hover_gauge_cols = ticker_gauge_cols
+    elif has_spy_fallback:
+        shading_col = 'spy_5m'
+        hover_gauge_cols = spy_gauge_fallback_cols
+    else:
+        shading_col = None
+        hover_gauge_cols = {}
+
+    if shading_col and shading_col in df.columns and df[shading_col].notna().any():
+        # Show the 5m gauge as background shading for quick visual reference
+        sentiment = df[['time', shading_col]].dropna(subset=[shading_col]).copy()
+        if not sentiment.empty:
+            sentiment['group'] = (sentiment[shading_col] != sentiment[shading_col].shift()).cumsum()
+            for _, grp in sentiment.groupby('group'):
+                color = 'rgba(0, 200, 83, 0.10)' if grp[shading_col].iloc[0] == 'Bullish' else 'rgba(255, 23, 68, 0.10)'
+                fig.add_vrect(
+                    x0=grp['time'].iloc[0], x1=grp['time'].iloc[-1],
+                    fillcolor=color, layer='below', line_width=0,
+                    row=1, col=1
+                )
+
+    if hover_gauge_cols:
+        # Build hover text showing all gauge timeframes
         def build_ticker_hover(row):
             parts = []
-            for col, label in ticker_gauge_cols.items():
+            for col, label in hover_gauge_cols.items():
                 val = row.get(col)
                 if pd.notna(val) and val:
                     icon = '+' if val == 'Bullish' else '-'
