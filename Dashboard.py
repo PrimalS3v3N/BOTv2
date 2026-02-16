@@ -28,10 +28,16 @@ COLORS = {
     'exit': '#FF1744',
     'vwap': '#0D47A1',
     'supertrend': '#9C27B0',
-    'ema_30': '#AB47BC',          # Purple
+    # EMA gradient: bright (short period) -> dark (long period)
+    'ema_10': '#EA80FC',           # Brightest purple (10-period)
+    'ema_21': '#CE93D8',           # Light purple (21-period)
+    'ema_50': '#AB47BC',           # Medium purple (50-period)
+    'ema_100': '#8E24AA',          # Dark purple (100-period)
+    'ema_200': '#6A1B9A',          # Darkest purple (200-period)
     'vwap_ema_avg': '#FFEB3B',    # Yellow
     'emavwap': '#00E5FF',         # Cyan
-    'stop_loss_line': '#00C853',  # Green
+    # ATR Trailing Stoploss
+    'atr_sl': '#FF7043',          # Deep Orange
     # Trading range
     'trading_range': '#FF1744',   # Red
     # Ichimoku Cloud
@@ -42,25 +48,17 @@ COLORS = {
     'ichimoku_senkou_a': '#26A69A',  # Teal (Leading Span A)
     'ichimoku_senkou_b': '#EF5350',  # Red (Leading Span B)
     # Exit signal markers
-    'sig_tp': '#FFD700',           # Gold (Take Profit)
     'sig_sb': '#FF9800',           # Orange (StatsBook)
     'sig_mp': '#E040FB',           # Purple (Momentum Peak)
     'sig_ai': '#00BCD4',           # Cyan (AI Exit)
-    'sig_reversal': '#F44336',     # Red (Reversal)
-    'sig_downtrend': '#D32F2F',    # Dark Red (DownTrend)
-    'sig_sl': '#FF5722',           # Deep Orange (Stop Loss)
     'sig_closure_peak': '#7C4DFF', # Deep Purple (Closure Peak)
 }
 
 # Exit signal definitions: column name -> (display label, color key, marker symbol)
 EXIT_SIGNAL_DEFS = {
-    'exit_sig_tp':           ('TP',           'sig_tp',           'diamond'),
     'exit_sig_sb':           ('StatsBook',    'sig_sb',           'diamond'),
     'exit_sig_mp':           ('Mom. Peak',    'sig_mp',           'diamond'),
     'exit_sig_ai':           ('AI Exit',      'sig_ai',           'diamond'),
-    'exit_sig_reversal':     ('Reversal',     'sig_reversal',     'diamond'),
-    'exit_sig_downtrend':    ('DownTrend',    'sig_downtrend',    'diamond'),
-    'exit_sig_sl':           ('Stop Loss',    'sig_sl',           'diamond'),
     'exit_sig_closure_peak': ('Closure Peak', 'sig_closure_peak', 'diamond'),
 }
 
@@ -148,7 +146,7 @@ def find_entry_exit(df):
     return entry_row, exit_row, opt_col
 
 
-def create_trade_chart(df, trade_label, market_hours_only=False, show_ewo=True, show_rsi=True, show_supertrend=False, show_ichimoku=False, show_market_bias=True):
+def create_trade_chart(df, trade_label, market_hours_only=False, show_ewo=True, show_rsi=True, show_supertrend=False, show_ichimoku=False, show_atr_sl=True, show_market_bias=True):
     """Create dual-axis chart with stock/option prices, error bars, EWO/RSI subplot, and SPY subplot."""
     df = df.copy()
     df['time'] = df['timestamp'].apply(parse_time)
@@ -277,18 +275,26 @@ def create_trade_chart(df, trade_label, market_hours_only=False, show_ewo=True, 
             row=1, col=1, secondary_y=False
         )
 
-    # EMA (left y-axis) - orange
-    if 'ema_30' in df.columns and df['ema_30'].notna().any():
-        fig.add_trace(
-            go.Scatter(
-                x=df['time'],
-                y=df['ema_30'],
-                name='EMA',
-                line=dict(color='#FF9800', width=1.5, dash='dot'),
-                hovertemplate='EMA: $%{y:.2f}<extra></extra>'
-            ),
-            row=1, col=1, secondary_y=False
-        )
+    # EMAs (left y-axis) - purple gradient: bright (short) to dark (long)
+    ema_defs = [
+        ('ema_10',  'EMA 10',  COLORS['ema_10'],  1.0),
+        ('ema_21',  'EMA 21',  COLORS['ema_21'],  1.0),
+        ('ema_50',  'EMA 50',  COLORS['ema_50'],  1.5),
+        ('ema_100', 'EMA 100', COLORS['ema_100'], 1.5),
+        ('ema_200', 'EMA 200', COLORS['ema_200'], 2.0),
+    ]
+    for ema_col, ema_name, ema_color, ema_width in ema_defs:
+        if ema_col in df.columns and df[ema_col].notna().any():
+            fig.add_trace(
+                go.Scatter(
+                    x=df['time'],
+                    y=df[ema_col],
+                    name=ema_name,
+                    line=dict(color=ema_color, width=ema_width, dash='dot'),
+                    hovertemplate=f'{ema_name}: $%{{y:.2f}}<extra></extra>'
+                ),
+                row=1, col=1, secondary_y=False
+            )
 
     # MA (left y-axis) - yellow
     if 'vwap_ema_avg' in df.columns and df['vwap_ema_avg'].notna().any():
@@ -365,27 +371,17 @@ def create_trade_chart(df, trade_label, market_hours_only=False, show_ewo=True, 
                 row=1, col=1, secondary_y=False
             )
 
-    # Stop Loss line (right y-axis, tracks stop loss price)
-    if 'stop_loss' in df.columns and df['stop_loss'].notna().any():
-        # Create hover text with stop_loss_mode if available
-        if 'stop_loss_mode' in df.columns:
-            hover_text = df.apply(
-                lambda r: f"Stop Loss: ${r['stop_loss']:.2f}<br>Mode: {r['stop_loss_mode']}"
-                if pd.notna(r['stop_loss']) else "", axis=1
-            )
-        else:
-            hover_text = df['stop_loss'].apply(lambda x: f"Stop Loss: ${x:.2f}" if pd.notna(x) else "")
-
+    # ATR Trailing Stoploss (left y-axis)
+    if show_atr_sl and 'atr_sl' in df.columns and df['atr_sl'].notna().any():
         fig.add_trace(
             go.Scatter(
                 x=df['time'],
-                y=df['stop_loss'],
-                name='Stop Loss',
-                line=dict(color=COLORS['stop_loss_line'], width=1.5, dash='dash'),
-                hovertemplate='%{text}<extra></extra>',
-                text=hover_text
+                y=df['atr_sl'],
+                name='ATR-SL',
+                line=dict(color=COLORS['atr_sl'], width=2, dash='dash'),
+                hovertemplate='ATR-SL: $%{y:.2f}<extra></extra>'
             ),
-            row=1, col=1, secondary_y=True
+            row=1, col=1, secondary_y=False
         )
 
     # Ichimoku Cloud (left y-axis) - cloud fill between Senkou spans + Tenkan/Kijun lines
@@ -1050,6 +1046,7 @@ def main():
         show_rsi = st.toggle("Show RSI Graph", value=True)
         show_supertrend = st.toggle("Show Supertrend", value=False, help="Overlay Supertrend indicator on main chart")
         show_ichimoku = st.toggle("Show Ichimoku Cloud", value=False, help="Overlay Ichimoku Cloud (Tenkan, Kijun, Senkou spans) on main chart")
+        show_atr_sl = st.toggle("Show ATR-SL", value=True, help="Overlay ATR Trailing Stoploss indicator on main chart")
         show_market_bias = st.toggle("Show Market Bias", value=True, help="Market bias on indicator subplot: +1 Bull, 0 Side, -1 Bear")
 
         st.markdown("---")
@@ -1086,7 +1083,7 @@ def main():
     df = matrices[pos_id]
 
     # Chart first (no summary above)
-    fig = create_trade_chart(df, trade_label, market_hours_only, show_ewo, show_rsi, show_supertrend, show_ichimoku, show_market_bias)
+    fig = create_trade_chart(df, trade_label, market_hours_only, show_ewo, show_rsi, show_supertrend, show_ichimoku, show_atr_sl, show_market_bias)
     if fig:
         st.plotly_chart(fig, use_container_width=True)
     else:
@@ -1223,15 +1220,13 @@ def main():
 
         # Format price columns as $X.XX
         for col in ['stock_price', 'stock_high', 'stock_low', 'true_price', 'option_price',
-                     'entry_price', 'highest_price', 'lowest_price', 'stop_loss', 'trailing_stop_price',
-                     'vwap', 'ema_30', 'vwap_ema_avg', 'emavwap', 'supertrend',
-                     'ichimoku_tenkan', 'ichimoku_kijun', 'ichimoku_senkou_a', 'ichimoku_senkou_b']:
+                     'entry_price', 'highest_price', 'lowest_price',
+                     'vwap', 'ema_10', 'ema_21', 'ema_50', 'ema_100', 'ema_200',
+                     'vwap_ema_avg', 'emavwap', 'supertrend',
+                     'ichimoku_tenkan', 'ichimoku_kijun', 'ichimoku_senkou_a', 'ichimoku_senkou_b',
+                     'atr_sl']:
             if col in matrix_df.columns:
                 matrix_df[col] = matrix_df[col].apply(lambda x: f"${x:.2f}" if pd.notna(x) else "")
-
-        # Format ATR
-        if 'atr' in matrix_df.columns:
-            matrix_df['atr'] = matrix_df['atr'].apply(lambda x: f"{x:.4f}" if pd.notna(x) else "")
 
         # Format volume as integer
         if 'volume' in matrix_df.columns:
@@ -1247,10 +1242,6 @@ def main():
         # Format minutes held as integer
         if 'minutes_held' in matrix_df.columns:
             matrix_df['minutes_held'] = matrix_df['minutes_held'].apply(lambda x: f"{int(x)}" if pd.notna(x) else "")
-
-        # Format milestone percentage
-        if 'milestone_pct' in matrix_df.columns:
-            matrix_df['milestone_pct'] = matrix_df['milestone_pct'].apply(lambda x: f"{x:.0f}%" if pd.notna(x) else "")
 
         if 'market_bias' in matrix_df.columns:
             bias_map = {1: 'Bullish', 0: 'Sideways', -1: 'Bearish'}
