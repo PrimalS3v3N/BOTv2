@@ -556,7 +556,7 @@ def create_trade_chart(df, trade_label, market_hours_only=False, show_ewo=True, 
                 val = row.get(col)
                 if pd.notna(val) and val:
                     icon = '+' if val == 'Bullish' else '-'
-                    parts.append(f"{label}({icon})")
+                    parts.append(f"{label}[{icon}]")
             return ' '.join(parts) if parts else ''
 
         hover_texts = df.apply(build_ticker_hover, axis=1)
@@ -566,7 +566,8 @@ def create_trade_chart(df, trade_label, market_hours_only=False, show_ewo=True, 
                     x=df['time'],
                     y=df['true_price'] if 'true_price' in df.columns else df.get('stock_price'),
                     name='Ticker Gauge',
-                    mode='none',
+                    mode='markers',
+                    marker=dict(size=0, opacity=0),
                     hovertemplate='%{text}<extra></extra>',
                     text=hover_texts,
                     showlegend=False,
@@ -779,7 +780,7 @@ def create_trade_chart(df, trade_label, market_hours_only=False, show_ewo=True, 
                 val = row.get(col)
                 if pd.notna(val) and val:
                     icon = '+' if val == 'Bullish' else '-'
-                    gauge_parts.append(f"{label}({icon})")
+                    gauge_parts.append(f"{label}[{icon}]")
             return '<br>'.join([price_part, ' '.join(gauge_parts)])
 
         hover_texts = df.apply(build_spy_hover, axis=1)
@@ -788,7 +789,8 @@ def create_trade_chart(df, trade_label, market_hours_only=False, show_ewo=True, 
                 x=df['time'],
                 y=df['spy_price'],
                 name='SPY Gauge',
-                mode='none',
+                mode='markers',
+                marker=dict(size=0, opacity=0),
                 hovertemplate='%{text}<extra></extra>',
                 text=hover_texts,
                 showlegend=False,
