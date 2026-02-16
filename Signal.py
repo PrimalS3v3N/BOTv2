@@ -51,7 +51,7 @@ def validate_ticker(ticker):
         ticker_match = re.match(r'[A-Za-z]+(?:\.[A-Za-z]+)?', ticker)
         if not ticker_match:
             return None
-        ticker_sym = ticker_match.group(0).upper()
+        ticker_sym = ticker_match.group(0).upper().replace('.', '')
         # Index symbols (SPX, NDX, etc.) are valid option underlyings but
         # not tradeable stocks — Robinhood's /quotes/ endpoint returns 404.
         if ticker_sym in Config.INDEX_SYMBOLS:

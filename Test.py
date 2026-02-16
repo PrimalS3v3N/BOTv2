@@ -1302,7 +1302,8 @@ class Backtest:
         atr_sl_hhv = indicator_config.get('atr_sl_hhv', 10)
         atr_sl_multiplier = indicator_config.get('atr_sl_multiplier', 2.5)
 
-        # Get MACD and ROC settings
+        # Get MACD and ROC settings from options_exit config
+        oe_config = self.config.get('options_exit', {})
         macd_fast = oe_config.get('macd_fast', 12)
         macd_slow = oe_config.get('macd_slow', 26)
         macd_signal_period = oe_config.get('macd_signal', 9)
@@ -1343,9 +1344,6 @@ class Backtest:
         oe_strategy = Strategy.OptionsExit(self.config.get('options_exit', {}))
         oe_detector = oe_strategy.create_detector(position.entry_price, position.option_type)
         oe_favorability_assessed = False
-
-        # Get MACD and ROC settings from options_exit config for add_indicators
-        oe_config = self.config.get('options_exit', {})
 
         # Get Closure - Peak settings from config
         CP_config = self.config.get('closure_peak', {})
