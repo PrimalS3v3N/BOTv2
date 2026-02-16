@@ -1144,24 +1144,20 @@ def main():
     if ticker and ticker in statsbooks:
         sb_df = statsbooks[ticker]
         if isinstance(sb_df, pd.DataFrame) and not sb_df.empty:
-            # Build display DataFrame with 1-minute normalized columns
-            # Divisors: 5m/5, 1h/60
+            # Build display DataFrame with 1-minute normalized column
             display_df = sb_df.copy()
 
-            # Compute 1-minute reference columns from raw numeric data
-            norm_map = {'1m:5m': ('5m', 5), '1m:1h': ('1h', 60)}
-            for norm_col, (src_col, divisor) in norm_map.items():
-                if src_col in display_df.columns:
-                    display_df[norm_col] = display_df[src_col] / divisor
+            # Compute 1-minute reference column from 5m data (divided by 5)
+            if '5m' in display_df.columns:
+                display_df['1m'] = display_df['5m'] / 5
 
-            # Arrange columns: 5m | 1m:5m | 1h | 1m:1h | 1d
+            # Arrange columns: 1m | 5m | 1h | 1d
             ordered_cols = []
+            if '1m' in display_df.columns:
+                ordered_cols.append('1m')
             for tf in ['5m', '1h', '1d']:
                 if tf in display_df.columns:
                     ordered_cols.append(tf)
-                norm = f"1m:{tf}"
-                if norm in display_df.columns:
-                    ordered_cols.append(norm)
             display_df = display_df[ordered_cols]
 
             # Transpose: timeframes become rows, metrics become columns

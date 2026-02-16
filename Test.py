@@ -1100,7 +1100,7 @@ class Backtest:
 
         Conditions (any TRUE = HIGH risk):
         1. (RSI + RSI_avg) / 2 > 80
-        2. EWO_avg > Median.Max(EWO) from StatsBook (1m:5m = 5m value / 5)
+        2. EWO_avg > Median.Max(EWO) from StatsBook (1m = 5m value / 5)
         3. Purchase during first 15 minutes of market open (9:30-9:45 EST)
 
         Returns: (risk_level, reasons_list)

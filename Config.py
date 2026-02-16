@@ -235,7 +235,7 @@ BACKTEST_CONFIG = {
         'enabled': True,
         # Condition 1: RSI overbought — (RSI + RSI_avg) / 2 > threshold
         'rsi_overbought_threshold': 80,
-        # Condition 2: EWO overbought — EWO_avg > Median.Max(EWO) from StatsBook (1m:5m)
+        # Condition 2: EWO overbought — EWO_avg > Median.Max(EWO) from StatsBook (1m)
         'ewo_overbought_enabled': True,
         # Condition 3: First 15 minutes of market open (9:30 - 9:45 EST)
         'market_open_window_minutes': 15,
