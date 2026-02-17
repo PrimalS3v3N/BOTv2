@@ -208,20 +208,9 @@ LIVE_CONFIG = {
 # =============================================================================
 
 ANALYSIS_CONFIG = {
-    'sma_period': 20,                              # SMA period
-    'ema_fast_period': 12,                         # EMA fast period
-    'ema_slow_period': 26,                         # EMA slow period
-    'rsi_period': 14,                              # RSI lookback period
-    'rsi_overbought': 70,                          # RSI overbought (stock default; use 80 for options)
-    'rsi_oversold': 30,                            # RSI oversold (stock default; use 20 for options)
-    'ewo_fast': 5,                                 # EWO fast EMA period
-    'ewo_slow': 35,                                # EWO slow EMA period
-    'support_resistance_lookback': 20,             # S/R lookback bars
-    'trend_fast_period': 10,                       # Trend fast EMA
-    'trend_slow_period': 20,                       # Trend slow EMA
-    'momentum_period': 10,                         # Momentum period
-    'roc_period': 10,                              # Rate of change period
-    'min_bars_required': 20,                       # Min data bars required
+    # Only settings actively consumed by Analysis.py live here.
+    # Indicator periods (RSI, EMA, EWO, etc.) are sourced from
+    # BACKTEST_CONFIG['indicators'] — see below.
     'options': {
         'risk_free_rate': 0.05,                    # Annual risk-free rate (5%)
         'default_volatility': 0.30,                # Default implied volatility (30%)
@@ -242,6 +231,11 @@ BACKTEST_CONFIG = {
     'commission_per_contract': 0.65,               # Per-contract commission
 
     # Technical indicators for backtest
+    # NOTE — RSI thresholds used across the system:
+    #   indicators.rsi_overbought/oversold  = 70/30  (stock-level, shared by options_exit)
+    #   momentum_peak.rsi_overbought        = 80     (options peak detection)
+    #   risk_assessment.rsi_overbought_threshold = 80 (options entry risk flag)
+    #   closure_peak.rsi_call/put_threshold = 85/15  (end-of-day exit)
     'indicators': {
         'ema_periods': [10, 21, 50, 100, 200],     # EMA periods (bars)
         'vwap_enabled': True,                      # Calculate VWAP
@@ -552,6 +546,9 @@ DATAFRAME_COLUMNS = {
     ],
 }
 
+# Resolve alias: dashboard_databook uses the same columns as databook
+DATAFRAME_COLUMNS['dashboard_databook'] = DATAFRAME_COLUMNS['databook']
+
 
 # =============================================================================
 # UTILITY FUNCTIONS
@@ -592,10 +589,6 @@ def load_config_json(config_path='config.json'):
 # Load JSON overrides at import time
 CONFIG_JSON = load_config_json('config.json')
 
-# Apply contract limits from config.json if present
-# if 'contract_limits' in CONFIG_JSON:
-#     CONTRACT_LIMITS_CONFIG.update(CONFIG_JSON['contract_limits'])
-
 
 def validate_config():
     """Validate active configuration settings. Returns (errors, warnings)."""
@@ -606,9 +599,6 @@ def validate_config():
         warnings.append("DISCORD_TOKEN not set (required for live trading)")
     if not DISCORD_CONFIG.get('channel_id'):
         warnings.append("DISCORD_CHANNEL_ID not set (required for live trading)")
-
-    if ANALYSIS_CONFIG['min_bars_required'] < 1:
-        errors.append("min_bars_required must be at least 1")
 
     return errors, warnings
 

@@ -10,6 +10,7 @@ Usage:
 
 import streamlit as st
 import pandas as pd
+import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import os
@@ -62,19 +63,21 @@ EXIT_SIGNAL_DEFS = {
     'exit_sig_closure_peak': ('Closure Peak', 'sig_closure_peak', 'diamond'),
 }
 
-def load_data():
-    """Load backtest data from pickle file, caching in session state."""
-    if 'matrices' in st.session_state and st.session_state.matrices:
-        return st.session_state.matrices
+@st.cache_data
+def _load_pickle(path, _mtime):
+    """Load and cache pickle data. _mtime param busts cache on file change."""
+    with open(path, 'rb') as f:
+        data = pickle.load(f)
+    return data.get('matrices', {}), data.get('statsbooks', {})
 
+
+def load_data():
+    """Load backtest data from pickle file with Streamlit caching."""
     if not os.path.exists(DATA_PATH):
         return {}
     try:
-        with open(DATA_PATH, 'rb') as f:
-            data = pickle.load(f)
-        matrices = data.get('matrices', {})
-        statsbooks = data.get('statsbooks', {})
-        st.session_state.matrices = matrices
+        mtime = os.path.getmtime(DATA_PATH)
+        matrices, statsbooks = _load_pickle(DATA_PATH, mtime)
         st.session_state.statsbooks = statsbooks
         return matrices
     except Exception as e:
@@ -146,6 +149,7 @@ def find_entry_exit(df):
     return entry_row, exit_row, opt_col
 
 
+@st.cache_data
 def create_trade_chart(df, trade_label, market_hours_only=False, show_ewo=True, show_rsi=True, show_supertrend=False, show_ichimoku=False, show_atr_sl=True, show_market_bias=True):
     """Create dual-axis chart with stock/option prices, error bars, EWO/RSI subplot, and SPY subplot."""
     df = df.copy()
@@ -393,15 +397,6 @@ def create_trade_chart(df, trade_label, market_hours_only=False, show_ewo=True, 
 
         # Cloud fill: Senkou Span A and B with shaded region between
         if has_senkou_a and has_senkou_b:
-            # Determine cloud color per bar: green when A >= B (bullish), red when A < B (bearish)
-            cloud_colors = [
-                COLORS['ichimoku_cloud_bull'] if a >= b else COLORS['ichimoku_cloud_bear']
-                for a, b in zip(
-                    df['ichimoku_senkou_a'].fillna(0),
-                    df['ichimoku_senkou_b'].fillna(0)
-                )
-            ]
-
             # Senkou Span A (upper/lower boundary of cloud)
             fig.add_trace(
                 go.Scatter(
@@ -559,16 +554,24 @@ def create_trade_chart(df, trade_label, market_hours_only=False, show_ewo=True, 
 
     if shading_col and shading_col in df.columns and df[shading_col].notna().any():
         # Show the 5m gauge as background shading for quick visual reference
+        # Build vrect shapes in bulk instead of per-group add_vrect calls
         sentiment = df[['time', shading_col]].dropna(subset=[shading_col]).copy()
         if not sentiment.empty:
             sentiment['group'] = (sentiment[shading_col] != sentiment[shading_col].shift()).cumsum()
-            for _, grp in sentiment.groupby('group'):
-                color = 'rgba(0, 200, 83, 0.10)' if grp[shading_col].iloc[0] == 'Bullish' else 'rgba(255, 23, 68, 0.10)'
-                fig.add_vrect(
-                    x0=grp['time'].iloc[0], x1=grp['time'].iloc[-1],
-                    fillcolor=color, layer='below', line_width=0,
-                    row=1, col=1
-                )
+            grp_bounds = sentiment.groupby('group').agg(
+                x0=('time', 'first'),
+                x1=('time', 'last'),
+                val=(shading_col, 'first')
+            )
+            shapes = []
+            for _, row in grp_bounds.iterrows():
+                shapes.append(dict(
+                    type='rect', xref='x', yref='paper',
+                    x0=row['x0'], x1=row['x1'], y0=0, y1=1,
+                    fillcolor='rgba(0, 200, 83, 0.10)' if row['val'] == 'Bullish' else 'rgba(255, 23, 68, 0.10)',
+                    layer='below', line_width=0,
+                ))
+            fig.update_layout(shapes=list(fig.layout.shapes or []) + shapes)
 
     if hover_gauge_cols:
         # Build hover text using vectorized string ops instead of row-by-row .apply()
@@ -599,9 +602,12 @@ def create_trade_chart(df, trade_label, market_hours_only=False, show_ewo=True, 
 
     # EWO subplot (row 2) — displayed as histogram bars
     if has_ewo:
-        # Color each bar green (positive) or red (negative)
-        ewo_colors = ['rgba(0, 200, 83, 0.7)' if v >= 0 else 'rgba(255, 23, 68, 0.7)'
-                       for v in df['ewo']]
+        # Vectorized color assignment using numpy
+        ewo_colors = np.where(
+            df['ewo'].values >= 0,
+            'rgba(0, 200, 83, 0.7)',
+            'rgba(255, 23, 68, 0.7)'
+        )
 
         fig.add_trace(
             go.Bar(
@@ -782,20 +788,34 @@ def create_trade_chart(df, trade_label, market_hours_only=False, show_ewo=True, 
         }
 
         # Show the 5m gauge as background shading for quick visual reference
+        # Build vrect shapes in bulk for SPY subplot
         if 'spy_5m' in df.columns and df['spy_5m'].notna().any():
             sentiment = df[['time', 'spy_5m']].dropna(subset=['spy_5m']).copy()
             if not sentiment.empty:
                 sentiment['group'] = (sentiment['spy_5m'] != sentiment['spy_5m'].shift()).cumsum()
-                for _, grp in sentiment.groupby('group'):
-                    color = 'rgba(0, 200, 83, 0.10)' if grp['spy_5m'].iloc[0] == 'Bullish' else 'rgba(255, 23, 68, 0.10)'
-                    fig.add_vrect(
-                        x0=grp['time'].iloc[0], x1=grp['time'].iloc[-1],
-                        fillcolor=color, layer='below', line_width=0,
-                        row=spy_row, col=1
-                    )
+                grp_bounds = sentiment.groupby('group').agg(
+                    x0=('time', 'first'),
+                    x1=('time', 'last'),
+                    val=('spy_5m', 'first')
+                )
+                # SPY subplot uses xref/yref for the correct subplot axis
+                x_axis = f'x{spy_row}' if spy_row > 1 else 'x'
+                y_axis = f'y{(spy_row - 1) * 2 + 1}' if spy_row > 1 else 'y'
+                shapes = []
+                for _, row in grp_bounds.iterrows():
+                    shapes.append(dict(
+                        type='rect', xref=x_axis, yref='paper',
+                        x0=row['x0'], x1=row['x1'], y0=0, y1=1,
+                        fillcolor='rgba(0, 200, 83, 0.10)' if row['val'] == 'Bullish' else 'rgba(255, 23, 68, 0.10)',
+                        layer='below', line_width=0,
+                    ))
+                fig.update_layout(shapes=list(fig.layout.shapes or []) + shapes)
 
-        # Build hover text using vectorized string ops instead of row-by-row .apply()
-        spy_price_text = df['spy_price'].map(lambda x: f"SPY: ${x:.2f}" if pd.notna(x) else "SPY: N/A")
+        # Build hover text using vectorized string ops
+        spy_mask = df['spy_price'].notna()
+        spy_price_text = pd.Series("SPY: N/A", index=df.index)
+        if spy_mask.any():
+            spy_price_text[spy_mask] = 'SPY: $' + df.loc[spy_mask, 'spy_price'].round(2).astype(str)
         gauge_parts = []
         for col, label in spy_gauge_cols.items():
             if col in df.columns:
@@ -909,63 +929,57 @@ def get_trade_summary(df):
     pnl_pct = ((exit_price - entry_price) / entry_price * 100) if entry_price > 0 else 0
     duration = df['minutes_held'].max() if 'minutes_held' in df.columns else 0
 
-    # Calculate max/min contract prices AFTER entry (only during holding period)
+    # Compute holding_df once and reuse for all holding-period metrics
+    BIAS_LABELS = {1: 'Bullish', 0: 'Sideways', -1: 'Bearish'}
     max_price = 0
     min_price = 0
     max_profit_pct = 0
     min_profit_pct = 0
-    profit_min = 0  # P&L at the worst stop loss point (min price during holding)
-    if 'holding' in df.columns and opt_col in df.columns:
-        holding_df = df[df['holding'] == True]
-        if not holding_df.empty and holding_df[opt_col].notna().any():
+    profit_min = 0
+    market_bias = 'N/A'
+    risk = 'N/A'
+    risk_reasons = ''
+    risk_trend = ''
+    exit_signal_counts = {}
+
+    holding_df = df[df['holding'] == True] if 'holding' in df.columns else pd.DataFrame()
+
+    if not holding_df.empty:
+        # Max/min contract prices during holding
+        if opt_col in holding_df.columns and holding_df[opt_col].notna().any():
             max_price = holding_df[opt_col].max()
             min_price = holding_df[opt_col].min()
-            # Max Profit % = (max_price / entry_price - 1) * 100
             if entry_price > 0:
                 max_profit_pct = (max_price / entry_price - 1) * 100
                 min_profit_pct = (min_price / entry_price - 1) * 100
-                # Calculate Profit[min] - P&L in dollars at the worst stop loss point
                 contracts = int(df['contracts'].iloc[0]) if 'contracts' in df.columns else 1
                 profit_min = (min_price - entry_price) * contracts * 100
 
-    # Market bias at exit (last holding bar's VWAP assessment)
-    # Values: +1 = Bullish, 0 = Sideways, -1 = Bearish
-    BIAS_LABELS = {1: 'Bullish', 0: 'Sideways', -1: 'Bearish'}
-    market_bias = 'N/A'
-    if 'market_bias' in df.columns and 'holding' in df.columns:
-        holding_df = df[df['holding'] == True]
-        if not holding_df.empty:
+        # Market bias at exit
+        if 'market_bias' in holding_df.columns:
             last_bias = holding_df['market_bias'].iloc[-1]
             if pd.notna(last_bias):
                 market_bias = BIAS_LABELS.get(int(last_bias), 'N/A')
 
-    # Risk level at entry
-    risk = 'N/A'
-    risk_reasons = ''
-    risk_trend = ''
-    if 'risk' in df.columns and 'holding' in df.columns:
-        holding_df = df[df['holding'] == True]
-        if not holding_df.empty:
+        # Risk level at entry
+        if 'risk' in holding_df.columns:
             first_risk = holding_df['risk'].iloc[0]
             if pd.notna(first_risk):
                 risk = str(first_risk)
-            first_reasons = holding_df['risk_reasons'].iloc[0] if 'risk_reasons' in holding_df.columns else None
-            if pd.notna(first_reasons) and first_reasons:
-                risk_reasons = str(first_reasons)
-            # Get last risk trend
+            if 'risk_reasons' in holding_df.columns:
+                first_reasons = holding_df['risk_reasons'].iloc[0]
+                if pd.notna(first_reasons) and first_reasons:
+                    risk_reasons = str(first_reasons)
             if 'risk_trend' in holding_df.columns:
                 last_trend = holding_df['risk_trend'].iloc[-1]
                 if pd.notna(last_trend):
                     risk_trend = str(last_trend)
 
-    # Count exit signal activations during holding period
-    exit_signal_counts = {}
-    if 'holding' in df.columns:
-        holding_df = df[df['holding'] == True]
+        # Count exit signal activations during holding period
         for sig_col, (sig_label, _, _) in EXIT_SIGNAL_DEFS.items():
             if sig_col in holding_df.columns:
-                count = (holding_df[sig_col] == True).sum()
-                exit_signal_counts[sig_label] = int(count)
+                count = int((holding_df[sig_col] == True).sum())
+                exit_signal_counts[sig_label] = count
 
     return {
         'entry': entry_price,
@@ -986,6 +1000,7 @@ def get_trade_summary(df):
     }
 
 
+@st.cache_data
 def get_trade_table(df):
     """Create a concise data table for the trade."""
     if df.empty:
@@ -1126,8 +1141,11 @@ def main():
         )
 
         if st.button("Reload Data"):
-            st.session_state.pop('matrices', None)
             st.session_state.pop('statsbooks', None)
+            _load_pickle.clear()
+            create_trade_chart.clear()
+            get_trade_summary.clear()
+            get_trade_table.clear()
             st.rerun()
 
         st.markdown("---")
@@ -1243,20 +1261,23 @@ def main():
                 display_df.columns.name = None
                 display_df = display_df.reset_index()
 
-                # Format numeric values: volume columns as integers, ratio column to 2 decimals, rest to 3 decimals
+                # Format numeric values using vectorized ops instead of per-cell apply
                 vol_metrics = {'Max(Vol)', 'Median.Max(Vol)', 'Median(Vol)', 'Min(Vol)', 'Median.Min(Vol)'}
                 ratio_metrics = {'Max(Vol)x'}
                 for col in display_df.columns:
                     if col == 'Timeframe':
                         continue
-                    display_df[col] = display_df[col].apply(
-                        lambda x, c=col: (
-                            f"{int(x):,}" if c in vol_metrics and pd.notna(x)
-                            else f"{x:.2f}" if c in ratio_metrics and pd.notna(x)
-                            else f"{x:.3f}" if pd.notna(x)
-                            else ""
-                        )
-                    )
+                    mask = display_df[col].notna()
+                    if not mask.any():
+                        display_df[col] = ''
+                        continue
+                    if col in vol_metrics:
+                        display_df.loc[mask, col] = display_df.loc[mask, col].astype(int).map('{:,}'.format)
+                    elif col in ratio_metrics:
+                        display_df.loc[mask, col] = display_df.loc[mask, col].round(2).astype(str)
+                    else:
+                        display_df.loc[mask, col] = display_df.loc[mask, col].round(3).astype(str)
+                    display_df[col] = display_df[col].where(mask, '')
 
                 st.dataframe(display_df, use_container_width=True, hide_index=True)
             else:
@@ -1284,19 +1305,16 @@ def main():
         # OFF (market_hours_only=False): Show only holding period (where holding=True)
         if market_hours_only and 'timestamp' in matrix_df.columns:
             import datetime as dt
-            matrix_df['_time'] = pd.to_datetime(matrix_df['timestamp'].astype(str).str.replace(' : ', ' '), errors='coerce')
-            matrix_df = matrix_df[
-                (matrix_df['_time'].dt.time >= dt.time(9, 0)) &
-                (matrix_df['_time'].dt.time <= dt.time(16, 0))
-            ]
-            matrix_df = matrix_df.drop(columns=['_time'])
+            parsed_times = pd.to_datetime(matrix_df['timestamp'].astype(str).str.replace(' : ', ' '), errors='coerce')
+            time_mask = (parsed_times.dt.time >= dt.time(9, 0)) & (parsed_times.dt.time <= dt.time(16, 0))
+            matrix_df = matrix_df[time_mask]
         elif not market_hours_only and 'holding' in df.columns:
             # Filter to holding period only
             matrix_df = matrix_df[df['holding'] == True]
 
-        # Vectorized formatting — avoids 16+ sequential .apply() calls
+        # Vectorized formatting — uses numpy/pandas ops instead of per-cell lambdas
 
-        # Format price columns as $X.XX using vectorized string formatting
+        # Format price columns as $X.XX using vectorized string concatenation
         price_cols = [c for c in ['stock_price', 'stock_high', 'stock_low', 'true_price', 'option_price',
                      'entry_price', 'highest_price', 'lowest_price',
                      'vwap', 'ema_10', 'ema_21', 'ema_50', 'ema_100', 'ema_200',
@@ -1305,52 +1323,57 @@ def main():
                      'atr_sl', 'spy_price'] if c in matrix_df.columns]
         for col in price_cols:
             mask = matrix_df[col].notna()
-            matrix_df[col] = ''
             if mask.any():
-                matrix_df.loc[mask, col] = matrix_df.loc[mask, col].map(lambda x: f"${x:.2f}")
+                matrix_df.loc[mask, col] = '$' + matrix_df.loc[mask, col].round(2).astype(str)
+            matrix_df[col] = matrix_df[col].where(mask, '')
 
         # Format volume as integer with commas
         if 'volume' in matrix_df.columns:
             mask = matrix_df['volume'].notna()
-            matrix_df['volume'] = ''
             if mask.any():
                 matrix_df.loc[mask, 'volume'] = matrix_df.loc[mask, 'volume'].astype(int).map('{:,}'.format)
+            matrix_df['volume'] = matrix_df['volume'].where(mask, '')
 
         # Format P&L dollar amount
         if 'pnl' in matrix_df.columns:
             mask = matrix_df['pnl'].notna()
-            matrix_df['pnl'] = ''
             if mask.any():
-                matrix_df.loc[mask, 'pnl'] = matrix_df.loc[mask, 'pnl'].map(lambda x: f"${x:+,.2f}")
+                vals = matrix_df.loc[mask, 'pnl']
+                sign = np.where(vals >= 0, '+', '')
+                matrix_df.loc[mask, 'pnl'] = '$' + pd.Series(sign, index=vals.index) + vals.round(2).astype(str)
+            matrix_df['pnl'] = matrix_df['pnl'].where(mask, '')
 
         if 'pnl_pct' in matrix_df.columns:
             mask = matrix_df['pnl_pct'].notna()
-            matrix_df['pnl_pct'] = ''
             if mask.any():
-                matrix_df.loc[mask, 'pnl_pct'] = matrix_df.loc[mask, 'pnl_pct'].map(lambda x: f"{x:+.1f}%")
+                vals = matrix_df.loc[mask, 'pnl_pct']
+                sign = np.where(vals >= 0, '+', '')
+                matrix_df.loc[mask, 'pnl_pct'] = pd.Series(sign, index=vals.index) + vals.round(1).astype(str) + '%'
+            matrix_df['pnl_pct'] = matrix_df['pnl_pct'].where(mask, '')
 
         # Format minutes held as integer
         if 'minutes_held' in matrix_df.columns:
             mask = matrix_df['minutes_held'].notna()
-            matrix_df['minutes_held'] = ''
             if mask.any():
                 matrix_df.loc[mask, 'minutes_held'] = matrix_df.loc[mask, 'minutes_held'].astype(int).astype(str)
+            matrix_df['minutes_held'] = matrix_df['minutes_held'].where(mask, '')
 
         if 'market_bias' in matrix_df.columns:
             matrix_df['market_bias'] = matrix_df['market_bias'].map({1: 'Bullish', 0: 'Sideways', -1: 'Bearish'}).fillna('')
 
-        # Format decimal columns
-        for col, fmt in [('ewo', '{:.3f}'), ('ewo_15min_avg', '{:.3f}'), ('rsi', '{:.1f}'), ('rsi_10min_avg', '{:.1f}')]:
+        # Format decimal columns using vectorized round + astype
+        decimal_fmts = [('ewo', 3), ('ewo_15min_avg', 3), ('rsi', 1), ('rsi_10min_avg', 1)]
+        for col, decimals in decimal_fmts:
             if col in matrix_df.columns:
                 mask = matrix_df[col].notna()
-                matrix_df[col] = ''
                 if mask.any():
-                    matrix_df.loc[mask, col] = matrix_df.loc[mask, col].map(fmt.format)
+                    matrix_df.loc[mask, col] = matrix_df.loc[mask, col].round(decimals).astype(str)
+                matrix_df[col] = matrix_df[col].where(mask, '')
 
         # Format exit signal flags as Y/blank
         for sig_col in EXIT_SIGNAL_DEFS:
             if sig_col in matrix_df.columns:
-                matrix_df[sig_col] = matrix_df[sig_col].map({True: 'Y'}).fillna('')
+                matrix_df[sig_col] = np.where(matrix_df[sig_col] == True, 'Y', '')
 
         st.dataframe(matrix_df, use_container_width=True, hide_index=True)
     else:

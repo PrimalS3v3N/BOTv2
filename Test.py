@@ -98,7 +98,6 @@ def adjust_lookback_for_weekend(lookback_days):
 
 
 # Module-level DataFrame for variable explorer visibility
-discord_messages_df = pd.DataFrame()
 
 
 """
@@ -2036,12 +2035,8 @@ class Backtest:
         print(f"{'='*60}\n")
 
         # Step 1: Fetch Discord messages
-        global discord_messages_df
         messages_df = self.discord_fetcher.fetch_messages_for_days(self.lookback_days)
-
-        # Save to module-level variable for variable explorer visibility
-        discord_messages_df = messages_df.copy() if not messages_df.empty else pd.DataFrame()
-        self.messages_df = discord_messages_df
+        self.messages_df = messages_df
 
         if messages_df.empty:
             print("No messages found")
