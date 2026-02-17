@@ -204,7 +204,7 @@ BACKTEST_CONFIG = {
         'enabled': True,
         'timeframe': '5m',                 # StatsBook timeframe to compare against
         'ewo_max_exit': True,              # Exit when EWO >= Median.Max(EWO)
-        'hl_max_exit': True,               # Exit when rolling H-L >= Median.Max(H-L)
+        'hl_max_exit': False,              # Exit when rolling H-L >= Median.Max(H-L)
         'min_profit_pct': 10,              # Minimum option profit % to consider exit
         'min_hold_bars': 5,                # Minimum bars held before StatsBook exit
         'rolling_window': 5,               # Bars for rolling H-L range calculation
