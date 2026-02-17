@@ -588,6 +588,7 @@ class OptionsExitDetector:
         # Trailing SL parameters
         self.trail_activation_pct = config.get('trail_activation_pct', 10)
         self.trail_base_floor_pct = config.get('trail_base_floor_pct', 5)
+        self.trail_early_floor_minutes = config.get('trail_early_floor_minutes', 5)
         self.trail_scale = config.get('trail_scale', 25.0)
         self.trail_norm = config.get('trail_norm', 30.0)
 
@@ -645,7 +646,11 @@ class OptionsExitDetector:
         if profit_pct < self.trail_activation_pct:
             return 0.0  # Not yet active
 
-        base = self.trail_base_floor_pct
+        # First N minutes: breakeven floor (0%) to give the trade room
+        if self.bar_count <= self.trail_early_floor_minutes:
+            base = 0.0
+        else:
+            base = self.trail_base_floor_pct
         scaled = self.trail_scale * math.log(1 + profit_pct / self.trail_norm)
         sl_pct = base + scaled
 
@@ -872,7 +877,7 @@ class OptionsExitDetector:
         # --- Hard stop loss ---
         if option_price <= self.hard_sl_price:
             state = self._build_state(option_price, profit_pct)
-            return True, 'OE-Hard-SL', state
+            return True, 'Hard-SL', state
 
         # --- Trailing stop loss ---
         if profit_pct > self.highest_profit_pct:
@@ -892,7 +897,7 @@ class OptionsExitDetector:
             # Check if price hit trailing SL
             if option_price <= self.trailing_sl_price:
                 state = self._build_state(option_price, profit_pct)
-                return True, 'OE-Trail-SL', state
+                return True, 'Trail-SL', state
 
         state = self._build_state(option_price, profit_pct)
         return False, None, state

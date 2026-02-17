@@ -289,6 +289,7 @@ BACKTEST_CONFIG = {
         # --- Trailing Stop Loss ---
         'trail_activation_pct': 10,        # Engage trailing SL when profit margin >= X%
         'trail_base_floor_pct': 5,         # At activation: lock in X% above entry as floor
+        'trail_early_floor_minutes': 5,    # First N minutes: SL floor = 0% (breakeven) instead of base
 
         # Continuous trailing SL scaling parameters (logarithmic curve)
         # trail_sl = base + scale * ln(1 + profit / norm)
