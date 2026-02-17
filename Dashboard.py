@@ -149,7 +149,7 @@ def find_entry_exit(df):
 def create_trade_chart(df, trade_label, market_hours_only=False, show_ewo=True, show_rsi=True, show_supertrend=False, show_ichimoku=False, show_atr_sl=True, show_market_bias=True):
     """Create dual-axis chart with stock/option prices, error bars, EWO/RSI subplot, and SPY subplot."""
     df = df.copy()
-    df['time'] = df['timestamp'].apply(parse_time)
+    df['time'] = pd.to_datetime(df['timestamp'].astype(str).str.replace(' : ', ' '), errors='coerce')
     df = df.dropna(subset=['time'])
 
     # Filter based on toggle:
@@ -571,17 +571,17 @@ def create_trade_chart(df, trade_label, market_hours_only=False, show_ewo=True, 
                 )
 
     if hover_gauge_cols:
-        # Build hover text showing all gauge timeframes
-        def build_ticker_hover(row):
-            parts = []
-            for col, label in hover_gauge_cols.items():
-                val = row.get(col)
-                if pd.notna(val) and val:
-                    icon = '+' if val == 'Bullish' else '-'
-                    parts.append(f"{label}[{icon}]")
-            return ' '.join(parts) if parts else ''
-
-        hover_texts = df.apply(build_ticker_hover, axis=1)
+        # Build hover text using vectorized string ops instead of row-by-row .apply()
+        hover_parts = []
+        for col, label in hover_gauge_cols.items():
+            if col in df.columns:
+                series = df[col]
+                part = series.map({'Bullish': f'{label}[+]', 'Bearish': f'{label}[-]'}).fillna('')
+                hover_parts.append(part)
+        if hover_parts:
+            hover_texts = hover_parts[0].str.cat(hover_parts[1:], sep=' ').str.strip()
+        else:
+            hover_texts = pd.Series('', index=df.index)
         if hover_texts.str.len().sum() > 0:
             fig.add_trace(
                 go.Scatter(
@@ -794,18 +794,18 @@ def create_trade_chart(df, trade_label, market_hours_only=False, show_ewo=True, 
                         row=spy_row, col=1
                     )
 
-        # Build hover text showing all gauge timeframes
-        def build_spy_hover(row):
-            price_part = f"SPY: ${row['spy_price']:.2f}" if pd.notna(row.get('spy_price')) else "SPY: N/A"
-            gauge_parts = []
-            for col, label in spy_gauge_cols.items():
-                val = row.get(col)
-                if pd.notna(val) and val:
-                    icon = '+' if val == 'Bullish' else '-'
-                    gauge_parts.append(f"{label}[{icon}]")
-            return '<br>'.join([price_part, ' '.join(gauge_parts)])
-
-        hover_texts = df.apply(build_spy_hover, axis=1)
+        # Build hover text using vectorized string ops instead of row-by-row .apply()
+        spy_price_text = df['spy_price'].map(lambda x: f"SPY: ${x:.2f}" if pd.notna(x) else "SPY: N/A")
+        gauge_parts = []
+        for col, label in spy_gauge_cols.items():
+            if col in df.columns:
+                part = df[col].map({'Bullish': f'{label}[+]', 'Bearish': f'{label}[-]'}).fillna('')
+                gauge_parts.append(part)
+        if gauge_parts:
+            gauge_text = gauge_parts[0].str.cat(gauge_parts[1:], sep=' ').str.strip()
+        else:
+            gauge_text = pd.Series('', index=df.index)
+        hover_texts = spy_price_text + '<br>' + gauge_text
         fig.add_trace(
             go.Scatter(
                 x=df['time'],
@@ -884,6 +884,7 @@ def create_trade_chart(df, trade_label, market_hours_only=False, show_ewo=True, 
     return fig
 
 
+@st.cache_data
 def get_trade_summary(df):
     """Extract concise trade summary including max/min profit percentages."""
     if df.empty:
@@ -1078,23 +1079,38 @@ def main():
     with st.sidebar:
         st.header("Trades")
 
+        # Compute all trade summaries once and reuse
         trade_list = []
-        for pos_id, df in matrices.items():
-            if df.empty:
+        summaries = {}
+        total_profit_dollars = 0.0
+        total_investment = 0.0
+        potential_profit_dollars = 0.0
+
+        for pos_id, tdf in matrices.items():
+            if tdf.empty:
                 continue
             # Build label as "Ticker : strike : c/p"
-            ticker = df['ticker'].iloc[0] if 'ticker' in df.columns else 'UNK'
-            strike = df['strike'].iloc[0] if 'strike' in df.columns else 0
-            opt_type = df['option_type'].iloc[0] if 'option_type' in df.columns else '?'
-            # Use first letter for c/p
+            ticker = tdf['ticker'].iloc[0] if 'ticker' in tdf.columns else 'UNK'
+            strike = tdf['strike'].iloc[0] if 'strike' in tdf.columns else 0
+            opt_type = tdf['option_type'].iloc[0] if 'option_type' in tdf.columns else '?'
             cp = opt_type[0].upper() if opt_type else '?'
             label = f"{ticker} : {strike:.0f} : {cp}"
 
-            # Calculate P&L for sorting
-            summary = get_trade_summary(df)
+            summary = get_trade_summary(tdf)
+            summaries[pos_id] = summary
             pnl = summary['pnl_pct']
-
             trade_list.append((label, pos_id, pnl))
+
+            # Accumulate totals in the same pass
+            entry_p = summary['entry']
+            exit_p = summary['exit']
+            max_p = summary['max_price']
+            contracts = int(tdf['contracts'].iloc[0]) if 'contracts' in tdf.columns else 1
+            if entry_p > 0:
+                inv = entry_p * contracts * 100
+                total_investment += inv
+                total_profit_dollars += (exit_p - entry_p) * contracts * 100
+                potential_profit_dollars += (max_p - entry_p) * contracts * 100
 
         # Sort by P&L descending (winners first, losers last)
         trade_list.sort(key=lambda x: x[2], reverse=True)
@@ -1128,24 +1144,6 @@ def main():
 
         st.markdown("---")
 
-        # Calculate Total Profit and Potential Profit across all trades
-        total_profit_dollars = 0.0
-        total_investment = 0.0
-        potential_profit_dollars = 0.0
-        for _, tdf in matrices.items():
-            if tdf.empty:
-                continue
-            s = get_trade_summary(tdf)
-            entry_p = s['entry']
-            exit_p = s['exit']
-            max_p = s['max_price']
-            contracts = int(tdf['contracts'].iloc[0]) if 'contracts' in tdf.columns else 1
-            if entry_p > 0:
-                inv = entry_p * contracts * 100
-                total_investment += inv
-                total_profit_dollars += (exit_p - entry_p) * contracts * 100
-                potential_profit_dollars += (max_p - entry_p) * contracts * 100
-
         total_profit_pct = (total_profit_dollars / total_investment * 100) if total_investment > 0 else 0
         potential_profit_pct = (potential_profit_dollars / total_investment * 100) if total_investment > 0 else 0
 
@@ -1166,105 +1164,110 @@ def main():
     else:
         st.error("Could not create chart")
 
-    # Trade Summary below chart (two rows)
-    st.subheader("Trade Summary")
-    summary = get_trade_summary(df)
+    # Trade Summary below chart (two rows) - only render when toggle is on
+    if show_trade_summary:
+        st.subheader("Trade Summary")
+        summary = summaries[pos_id]
 
-    # Row 1: Entry | Exit | P&L | Market | Risk | Risk Trend | Profit[min]
-    row1 = st.columns(7)
-    row1[0].metric("Entry", f"${summary['entry']:.2f}")
-    row1[1].metric("Exit", f"${summary['exit']:.2f}")
-    row1[2].metric("P&L", f"{summary['pnl_pct']:+.1f}%")
-    row1[3].metric("Market", summary['market_bias'])
-    row1[4].metric("Risk", summary['risk'])
-    row1[5].metric("Risk Trend", summary['risk_trend'] or 'N/A')
-    row1[6].metric("Profit[min]", f"${summary['profit_min']:+.2f}")
+        # Row 1: Entry | Exit | P&L | Market | Risk | Risk Trend | Profit[min]
+        row1 = st.columns(7)
+        row1[0].metric("Entry", f"${summary['entry']:.2f}")
+        row1[1].metric("Exit", f"${summary['exit']:.2f}")
+        row1[2].metric("P&L", f"{summary['pnl_pct']:+.1f}%")
+        row1[3].metric("Market", summary['market_bias'])
+        row1[4].metric("Risk", summary['risk'])
+        row1[5].metric("Risk Trend", summary['risk_trend'] or 'N/A')
+        row1[6].metric("Profit[min]", f"${summary['profit_min']:+.2f}")
 
-    # Row 2: Min Profit | Exit Reason | Max Profit | Risk Reasons
-    row2 = st.columns(7)
-    row2[0].metric("Min Profit", f"{summary['min_profit_pct']:+.1f}%")
-    row2[1].metric("Exit Reason", summary['exit_reason'])
-    row2[2].metric("Max Profit", f"{summary['max_profit_pct']:+.1f}%")
-    row2[3].metric("Risk Reasons", summary['risk_reasons'] or 'N/A')
+        # Row 2: Min Profit | Exit Reason | Max Profit | Risk Reasons
+        row2 = st.columns(7)
+        row2[0].metric("Min Profit", f"{summary['min_profit_pct']:+.1f}%")
+        row2[1].metric("Exit Reason", summary['exit_reason'])
+        row2[2].metric("Max Profit", f"{summary['max_profit_pct']:+.1f}%")
+        row2[3].metric("Risk Reasons", summary['risk_reasons'] or 'N/A')
 
-    # Show exit signal counts in remaining columns
-    sig_counts = summary.get('exit_signal_counts', {})
-    active_sigs = {k: v for k, v in sig_counts.items() if v > 0}
-    active_sig_items = list(active_sigs.items())
-    for col_idx in range(3):
-        if col_idx < len(active_sig_items):
-            sig_name, sig_count = active_sig_items[col_idx]
-            row2[4 + col_idx].metric(f"Sig: {sig_name}", f"{sig_count} bars")
-        else:
-            # Show combined summary if more signals exist
-            if col_idx == 0 and not active_sig_items:
-                row2[4].metric("Signals", "None")
-            elif col_idx == 0 and len(active_sig_items) > 3:
-                remaining = len(active_sig_items) - 3
-                row2[4 + col_idx].metric(f"+{remaining} more", "...")
+        # Show exit signal counts in remaining columns
+        sig_counts = summary.get('exit_signal_counts', {})
+        active_sigs = {k: v for k, v in sig_counts.items() if v > 0}
+        active_sig_items = list(active_sigs.items())
+        for col_idx in range(3):
+            if col_idx < len(active_sig_items):
+                sig_name, sig_count = active_sig_items[col_idx]
+                row2[4 + col_idx].metric(f"Sig: {sig_name}", f"{sig_count} bars")
             else:
-                row2[4 + col_idx].metric("", "")
+                # Show combined summary if more signals exist
+                if col_idx == 0 and not active_sig_items:
+                    row2[4].metric("Signals", "None")
+                elif col_idx == 0 and len(active_sig_items) > 3:
+                    remaining = len(active_sig_items) - 3
+                    row2[4 + col_idx].metric(f"+{remaining} more", "...")
+                else:
+                    row2[4 + col_idx].metric("", "")
 
-    # Row 3: Exit signal bar counts (all signals that fired during holding)
-    if active_sig_items:
-        st.subheader("Exit Signals")
-        # Show all exit signal counts in a dynamic row
-        num_sigs = len(active_sig_items)
-        sig_cols = st.columns(max(num_sigs, 1))
-        for i, (sig_name, sig_count) in enumerate(active_sig_items):
-            sig_cols[i].metric(sig_name, f"{sig_count} bars")
+        # Row 3: Exit signal bar counts (all signals that fired during holding)
+        if active_sig_items:
+            st.subheader("Exit Signals")
+            # Show all exit signal counts in a dynamic row
+            num_sigs = len(active_sig_items)
+            sig_cols = st.columns(max(num_sigs, 1))
+            for i, (sig_name, sig_count) in enumerate(active_sig_items):
+                sig_cols[i].metric(sig_name, f"{sig_count} bars")
 
-    # StatsBook table
-    st.subheader("Statsbook")
-    ticker = df['ticker'].iloc[0] if 'ticker' in df.columns else None
-    statsbooks = st.session_state.get('statsbooks', {})
-    if ticker and ticker in statsbooks:
-        sb_df = statsbooks[ticker]
-        if isinstance(sb_df, pd.DataFrame) and not sb_df.empty:
-            # Build display DataFrame with 1-minute normalized column
-            display_df = sb_df.copy()
+    # StatsBook table - only render when toggle is on
+    if show_stats_book:
+        st.subheader("Statsbook")
+        ticker = df['ticker'].iloc[0] if 'ticker' in df.columns else None
+        statsbooks = st.session_state.get('statsbooks', {})
+        if ticker and ticker in statsbooks:
+            sb_df = statsbooks[ticker]
+            if isinstance(sb_df, pd.DataFrame) and not sb_df.empty:
+                # Build display DataFrame with 1-minute normalized column
+                display_df = sb_df.copy()
 
-            # Compute 1-minute reference column from 5m data (divided by 5)
-            if '5m' in display_df.columns:
-                display_df['1m'] = display_df['5m'] / 5
+                # Compute 1-minute reference column from 5m data (divided by 5)
+                if '5m' in display_df.columns:
+                    display_df['1m'] = display_df['5m'] / 5
 
-            # Arrange columns: 1m | 5m | 1h | 1d
-            ordered_cols = []
-            if '1m' in display_df.columns:
-                ordered_cols.append('1m')
-            for tf in ['5m', '1h', '1d']:
-                if tf in display_df.columns:
-                    ordered_cols.append(tf)
-            display_df = display_df[ordered_cols]
+                # Arrange columns: 1m | 5m | 1h | 1d
+                ordered_cols = []
+                if '1m' in display_df.columns:
+                    ordered_cols.append('1m')
+                for tf in ['5m', '1h', '1d']:
+                    if tf in display_df.columns:
+                        ordered_cols.append(tf)
+                display_df = display_df[ordered_cols]
 
-            # Transpose: timeframes become rows, metrics become columns
-            display_df = display_df.T
-            display_df.index.name = 'Timeframe'
-            display_df.columns.name = None
-            display_df = display_df.reset_index()
+                # Transpose: timeframes become rows, metrics become columns
+                display_df = display_df.T
+                display_df.index.name = 'Timeframe'
+                display_df.columns.name = None
+                display_df = display_df.reset_index()
 
-            # Format numeric values: volume columns as integers, ratio column to 2 decimals, rest to 3 decimals
-            vol_metrics = {'Max(Vol)', 'Median.Max(Vol)', 'Median(Vol)', 'Min(Vol)', 'Median.Min(Vol)'}
-            ratio_metrics = {'Max(Vol)x'}
-            for col in display_df.columns:
-                if col == 'Timeframe':
-                    continue
-                display_df[col] = display_df[col].apply(
-                    lambda x, c=col: (
-                        f"{int(x):,}" if c in vol_metrics and pd.notna(x)
-                        else f"{x:.2f}" if c in ratio_metrics and pd.notna(x)
-                        else f"{x:.3f}" if pd.notna(x)
-                        else ""
+                # Format numeric values: volume columns as integers, ratio column to 2 decimals, rest to 3 decimals
+                vol_metrics = {'Max(Vol)', 'Median.Max(Vol)', 'Median(Vol)', 'Min(Vol)', 'Median.Min(Vol)'}
+                ratio_metrics = {'Max(Vol)x'}
+                for col in display_df.columns:
+                    if col == 'Timeframe':
+                        continue
+                    display_df[col] = display_df[col].apply(
+                        lambda x, c=col: (
+                            f"{int(x):,}" if c in vol_metrics and pd.notna(x)
+                            else f"{x:.2f}" if c in ratio_metrics and pd.notna(x)
+                            else f"{x:.3f}" if pd.notna(x)
+                            else ""
+                        )
                     )
-                )
 
-            st.dataframe(display_df, use_container_width=True, hide_index=True)
+                st.dataframe(display_df, use_container_width=True, hide_index=True)
+            else:
+                st.info(f"No StatsBook data available for {ticker}.")
         else:
-            st.info(f"No StatsBook data available for {ticker}.")
-    else:
-        st.info(f"No StatsBook data available{f' for {ticker}' if ticker else ''}.")
+            st.info(f"No StatsBook data available{f' for {ticker}' if ticker else ''}.")
 
-    # Databook section
+    # Databook section - only render when toggle is on
+    if not show_data_book:
+        return
+
     st.subheader("Databook")
 
     # Column order from Config (source of truth)
@@ -1281,7 +1284,7 @@ def main():
         # OFF (market_hours_only=False): Show only holding period (where holding=True)
         if market_hours_only and 'timestamp' in matrix_df.columns:
             import datetime as dt
-            matrix_df['_time'] = matrix_df['timestamp'].apply(parse_time)
+            matrix_df['_time'] = pd.to_datetime(matrix_df['timestamp'].astype(str).str.replace(' : ', ' '), errors='coerce')
             matrix_df = matrix_df[
                 (matrix_df['_time'].dt.time >= dt.time(9, 0)) &
                 (matrix_df['_time'].dt.time <= dt.time(16, 0))
@@ -1291,59 +1294,63 @@ def main():
             # Filter to holding period only
             matrix_df = matrix_df[df['holding'] == True]
 
-        # Format price columns as $X.XX
-        for col in ['stock_price', 'stock_high', 'stock_low', 'true_price', 'option_price',
+        # Vectorized formatting — avoids 16+ sequential .apply() calls
+
+        # Format price columns as $X.XX using vectorized string formatting
+        price_cols = [c for c in ['stock_price', 'stock_high', 'stock_low', 'true_price', 'option_price',
                      'entry_price', 'highest_price', 'lowest_price',
                      'vwap', 'ema_10', 'ema_21', 'ema_50', 'ema_100', 'ema_200',
                      'vwap_ema_avg', 'emavwap', 'supertrend',
                      'ichimoku_tenkan', 'ichimoku_kijun', 'ichimoku_senkou_a', 'ichimoku_senkou_b',
-                     'atr_sl']:
-            if col in matrix_df.columns:
-                matrix_df[col] = matrix_df[col].apply(lambda x: f"${x:.2f}" if pd.notna(x) else "")
+                     'atr_sl', 'spy_price'] if c in matrix_df.columns]
+        for col in price_cols:
+            mask = matrix_df[col].notna()
+            matrix_df[col] = ''
+            if mask.any():
+                matrix_df.loc[mask, col] = matrix_df.loc[mask, col].map(lambda x: f"${x:.2f}")
 
-        # Format volume as integer
+        # Format volume as integer with commas
         if 'volume' in matrix_df.columns:
-            matrix_df['volume'] = matrix_df['volume'].apply(lambda x: f"{int(x):,}" if pd.notna(x) else "")
+            mask = matrix_df['volume'].notna()
+            matrix_df['volume'] = ''
+            if mask.any():
+                matrix_df.loc[mask, 'volume'] = matrix_df.loc[mask, 'volume'].astype(int).map('{:,}'.format)
 
         # Format P&L dollar amount
         if 'pnl' in matrix_df.columns:
-            matrix_df['pnl'] = matrix_df['pnl'].apply(lambda x: f"${x:+,.2f}" if pd.notna(x) else "")
+            mask = matrix_df['pnl'].notna()
+            matrix_df['pnl'] = ''
+            if mask.any():
+                matrix_df.loc[mask, 'pnl'] = matrix_df.loc[mask, 'pnl'].map(lambda x: f"${x:+,.2f}")
 
         if 'pnl_pct' in matrix_df.columns:
-            matrix_df['pnl_pct'] = matrix_df['pnl_pct'].apply(lambda x: f"{x:+.1f}%" if pd.notna(x) else "")
+            mask = matrix_df['pnl_pct'].notna()
+            matrix_df['pnl_pct'] = ''
+            if mask.any():
+                matrix_df.loc[mask, 'pnl_pct'] = matrix_df.loc[mask, 'pnl_pct'].map(lambda x: f"{x:+.1f}%")
 
         # Format minutes held as integer
         if 'minutes_held' in matrix_df.columns:
-            matrix_df['minutes_held'] = matrix_df['minutes_held'].apply(lambda x: f"{int(x)}" if pd.notna(x) else "")
+            mask = matrix_df['minutes_held'].notna()
+            matrix_df['minutes_held'] = ''
+            if mask.any():
+                matrix_df.loc[mask, 'minutes_held'] = matrix_df.loc[mask, 'minutes_held'].astype(int).astype(str)
 
         if 'market_bias' in matrix_df.columns:
-            bias_map = {1: 'Bullish', 0: 'Sideways', -1: 'Bearish'}
-            matrix_df['market_bias'] = matrix_df['market_bias'].apply(
-                lambda x: bias_map.get(int(x), '') if pd.notna(x) else ""
-            )
+            matrix_df['market_bias'] = matrix_df['market_bias'].map({1: 'Bullish', 0: 'Sideways', -1: 'Bearish'}).fillna('')
 
-        # Format SPY price
-        if 'spy_price' in matrix_df.columns:
-            matrix_df['spy_price'] = matrix_df['spy_price'].apply(lambda x: f"${x:.2f}" if pd.notna(x) else "")
+        # Format decimal columns
+        for col, fmt in [('ewo', '{:.3f}'), ('ewo_15min_avg', '{:.3f}'), ('rsi', '{:.1f}'), ('rsi_10min_avg', '{:.1f}')]:
+            if col in matrix_df.columns:
+                mask = matrix_df[col].notna()
+                matrix_df[col] = ''
+                if mask.any():
+                    matrix_df.loc[mask, col] = matrix_df.loc[mask, col].map(fmt.format)
 
-        if 'ewo' in matrix_df.columns:
-            matrix_df['ewo'] = matrix_df['ewo'].apply(lambda x: f"{x:.3f}" if pd.notna(x) else "")
-
-        if 'ewo_15min_avg' in matrix_df.columns:
-            matrix_df['ewo_15min_avg'] = matrix_df['ewo_15min_avg'].apply(lambda x: f"{x:.3f}" if pd.notna(x) else "")
-
-        if 'rsi' in matrix_df.columns:
-            matrix_df['rsi'] = matrix_df['rsi'].apply(lambda x: f"{x:.1f}" if pd.notna(x) else "")
-
-        if 'rsi_10min_avg' in matrix_df.columns:
-            matrix_df['rsi_10min_avg'] = matrix_df['rsi_10min_avg'].apply(lambda x: f"{x:.1f}" if pd.notna(x) else "")
-
-        # Format exit signal flags as checkmarks
+        # Format exit signal flags as Y/blank
         for sig_col in EXIT_SIGNAL_DEFS:
             if sig_col in matrix_df.columns:
-                matrix_df[sig_col] = matrix_df[sig_col].apply(
-                    lambda x: 'Y' if x is True else '' if pd.isna(x) else ''
-                )
+                matrix_df[sig_col] = matrix_df[sig_col].map({True: 'Y'}).fillna('')
 
         st.dataframe(matrix_df, use_container_width=True, hide_index=True)
     else:
