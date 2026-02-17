@@ -1366,7 +1366,7 @@ class Backtest:
         risk_downtrend_delay_min = risk_config.get('downtrend_delay_minutes', 5)
         risk_downtrend_bars = risk_config.get('downtrend_monitor_bars', 3)
         risk_downtrend_drop_pct = risk_config.get('downtrend_drop_pct', 10)
-        risk_downtrend_reason = risk_config.get('downtrend_exit_reason', 'SL-DT')
+        risk_downtrend_reason = risk_config.get('downtrend_exit_reason', 'DownTrend-SL')
         risk_negative_bar_count = 0  # Consecutive negative bars after entry for HIGH risk
 
         # Fetch SPY data for this signal's trading day
