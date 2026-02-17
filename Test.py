@@ -1,23 +1,45 @@
 """
-Test.py - Backtesting Framework for Discord Trading Signals
+Test.py - Testing Framework for Discord Trading Signals
 
-Module Goal: Run backtests on historical Discord signals.
+Module Goal: Backtest, live test, and replay trading signals.
 
-Functionality:
-1. Fetch Discord messages from signal channels
-2. Parse signals using Signal.py
-3. Get historical stock data aligned with signal timestamps
-4. Track positions through market hours
-5. Generate DataFrames: Signals, Positions, Tracking matrices
+Three Testing Modes:
+1. Backtest   - Historical simulation using yfinance data + Discord signals
+2. LiveTest   - Real-time data collection via Robinhood webscraping + live simulation
+3. LiveRerun  - Replay collected live data through simulation (or fallback to Backtest)
+
+All three modes share SimulationEngine for identical exit strategy logic.
+
+Data Output (signal-based, not trade-based):
+- DataBook:    Full bar-by-bar stock + option + indicator data per signal
+- DataSummary: 2-minute aggregated summary for dashboard display
+- DataStats:   Per-signal trade statistics
 
 Usage:
+    # Backtesting
     from Test import Backtest
     bt = Backtest(lookback_days=5)
     results = bt.run()
     bt.summary()
 
+    # Live Testing
+    from Test import LiveTest
+    lt = LiveTest()
+    lt.start()   # Runs until market close
+    lt.summary()
+
+    # Live Rerun (with collected data)
+    from Test import LiveRerun
+    lr = LiveRerun(live_data_path='live_data/LT_DATA.pkl')
+    lr.run()
+    lr.summary()
+
+    # Live Rerun (no collected data - falls back to Backtest)
+    lr = LiveRerun()
+    lr.run()
+
 ================================================================================
-INTERNAL - Backtesting Logic
+INTERNAL - Testing Logic (Backtest / LiveTest / LiveRerun)
 ================================================================================
 """
 
@@ -920,6 +942,1023 @@ class StatsBook:
 
 
 # =============================================================================
+# INTERNAL - DataSummary (2-minute aggregation of DataBook)
+# =============================================================================
+
+class DataSummary:
+    """
+    Aggregated summary of DataBook data on a 2-minute basis.
+
+    Reduces compute for dashboard display of large live datasets.
+    Each row covers a 2-minute window with OHLC stock/option prices,
+    averaged indicators, and exit signal counts.
+
+    Signal-based: keyed by signal_id, each signal gets its own summary.
+    """
+
+    def __init__(self, interval_minutes=2):
+        self.interval_minutes = interval_minutes
+        self.summaries = {}  # signal_id -> list of summary records
+
+    def update_from_databook(self, signal_id, databook_df):
+        """
+        Generate summary from a databook DataFrame using vectorized pandas aggregation.
+
+        Args:
+            signal_id: Unique signal identifier
+            databook_df: DataFrame from Databook.to_dataframe()
+        """
+        if databook_df is None or databook_df.empty:
+            return
+
+        if 'timestamp' not in databook_df.columns:
+            return
+
+        df = databook_df
+        timestamps = pd.to_datetime(df['timestamp'])
+
+        # Group by intervals using floor
+        intervals = timestamps.dt.floor(f'{self.interval_minutes}min')
+
+        # Pre-check which columns exist (once, not per group)
+        has_stock = 'stock_price' in df.columns
+        has_option = 'option_price' in df.columns
+        has_volume = 'volume' in df.columns
+        has_pnl = 'pnl_pct' in df.columns
+        has_rsi = 'rsi' in df.columns
+        has_ewo = 'ewo' in df.columns
+        has_vwap = 'vwap' in df.columns
+        has_bias = 'market_bias' in df.columns
+
+        exit_sig_cols = [c for c in ['exit_sig_sb', 'exit_sig_mp', 'exit_sig_ai',
+                                      'exit_sig_closure_peak', 'exit_sig_oe'] if c in df.columns]
+
+        records = []
+        for interval_start, idx_group in df.groupby(intervals).groups.items():
+            group = df.loc[idx_group]
+            interval_end = interval_start + timedelta(minutes=self.interval_minutes)
+
+            # Count exit signals fired in this window
+            exit_signals = []
+            for sig_col in exit_sig_cols:
+                if group[sig_col].any():
+                    exit_signals.append(sig_col.replace('exit_sig_', ''))
+
+            record = {
+                'timestamp_start': interval_start,
+                'timestamp_end': interval_end,
+                'stock_open': group['stock_price'].iloc[0] if has_stock else np.nan,
+                'stock_high': group['stock_price'].max() if has_stock else np.nan,
+                'stock_low': group['stock_price'].min() if has_stock else np.nan,
+                'stock_close': group['stock_price'].iloc[-1] if has_stock else np.nan,
+                'option_open': group['option_price'].iloc[0] if has_option else np.nan,
+                'option_high': group['option_price'].max() if has_option else np.nan,
+                'option_low': group['option_price'].min() if has_option else np.nan,
+                'option_close': group['option_price'].iloc[-1] if has_option else np.nan,
+                'volume_sum': group['volume'].sum() if has_volume else 0,
+                'bar_count': len(group),
+                'pnl_pct_start': group['pnl_pct'].iloc[0] if has_pnl else np.nan,
+                'pnl_pct_end': group['pnl_pct'].iloc[-1] if has_pnl else np.nan,
+                'pnl_pct_max': group['pnl_pct'].max() if has_pnl else np.nan,
+                'pnl_pct_min': group['pnl_pct'].min() if has_pnl else np.nan,
+                'rsi_avg': group['rsi'].mean() if has_rsi else np.nan,
+                'ewo_avg': group['ewo'].mean() if has_ewo else np.nan,
+                'vwap_avg': group['vwap'].mean() if has_vwap else np.nan,
+                'market_bias_mode': group['market_bias'].mode().iloc[0] if has_bias and not group['market_bias'].mode().empty else np.nan,
+                'exit_signals_fired': '|'.join(exit_signals) if exit_signals else None,
+                'signal_id': signal_id,
+            }
+            records.append(record)
+
+        self.summaries[signal_id] = records
+
+    def to_dataframe(self, signal_id=None):
+        """
+        Get summary as DataFrame.
+
+        Args:
+            signal_id: If provided, return summary for specific signal.
+                      If None, return all summaries combined.
+        """
+        if signal_id and signal_id in self.summaries:
+            records = self.summaries[signal_id]
+        else:
+            records = []
+            for sig_records in self.summaries.values():
+                records.extend(sig_records)
+
+        if records:
+            df = pd.DataFrame(records)
+            col_order = Config.DATAFRAME_COLUMNS.get('datasummary', [])
+            if col_order:
+                df = df[[c for c in col_order if c in df.columns]]
+            return df
+        return pd.DataFrame()
+
+
+# =============================================================================
+# INTERNAL - DataStats (Per-signal trade statistics)
+# =============================================================================
+
+class DataStats:
+    """
+    Per-signal trade statistics.
+
+    Tracks entry/exit data, P&L, risk, and data collection metadata
+    for each signal. Signal-based (not trade-based) so future chained
+    trades can be grouped under the same signal.
+    """
+
+    def __init__(self):
+        self.stats = {}  # signal_id -> stats dict
+
+    def record(self, signal_id, position, data_source='backtest', bars_recorded=0):
+        """
+        Record statistics for a signal.
+
+        Args:
+            signal_id: Unique signal identifier
+            position: Position object (closed)
+            data_source: 'backtest', 'live', or 'livererun'
+            bars_recorded: Number of bars in the databook
+        """
+        if position is None:
+            return
+
+        stat = {
+            'signal_id': signal_id,
+            'ticker': position.ticker,
+            'strike': position.strike,
+            'option_type': position.option_type,
+            'expiration': position.expiration,
+            'entry_time': position.entry_time,
+            'entry_price': position.entry_price,
+            'entry_stock_price': getattr(position, 'last_stock_price', None),
+            'exit_time': position.exit_time,
+            'exit_price': position.exit_price,
+            'exit_reason': position.exit_reason,
+            'pnl': position.get_pnl(position.exit_price) if position.exit_price else None,
+            'pnl_pct': position.get_pnl_pct(position.exit_price) if position.exit_price else None,
+            'minutes_held': position.get_minutes_held(position.exit_time) if position.exit_time else None,
+            'max_pnl_pct': None,  # Set from databook later
+            'min_pnl_pct': None,
+            'max_option_price': position.highest_price,
+            'min_option_price': position.lowest_price,
+            'risk_level': None,
+            'risk_reasons': None,
+            'bars_recorded': bars_recorded,
+            'data_source': data_source,
+        }
+
+        self.stats[signal_id] = stat
+
+    def update_from_databook(self, signal_id, databook_df):
+        """Update stats with data from the databook DataFrame."""
+        if signal_id not in self.stats or databook_df is None or databook_df.empty:
+            return
+
+        if 'pnl_pct' in databook_df.columns:
+            holding_df = databook_df[databook_df.get('holding', True) == True]
+            if not holding_df.empty:
+                self.stats[signal_id]['max_pnl_pct'] = holding_df['pnl_pct'].max()
+                self.stats[signal_id]['min_pnl_pct'] = holding_df['pnl_pct'].min()
+
+        if 'risk' in databook_df.columns:
+            risk_vals = databook_df['risk'].dropna()
+            if not risk_vals.empty:
+                self.stats[signal_id]['risk_level'] = risk_vals.iloc[0]
+
+        if 'risk_reasons' in databook_df.columns:
+            reason_vals = databook_df['risk_reasons'].dropna()
+            if not reason_vals.empty:
+                self.stats[signal_id]['risk_reasons'] = reason_vals.iloc[0]
+
+    def to_dataframe(self):
+        """Get all stats as DataFrame."""
+        if self.stats:
+            df = pd.DataFrame(list(self.stats.values()))
+            col_order = Config.DATAFRAME_COLUMNS.get('datastats', [])
+            if col_order:
+                df = df[[c for c in col_order if c in df.columns]]
+            return df
+        return pd.DataFrame()
+
+
+# =============================================================================
+# INTERNAL - Simulation Engine (Shared between Backtest/LiveTest/LiveRerun)
+# =============================================================================
+
+class SimulationEngine:
+    """
+    Core simulation logic shared across Backtest, LiveTest, and LiveRerun.
+
+    Handles:
+    - Position creation from signal + stock data
+    - Bar-by-bar simulation with all exit strategies
+    - Indicator calculation and databook recording
+    - SPY gauge and risk assessment
+
+    All three testing modes (Backtest, LiveTest, LiveRerun) create an
+    instance of this engine and call its methods with their respective
+    data sources.
+    """
+
+    def __init__(self, config=None, ai_strategy=None):
+        self.config = config or Config.get_config('backtest').copy()
+        self.slippage_pct = self.config.get('slippage_pct', 0.001)
+        self.default_contracts = self.config.get('default_contracts', 1)
+        self.commission_per_contract = self.config.get('commission_per_contract', 0.65)
+        self.ai_strategy = ai_strategy
+
+    def calculate_spy_gauge(self, spy_data, timestamp):
+        """
+        Calculate SPY gauge at a given timestamp.
+
+        For each timeframe, compare current SPY price to average price over that lookback.
+        Returns: (spy_price, gauge_dict)
+        """
+        if spy_data is None or spy_data.empty:
+            return np.nan, {}
+
+        available = spy_data[spy_data.index <= timestamp]
+        if available.empty:
+            return np.nan, {}
+
+        spy_price = available['close'].iloc[-1]
+        gauge = self._compute_gauge_dict(available, spy_price, timestamp)
+
+        return spy_price, gauge
+
+    def calculate_ticker_gauge(self, stock_data, timestamp):
+        """
+        Calculate ticker gauge at a given timestamp.
+        Same logic as SPY gauge but applied to the main ticker's stock data.
+        Returns: gauge_dict
+        """
+        available = stock_data[stock_data.index <= timestamp]
+        if available.empty:
+            return {}
+
+        current_price = available['close'].iloc[-1]
+        return self._compute_gauge_dict(available, current_price, timestamp)
+
+    def _compute_gauge_dict(self, available, current_price, timestamp):
+        """Shared gauge computation for SPY and ticker gauges."""
+        market_open = timestamp.replace(hour=9, minute=30, second=0, microsecond=0)
+
+        spy_config = self.config.get('spy_gauge', {})
+        timeframes = spy_config.get('timeframes', {})
+        gauge = {}
+
+        # Use numpy arrays for fast slicing
+        close_vals = available['close'].values
+        idx_vals = available.index
+
+        for label, minutes in timeframes.items():
+            if minutes == 0:
+                lookback_start = market_open
+            else:
+                lookback_start = timestamp - timedelta(minutes=minutes)
+
+            # Use searchsorted for O(log n) window lookup instead of O(n) boolean mask
+            start_pos = idx_vals.searchsorted(lookback_start)
+            if start_pos >= len(close_vals):
+                gauge[label] = None
+                continue
+
+            window_vals = close_vals[start_pos:]
+            if len(window_vals) == 0:
+                gauge[label] = None
+                continue
+
+            avg_price = window_vals.mean()
+            gauge[label] = 'Bullish' if current_price >= avg_price else 'Bearish'
+
+        return gauge
+
+    def precompute_gauges(self, data, timestamps):
+        """
+        Pre-compute gauge values for all timestamps at once.
+
+        Much faster than calling calculate_*_gauge per-bar since we avoid
+        repeated DataFrame slicing. Uses cumulative sum for O(n) computation.
+
+        Args:
+            data: DataFrame with 'close' column and DatetimeIndex
+            timestamps: Array of timestamps to compute gauges for
+
+        Returns:
+            list of (price, gauge_dict) tuples, one per timestamp
+        """
+        if data is None or data.empty:
+            return [(np.nan, {})] * len(timestamps)
+
+        spy_config = self.config.get('spy_gauge', {})
+        timeframes = spy_config.get('timeframes', {})
+
+        close_vals = data['close'].values
+        data_index = data.index
+        n_data = len(close_vals)
+
+        # Pre-compute cumulative sum for fast windowed averages
+        cumsum = np.concatenate([[0], np.cumsum(close_vals)])
+
+        results = []
+        for ts in timestamps:
+            # Find position of current timestamp
+            pos = data_index.searchsorted(ts, side='right')
+            if pos == 0:
+                results.append((np.nan, {}))
+                continue
+
+            price = float(close_vals[pos - 1])
+            market_open = ts.replace(hour=9, minute=30, second=0, microsecond=0)
+            gauge = {}
+
+            for label, minutes in timeframes.items():
+                if minutes == 0:
+                    lookback_start = market_open
+                else:
+                    lookback_start = ts - timedelta(minutes=minutes)
+
+                start_pos = data_index.searchsorted(lookback_start)
+                end_pos = pos  # exclusive
+
+                if start_pos >= end_pos:
+                    gauge[label] = None
+                    continue
+
+                # Use cumsum for O(1) average calculation
+                window_sum = cumsum[end_pos] - cumsum[start_pos]
+                window_len = end_pos - start_pos
+                avg_price = window_sum / window_len
+                gauge[label] = 'Bullish' if price >= avg_price else 'Bearish'
+
+            results.append((price, gauge))
+
+        return results
+
+    def assess_risk(self, rsi, rsi_avg, ewo_avg, statsbook, timestamp, signal_time):
+        """
+        Assess risk at entry time.
+
+        Conditions (any TRUE = HIGH risk):
+        1. (RSI + RSI_avg) / 2 > 80
+        2. EWO_avg > Median.Max(EWO) from StatsBook (1m = 5m value / 5)
+        3. Purchase during first 15 minutes of market open (9:30-9:45 EST)
+
+        Returns: (risk_level, reasons_list)
+        """
+        risk_config = self.config.get('risk_assessment', {})
+        if not risk_config.get('enabled', False):
+            return None, None
+
+        reasons = []
+
+        # Condition 1: RSI overbought
+        rsi_threshold = risk_config.get('rsi_overbought_threshold', 80)
+        if not np.isnan(rsi) and not np.isnan(rsi_avg):
+            combined_rsi = (rsi + rsi_avg) / 2
+            if combined_rsi > rsi_threshold:
+                reasons.append(f'RSI({combined_rsi:.0f}>{rsi_threshold})')
+
+        # Condition 2: EWO overbought vs Median.Max(EWO) from StatsBook
+        if risk_config.get('ewo_overbought_enabled', True) and not np.isnan(ewo_avg):
+            if statsbook is not None and not statsbook.empty:
+                try:
+                    ewo_max_5m = float(statsbook.loc['Median.Max(EWO)', '5m'])
+                    ewo_max_1m = ewo_max_5m / 5
+                    if not np.isnan(ewo_max_1m) and ewo_avg > ewo_max_1m:
+                        reasons.append(f'EWO({ewo_avg:.3f}>{ewo_max_1m:.3f})')
+                except (KeyError, TypeError, ValueError):
+                    pass
+
+        # Condition 3: First 15 minutes of market open
+        open_window = risk_config.get('market_open_window_minutes', 15)
+        market_open = signal_time.replace(hour=9, minute=30, second=0, microsecond=0)
+        market_open_end = market_open + timedelta(minutes=open_window)
+        if market_open <= timestamp <= market_open_end:
+            reasons.append(f'Open({open_window}min)')
+
+        if reasons:
+            return 'HIGH', '|'.join(reasons)
+        return 'NORMAL', None
+
+    def create_position(self, signal, entry_stock_price, entry_time, entry_option_price=None):
+        """
+        Create a Position from a signal.
+
+        Args:
+            signal: Signal dict/series with ticker, strike, option_type, expiration, cost
+            entry_stock_price: Stock price at entry
+            entry_time: Timestamp of entry
+            entry_option_price: Option price at entry (if None, uses BS model or signal cost)
+
+        Returns:
+            (Position, entry_option_price)
+        """
+        if entry_option_price is None:
+            if signal.get('expiration'):
+                expiry_dt = dt.datetime.combine(
+                    signal['expiration'], dt.time(16, 0), tzinfo=EASTERN
+                )
+                days_to_expiry = max(0, (expiry_dt - entry_time).total_seconds() / 86400)
+            else:
+                days_to_expiry = 30
+
+            if signal.get('cost'):
+                entry_option_price = signal.get('cost')
+            else:
+                entry_option_price = Analysis.estimate_option_price_bs(
+                    stock_price=entry_stock_price,
+                    strike=signal['strike'],
+                    option_type=signal['option_type'],
+                    days_to_expiry=days_to_expiry
+                )
+
+        entry_option_price *= (1 + self.slippage_pct)
+
+        position = Position(
+            signal=signal,
+            entry_price=entry_option_price,
+            entry_time=entry_time,
+            contracts=self.default_contracts
+        )
+
+        return position, entry_option_price
+
+    def simulate_position(self, position, matrix, stock_data, signal, entry_idx, entry_stock_price,
+                          statsbooks=None, spy_data=None):
+        """
+        Simulate position through bar data (shared logic).
+
+        This is the core simulation loop used by Backtest, LiveTest, and LiveRerun.
+        It processes each bar from entry to end, applying all exit strategies.
+
+        Args:
+            position: Position object
+            matrix: Databook object for recording
+            stock_data: DataFrame with OHLCV + indicator columns
+            signal: Signal dict/series
+            entry_idx: Index of entry bar in stock_data
+            entry_stock_price: Stock price at entry
+            statsbooks: Dict of {ticker: statsbook_df} for StatsBook exits
+            spy_data: DataFrame of SPY intraday data for gauge
+        """
+        statsbooks = statsbooks or {}
+
+        # Calculate expiry as a precise datetime
+        if signal['expiration']:
+            expiry_dt = dt.datetime.combine(
+                signal['expiration'], dt.time(16, 0), tzinfo=EASTERN
+            )
+        else:
+            expiry_dt = position.entry_time + dt.timedelta(days=30)
+
+        entry_days_to_expiry = max(0, (expiry_dt - position.entry_time).total_seconds() / 86400)
+
+        # Get indicator settings from config
+        indicator_config = self.config.get('indicators', {})
+        ema_periods = indicator_config.get('ema_periods', [10, 21, 50, 100, 200])
+
+        # Get supertrend settings
+        supertrend_period = indicator_config.get('supertrend_period', 10)
+        supertrend_multiplier = indicator_config.get('supertrend_multiplier', 3.0)
+
+        # Get ichimoku settings
+        ichimoku_tenkan = indicator_config.get('ichimoku_tenkan', 9)
+        ichimoku_kijun = indicator_config.get('ichimoku_kijun', 26)
+        ichimoku_senkou_b = indicator_config.get('ichimoku_senkou_b', 52)
+        ichimoku_displacement = indicator_config.get('ichimoku_displacement', 26)
+
+        # Get ATR-SL settings
+        atr_sl_period = indicator_config.get('atr_sl_period', 5)
+        atr_sl_hhv = indicator_config.get('atr_sl_hhv', 10)
+        atr_sl_multiplier = indicator_config.get('atr_sl_multiplier', 2.5)
+
+        # Get MACD and ROC settings
+        oe_config = self.config.get('options_exit', {})
+        macd_fast = oe_config.get('macd_fast', 12)
+        macd_slow = oe_config.get('macd_slow', 26)
+        macd_signal_period = oe_config.get('macd_signal', 9)
+        roc_period = oe_config.get('roc_period', 30)
+
+        # Add technical indicators to stock data
+        stock_data = Analysis.add_indicators(stock_data, ema_periods=ema_periods,
+                                             supertrend_period=supertrend_period,
+                                             supertrend_multiplier=supertrend_multiplier,
+                                             ichimoku_tenkan=ichimoku_tenkan,
+                                             ichimoku_kijun=ichimoku_kijun,
+                                             ichimoku_senkou_b=ichimoku_senkou_b,
+                                             ichimoku_displacement=ichimoku_displacement,
+                                             atr_sl_period=atr_sl_period,
+                                             atr_sl_hhv=atr_sl_hhv,
+                                             atr_sl_multiplier=atr_sl_multiplier,
+                                             macd_fast=macd_fast,
+                                             macd_slow=macd_slow,
+                                             macd_signal=macd_signal_period,
+                                             roc_period=roc_period)
+
+        # Pre-compute SPY and ticker gauges for all bars at once (O(n) vs O(n^2))
+        _all_timestamps = stock_data.index
+        _spy_gauges = self.precompute_gauges(spy_data, _all_timestamps)
+        _ticker_gauges = self.precompute_gauges(stock_data, _all_timestamps)
+
+        # Create strategy detectors
+        mp_strategy = Strategy.MomentumPeak(self.config.get('momentum_peak', {}))
+        mp_detector = mp_strategy.create_detector()
+
+        sb_strategy = Strategy.StatsBookExit(self.config.get('statsbook_exit', {}))
+        sb_detector = sb_strategy.create_detector(statsbooks.get(position.ticker))
+
+        ai_detector = None
+        if self.ai_strategy:
+            ai_detector = self.ai_strategy.create_detector(
+                ticker=position.ticker,
+                option_type=position.option_type,
+                strike=position.strike,
+            )
+
+        oe_strategy = Strategy.OptionsExit(self.config.get('options_exit', {}))
+        oe_detector = oe_strategy.create_detector(position.entry_price, position.option_type)
+        oe_favorability_assessed = False
+
+        # Closure - Peak settings
+        CP_config = self.config.get('closure_peak', {})
+        CP_enabled = CP_config.get('enabled', True)
+        CP_rsi_call = CP_config.get('rsi_call_threshold', 87)
+        CP_rsi_put = CP_config.get('rsi_put_threshold', 13)
+        CP_minutes = CP_config.get('minutes_before_close', 30)
+        CP_start_hour = 15
+        CP_start_minute = 60 - CP_minutes
+        CP_start_time = dt.time(CP_start_hour, CP_start_minute)
+
+        # Risk assessment state
+        risk_level = None
+        risk_reasons = None
+        risk_trend = None
+        risk_assessed = False
+        risk_config = self.config.get('risk_assessment', {})
+        risk_enabled = risk_config.get('enabled', False)
+        risk_downtrend_delay_min = risk_config.get('downtrend_delay_minutes', 5)
+        risk_downtrend_bars = risk_config.get('downtrend_monitor_bars', 3)
+        risk_downtrend_drop_pct = risk_config.get('downtrend_drop_pct', 10)
+        risk_downtrend_reason = risk_config.get('downtrend_exit_reason', 'DownTrend-SL')
+        risk_negative_bar_count = 0
+
+        max_vwap_ema_avg = np.nan
+
+        # Pre-extract column arrays for fast indexed access (avoids iterrows overhead)
+        _col_close = stock_data['close'].values
+        _col_high = stock_data['high'].values if 'high' in stock_data.columns else _col_close
+        _col_low = stock_data['low'].values if 'low' in stock_data.columns else _col_close
+        _col_volume = stock_data['volume'].values if 'volume' in stock_data.columns else np.zeros(len(stock_data))
+        _col_vwap = stock_data['vwap'].values if 'vwap' in stock_data.columns else np.full(len(stock_data), np.nan)
+        _col_ema_10 = stock_data['ema_10'].values if 'ema_10' in stock_data.columns else np.full(len(stock_data), np.nan)
+        _col_ema_21 = stock_data['ema_21'].values if 'ema_21' in stock_data.columns else np.full(len(stock_data), np.nan)
+        _col_ema_50 = stock_data['ema_50'].values if 'ema_50' in stock_data.columns else np.full(len(stock_data), np.nan)
+        _col_ema_100 = stock_data['ema_100'].values if 'ema_100' in stock_data.columns else np.full(len(stock_data), np.nan)
+        _col_ema_200 = stock_data['ema_200'].values if 'ema_200' in stock_data.columns else np.full(len(stock_data), np.nan)
+        _col_vwap_ema_avg = stock_data['vwap_ema_avg'].values if 'vwap_ema_avg' in stock_data.columns else np.full(len(stock_data), np.nan)
+        _col_emavwap = stock_data['emavwap'].values if 'emavwap' in stock_data.columns else np.full(len(stock_data), np.nan)
+        _col_ewo = stock_data['ewo'].values if 'ewo' in stock_data.columns else np.full(len(stock_data), np.nan)
+        _col_ewo_15min_avg = stock_data['ewo_15min_avg'].values if 'ewo_15min_avg' in stock_data.columns else np.full(len(stock_data), np.nan)
+        _col_rsi = stock_data['rsi'].values if 'rsi' in stock_data.columns else np.full(len(stock_data), np.nan)
+        _col_rsi_10min_avg = stock_data['rsi_10min_avg'].values if 'rsi_10min_avg' in stock_data.columns else np.full(len(stock_data), np.nan)
+        _col_supertrend = stock_data['supertrend'].values if 'supertrend' in stock_data.columns else np.full(len(stock_data), np.nan)
+        _col_supertrend_dir = stock_data['supertrend_direction'].values if 'supertrend_direction' in stock_data.columns else np.full(len(stock_data), np.nan)
+        _col_ichi_tenkan = stock_data['ichimoku_tenkan'].values if 'ichimoku_tenkan' in stock_data.columns else np.full(len(stock_data), np.nan)
+        _col_ichi_kijun = stock_data['ichimoku_kijun'].values if 'ichimoku_kijun' in stock_data.columns else np.full(len(stock_data), np.nan)
+        _col_ichi_senkou_a = stock_data['ichimoku_senkou_a'].values if 'ichimoku_senkou_a' in stock_data.columns else np.full(len(stock_data), np.nan)
+        _col_ichi_senkou_b = stock_data['ichimoku_senkou_b'].values if 'ichimoku_senkou_b' in stock_data.columns else np.full(len(stock_data), np.nan)
+        _col_atr_sl = stock_data['atr_sl'].values if 'atr_sl' in stock_data.columns else np.full(len(stock_data), np.nan)
+        _col_macd_line = stock_data['macd_line'].values if 'macd_line' in stock_data.columns else np.full(len(stock_data), np.nan)
+        _col_macd_signal = stock_data['macd_signal'].values if 'macd_signal' in stock_data.columns else np.full(len(stock_data), np.nan)
+        _col_macd_hist = stock_data['macd_histogram'].values if 'macd_histogram' in stock_data.columns else np.full(len(stock_data), np.nan)
+        _col_roc = stock_data['roc'].values if 'roc' in stock_data.columns else np.full(len(stock_data), np.nan)
+        _timestamps = stock_data.index
+
+        for i in range(len(stock_data)):
+            timestamp = _timestamps[i]
+            stock_price = float(_col_close[i])
+            stock_high = float(_col_high[i])
+            stock_low = float(_col_low[i])
+            volume = float(_col_volume[i])
+
+            # Get indicator values (direct array access, no dict lookup)
+            vwap = float(_col_vwap[i])
+            ema_10 = float(_col_ema_10[i])
+            ema_21 = float(_col_ema_21[i])
+            ema_50 = float(_col_ema_50[i])
+            ema_100 = float(_col_ema_100[i])
+            ema_200 = float(_col_ema_200[i])
+            current_vwap_ema_avg = float(_col_vwap_ema_avg[i])
+
+            if not np.isnan(current_vwap_ema_avg):
+                if np.isnan(max_vwap_ema_avg):
+                    max_vwap_ema_avg = current_vwap_ema_avg
+                else:
+                    max_vwap_ema_avg = max(max_vwap_ema_avg, current_vwap_ema_avg)
+            vwap_ema_avg = max_vwap_ema_avg
+            emavwap = float(_col_emavwap[i])
+            ewo = float(_col_ewo[i])
+            ewo_15min_avg = float(_col_ewo_15min_avg[i])
+            rsi = float(_col_rsi[i])
+            rsi_10min_avg = float(_col_rsi_10min_avg[i])
+            st_value = float(_col_supertrend[i])
+            st_direction = float(_col_supertrend_dir[i])
+            ichi_tenkan = float(_col_ichi_tenkan[i])
+            ichi_kijun = float(_col_ichi_kijun[i])
+            ichi_senkou_a = float(_col_ichi_senkou_a[i])
+            ichi_senkou_b = float(_col_ichi_senkou_b[i])
+            atr_sl_value = float(_col_atr_sl[i])
+            macd_line_val = float(_col_macd_line[i])
+            macd_signal_val = float(_col_macd_signal[i])
+            macd_histogram_val = float(_col_macd_hist[i])
+            roc_val = float(_col_roc[i])
+
+            current_days_to_expiry = max(0, (expiry_dt - timestamp).total_seconds() / 86400)
+
+            # Estimate option price
+            option_price = Analysis.estimate_option_price_bs(
+                stock_price=stock_price,
+                strike=position.strike,
+                option_type=position.option_type,
+                days_to_expiry=current_days_to_expiry,
+                entry_price=position.entry_price,
+                entry_stock_price=entry_stock_price,
+                entry_days_to_expiry=entry_days_to_expiry
+            )
+
+            # Determine holding status
+            is_pre_entry = i < entry_idx
+            is_post_exit = position.is_closed
+            holding = not is_pre_entry and not is_post_exit
+
+            # Track max price from entry to end of market day
+            if not is_pre_entry:
+                position.update_eod_price(option_price)
+
+            # Use pre-computed gauges (O(1) lookup instead of O(n) per-bar)
+            spy_price, spy_gauge_data = _spy_gauges[i]
+            _, ticker_gauge_data = _ticker_gauges[i]
+
+            if holding:
+                position.update(timestamp, option_price, stock_price)
+
+                # --- Risk Assessment (once at entry) ---
+                if not risk_assessed and risk_enabled:
+                    risk_assessed = True
+                    risk_level, risk_reasons = self.assess_risk(
+                        rsi, rsi_10min_avg, ewo_15min_avg,
+                        statsbooks.get(position.ticker),
+                        timestamp, signal['signal_time']
+                    )
+                    if risk_level == 'HIGH':
+                        print(f"    RISK: HIGH [{risk_reasons}]")
+
+                # --- Options Exit: RiskOutlook (once at entry) ---
+                oe_state = {}
+                oe_exit = False
+                oe_reason = None
+                if oe_detector and not oe_favorability_assessed:
+                    oe_favorability_assessed = True
+                    ema_vals = {10: ema_10, 21: ema_21, 50: ema_50, 100: ema_100, 200: ema_200}
+                    open_price = stock_data.iloc[0]['close']
+                    roc_day = ((stock_price - open_price) / open_price) * 100 if open_price > 0 else np.nan
+                    fav_level, fav_reasons = oe_detector.RiskOutlook(
+                        rsi=rsi,
+                        rsi_avg=rsi_10min_avg,
+                        ema_values=ema_vals,
+                        stock_price=stock_price,
+                        atr_sl_value=atr_sl_value,
+                        macd_histogram=macd_histogram_val,
+                        roc_30m=roc_val,
+                        roc_day=roc_day,
+                        supertrend_direction=st_direction,
+                        ewo=ewo,
+                        ewo_avg=ewo_15min_avg,
+                    )
+                    if risk_level == 'HIGH':
+                        oe_detector.is_high_risk = True
+                    if fav_level == 'HIGH':
+                        print(f"    RISK OUTLOOK: HIGH [{fav_reasons}]")
+
+                # --- Options Exit: Per-bar update ---
+                if oe_detector and not position.is_closed:
+                    ema_vals = {10: ema_10, 21: ema_21, 50: ema_50, 100: ema_100, 200: ema_200}
+                    oe_exit, oe_reason, oe_state = oe_detector.update(
+                        option_price=option_price,
+                        stock_price=stock_price,
+                        ema_values=ema_vals,
+                    )
+
+                # --- Risk trend monitoring ---
+                if risk_level == 'HIGH' and not position.is_closed and position.get_minutes_held(timestamp) >= risk_downtrend_delay_min:
+                    pnl_pct_now = position.get_pnl_pct(option_price)
+
+                    if option_price >= position.entry_price:
+                        risk_trend = 'Uptrend'
+                    else:
+                        risk_trend = 'Downtrend'
+
+                    if risk_trend == 'Downtrend':
+                        if pnl_pct_now < 0:
+                            risk_negative_bar_count += 1
+                        else:
+                            risk_negative_bar_count = 0
+
+                        if not position.is_closed:
+                            if risk_negative_bar_count >= risk_downtrend_bars:
+                                exit_price = option_price * (1 - self.slippage_pct)
+                                position.close(exit_price, timestamp, risk_downtrend_reason)
+                            elif pnl_pct_now <= -risk_downtrend_drop_pct:
+                                exit_price = option_price * (1 - self.slippage_pct)
+                                position.close(exit_price, timestamp, risk_downtrend_reason)
+
+                # Update momentum peak detector
+                mp_exit = False
+                mp_reason = None
+                if mp_detector and not position.is_closed:
+                    mp_pnl = position.get_pnl_pct(option_price)
+                    mp_exit, mp_reason = mp_detector.update(mp_pnl, rsi, rsi_10min_avg, ewo)
+
+                # Update StatsBook detector
+                sb_exit = False
+                sb_reason = None
+                if sb_detector and not position.is_closed:
+                    sb_pnl = position.get_pnl_pct(option_price)
+                    sb_exit, sb_reason = sb_detector.update(sb_pnl, ewo, stock_high, stock_low)
+
+                # Update AI exit signal detector
+                ai_exit = False
+                ai_reason = None
+                ai_signal_data = {}
+                if ai_detector and not position.is_closed:
+                    ai_bar_data = {
+                        'stock_price': stock_price,
+                        'stock_high': stock_high,
+                        'stock_low': stock_low,
+                        'true_price': Analysis.true_price(stock_price, stock_high, stock_low),
+                        'volume': volume,
+                        'option_price': option_price,
+                        'pnl_pct': position.get_pnl_pct(option_price),
+                        'vwap': vwap,
+                        'ema_21': ema_21,
+                        'ewo': ewo,
+                        'ewo_15min_avg': ewo_15min_avg,
+                        'rsi': rsi,
+                        'rsi_10min_avg': rsi_10min_avg,
+                        'supertrend_direction': st_direction,
+                        'market_bias': matrix.records[-1]['market_bias'] if matrix.records else np.nan,
+                        'ichimoku_tenkan': ichi_tenkan,
+                        'ichimoku_kijun': ichi_kijun,
+                        'ichimoku_senkou_a': ichi_senkou_a,
+                        'ichimoku_senkou_b': ichi_senkou_b,
+                    }
+                    ai_exit, ai_reason = ai_detector.update(
+                        bar_data=ai_bar_data,
+                        pnl_pct=position.get_pnl_pct(option_price),
+                        minutes_held=position.get_minutes_held(timestamp),
+                        option_price=option_price,
+                        timestamp=timestamp,
+                    )
+                    ai_signal_data = ai_detector.current_signal
+
+                # Compute Closure-Peak signal flag
+                cp_signal = False
+                if CP_enabled and not np.isnan(rsi_10min_avg) and timestamp.time() >= CP_start_time:
+                    if position.option_type.upper() in ['CALL', 'CALLS', 'C'] and rsi_10min_avg >= CP_rsi_call:
+                        cp_signal = True
+                    elif position.option_type.upper() in ['PUT', 'PUTS', 'P'] and rsi_10min_avg <= CP_rsi_put:
+                        cp_signal = True
+
+                # Record tracking data
+                matrix.add_record(
+                    timestamp=timestamp,
+                    stock_price=stock_price,
+                    option_price=option_price,
+                    volume=volume,
+                    holding=True,
+                    vwap=vwap,
+                    ema_10=ema_10, ema_21=ema_21, ema_50=ema_50, ema_100=ema_100, ema_200=ema_200,
+                    vwap_ema_avg=vwap_ema_avg, emavwap=emavwap,
+                    stock_high=stock_high, stock_low=stock_low,
+                    ewo=ewo, ewo_15min_avg=ewo_15min_avg,
+                    rsi=rsi, rsi_10min_avg=rsi_10min_avg,
+                    supertrend=st_value, supertrend_direction=st_direction,
+                    ichimoku_tenkan=ichi_tenkan, ichimoku_kijun=ichi_kijun,
+                    ichimoku_senkou_a=ichi_senkou_a, ichimoku_senkou_b=ichi_senkou_b,
+                    atr_sl=atr_sl_value,
+                    macd_line=macd_line_val, macd_signal_line=macd_signal_val,
+                    macd_histogram=macd_histogram_val,
+                    roc=roc_val,
+                    risk=risk_level, risk_reasons=risk_reasons, risk_trend=risk_trend,
+                    spy_price=spy_price, spy_gauge=spy_gauge_data, ticker_gauge=ticker_gauge_data,
+                    ai_outlook_1m=ai_signal_data.get('outlook_1m'),
+                    ai_outlook_5m=ai_signal_data.get('outlook_5m'),
+                    ai_outlook_30m=ai_signal_data.get('outlook_30m'),
+                    ai_outlook_1h=ai_signal_data.get('outlook_1h'),
+                    ai_action=ai_signal_data.get('action'),
+                    ai_reason=ai_signal_data.get('reason'),
+                    oe_state=oe_state,
+                    exit_sig_sb=sb_exit, exit_sig_mp=mp_exit,
+                    exit_sig_ai=ai_exit, exit_sig_closure_peak=cp_signal, exit_sig_oe=oe_exit,
+                )
+
+                # === EXIT PRIORITY CHAIN ===
+                if oe_exit and not position.is_closed:
+                    exit_price = option_price * (1 - self.slippage_pct)
+                    position.close(exit_price, timestamp, oe_reason)
+                elif sb_exit and not position.is_closed:
+                    exit_price = option_price * (1 - self.slippage_pct)
+                    position.close(exit_price, timestamp, sb_reason)
+                elif mp_exit and not position.is_closed:
+                    exit_price = option_price * (1 - self.slippage_pct)
+                    position.close(exit_price, timestamp, mp_reason)
+                elif ai_exit and not position.is_closed:
+                    exit_price = option_price * (1 - self.slippage_pct)
+                    position.close(exit_price, timestamp, 'AI Exit Signal')
+                elif CP_enabled and not position.is_closed and not np.isnan(rsi_10min_avg) and timestamp.time() >= CP_start_time:
+                    if position.option_type.upper() in ['CALL', 'CALLS', 'C'] and rsi_10min_avg >= CP_rsi_call:
+                        exit_price = option_price * (1 - self.slippage_pct)
+                        position.close(exit_price, timestamp, 'Closure - Peak')
+                    elif position.option_type.upper() in ['PUT', 'PUTS', 'P'] and rsi_10min_avg <= CP_rsi_put:
+                        exit_price = option_price * (1 - self.slippage_pct)
+                        position.close(exit_price, timestamp, 'Closure - Peak')
+                elif timestamp.time() >= dt.time(15, 55) and not position.is_closed:
+                    exit_price = option_price * (1 - self.slippage_pct)
+                    position.close(exit_price, timestamp, 'Closure-Market')
+            else:
+                # Record tracking data for non-holding periods
+                matrix.add_record(
+                    timestamp=timestamp,
+                    stock_price=stock_price,
+                    option_price=option_price,
+                    volume=volume,
+                    holding=False,
+                    vwap=vwap,
+                    ema_10=ema_10, ema_21=ema_21, ema_50=ema_50, ema_100=ema_100, ema_200=ema_200,
+                    vwap_ema_avg=vwap_ema_avg, emavwap=emavwap,
+                    stock_high=stock_high, stock_low=stock_low,
+                    ewo=ewo, ewo_15min_avg=ewo_15min_avg,
+                    rsi=rsi, rsi_10min_avg=rsi_10min_avg,
+                    supertrend=st_value, supertrend_direction=st_direction,
+                    ichimoku_tenkan=ichi_tenkan, ichimoku_kijun=ichi_kijun,
+                    ichimoku_senkou_a=ichi_senkou_a, ichimoku_senkou_b=ichi_senkou_b,
+                    atr_sl=atr_sl_value,
+                    macd_line=macd_line_val, macd_signal_line=macd_signal_val,
+                    macd_histogram=macd_histogram_val,
+                    roc=roc_val,
+                    spy_price=spy_price, spy_gauge=spy_gauge_data, ticker_gauge=ticker_gauge_data,
+                )
+
+        # Close at end of data if still open
+        if not position.is_closed:
+            exit_price = position.current_price * (1 - self.slippage_pct)
+            position.close(exit_price, stock_data.index[-1], 'Closure-Market')
+
+        # Finalize AI logs
+        if ai_detector and self.ai_strategy and self.ai_strategy.logger is not None:
+            final_pnl = position.get_pnl_pct(position.exit_price) if position.exit_price else np.nan
+            self.ai_strategy.logger.finalize_trade(
+                trade_label=ai_detector.trade_label,
+                exit_reason=position.exit_reason or 'unknown',
+                final_pnl_pct=final_pnl,
+                exit_price=position.exit_price or np.nan,
+            )
+
+        # Log optimal exit data
+        if self.ai_strategy and self.ai_strategy.optimal_logger is not None and matrix.records:
+            final_pnl_pct = position.get_pnl_pct(position.exit_price) if position.exit_price else np.nan
+            self.ai_strategy.optimal_logger.log_trade(
+                databook_records=matrix.records,
+                position_info={
+                    'trade_label': position.get_trade_label(),
+                    'ticker': position.ticker,
+                    'option_type': position.option_type,
+                    'strike': position.strike,
+                    'expiration': position.expiration,
+                    'entry_price': position.entry_price,
+                    'exit_price': position.exit_price,
+                    'exit_reason': position.exit_reason,
+                    'pnl_pct': float(final_pnl_pct) if not np.isnan(final_pnl_pct) else None,
+                },
+            )
+
+    def compile_results(self, signals_df, positions, databooks, statsbooks):
+        """
+        Compile results into the standard output format.
+
+        Returns:
+            dict with keys: Signals, Positions, Databooks, StatsBooks, Summary
+        """
+        signals_copy = signals_df.copy() if signals_df is not None else pd.DataFrame()
+
+        if positions:
+            positions_data = [p.to_dict() for p in positions]
+            positions_df = pd.DataFrame(positions_data)
+            col_order = Config.DATAFRAME_COLUMNS['positions']
+            positions_df = positions_df[[c for c in col_order if c in positions_df.columns]]
+        else:
+            positions_df = pd.DataFrame()
+
+        databook_dfs = {}
+        for label, databook in databooks.items():
+            databook_dfs[label] = databook.to_dataframe()
+
+        summary = self._calculate_summary(positions_df)
+
+        return {
+            'Signals': signals_copy,
+            'Positions': positions_df,
+            'Databooks': databook_dfs,
+            'StatsBooks': dict(statsbooks),
+            'Summary': summary
+        }
+
+    def _calculate_summary(self, positions_df):
+        """Calculate summary statistics."""
+        if positions_df.empty:
+            return {}
+
+        total_trades = len(positions_df)
+        closed_trades = positions_df[positions_df['exit_price'].notna()]
+
+        if closed_trades.empty:
+            return {'total_trades': total_trades, 'closed_trades': 0}
+
+        winners = closed_trades[closed_trades['pnl'] > 0]
+        losers = closed_trades[closed_trades['pnl'] <= 0]
+
+        total_pnl = closed_trades['pnl'].sum()
+        commission_total = total_trades * self.commission_per_contract * self.default_contracts * 2
+
+        positions_df = positions_df.copy()
+        positions_df['position_cost'] = positions_df['entry_price'] * 100 * positions_df['contracts']
+        total_capital_utilized = positions_df['position_cost'].sum()
+
+        max_capital_held = self._calculate_max_capital_held(positions_df)
+
+        capitalized_pnl = (total_pnl + total_capital_utilized) / total_capital_utilized if total_capital_utilized > 0 else 0
+        total_profit_min = closed_trades['profit_min'].sum() if 'profit_min' in closed_trades.columns else 0
+
+        return {
+            'total_trades': total_trades,
+            'closed_trades': len(closed_trades),
+            'winners': len(winners),
+            'losers': len(losers),
+            'win_rate': len(winners) / len(closed_trades) * 100 if len(closed_trades) > 0 else 0,
+            'total_pnl': total_pnl,
+            'net_pnl': total_pnl - commission_total,
+            'commission_total': commission_total,
+            'average_pnl': closed_trades['pnl'].mean() if len(closed_trades) > 0 else 0,
+            'best_trade': closed_trades['pnl'].max() if len(closed_trades) > 0 else 0,
+            'worst_trade': closed_trades['pnl'].min() if len(closed_trades) > 0 else 0,
+            'average_minutes_held': closed_trades['minutes_held'].mean() if len(closed_trades) > 0 else 0,
+            'profit_factor': abs(winners['pnl'].sum() / losers['pnl'].sum()) if len(losers) > 0 and losers['pnl'].sum() != 0 else float('inf'),
+            'exit_reasons': closed_trades['exit_reason'].value_counts().to_dict() if len(closed_trades) > 0 else {},
+            'initial_capital': self.config.get('initial_capital', 10000.0),
+            'total_capital_utilized': total_capital_utilized,
+            'max_capital_held': max_capital_held,
+            'capitalized_pnl': capitalized_pnl,
+            'profit_min': total_profit_min,
+        }
+
+    def _calculate_max_capital_held(self, positions_df):
+        """Calculate maximum capital held at any one time."""
+        if positions_df.empty:
+            return 0.0
+
+        # Vectorized: compute costs and extract times
+        costs = (positions_df['entry_price'] * 100 * positions_df['contracts']).values
+        entry_times = positions_df['entry_time'].values
+        exit_times = positions_df['exit_time'].values
+
+        events = []
+        for i in range(len(costs)):
+            if pd.notna(entry_times[i]):
+                events.append((entry_times[i], costs[i]))
+            if pd.notna(exit_times[i]):
+                events.append((exit_times[i], -costs[i]))
+
+        if not events:
+            return 0.0
+
+        events.sort(key=lambda x: x[0])
+
+        running_capital = 0.0
+        max_capital = 0.0
+
+        for _, amount in events:
+            running_capital += amount
+            if running_capital > max_capital:
+                max_capital = running_capital
+
+        return max_capital
+
+
+# =============================================================================
 # EXTERNAL - Backtest Class (Main Interface)
 # =============================================================================
 
@@ -930,9 +1969,11 @@ class Backtest:
     Orchestrates:
     - Discord message fetching
     - Signal parsing
-    - Historical data retrieval
-    - Position simulation
+    - Historical data retrieval (yfinance)
+    - Position simulation via SimulationEngine
     - Results compilation
+
+    Uses SimulationEngine for shared simulation logic with LiveTest/LiveRerun.
     """
 
     def __init__(self, lookback_days=None, config=None):
@@ -968,6 +2009,9 @@ class Backtest:
             ai_config = self.config.get('ai_exit_signal', {})
             log_dir = ai_config.get('log_dir', 'ai_training_data')
             self.ai_strategy._optimal_logger = AIModel.OptimalExitLogger(log_dir=log_dir)
+
+        # Shared simulation engine
+        self.engine = SimulationEngine(config=self.config, ai_strategy=self.ai_strategy)
 
         # SPY gauge data cache
         self._spy_data = None
@@ -1076,85 +2120,8 @@ class Backtest:
             print(f"    SPY data fetch failed: {e}")
         return None
 
-    def _calculate_gauge(self, data, timestamp):
-        """
-        Calculate price gauge at a given timestamp.
-
-        For each timeframe, compare current price to average price over that lookback.
-        Returns (current_price, gauge_dict).
-        """
-        if data is None or data.empty:
-            return np.nan, {}
-
-        available = data[data.index <= timestamp]
-        if available.empty:
-            return np.nan, {}
-
-        current_price = available['close'].iloc[-1]
-        market_open = timestamp.replace(hour=9, minute=30, second=0, microsecond=0)
-
-        timeframes = self.config.get('spy_gauge', {}).get('timeframes', {})
-        gauge = {}
-
-        for label, minutes in timeframes.items():
-            lookback_start = market_open if minutes == 0 else timestamp - timedelta(minutes=minutes)
-            window = available[(available.index >= lookback_start) & (available.index <= timestamp)]
-            if window.empty or len(window) < 1:
-                gauge[label] = None
-                continue
-            gauge[label] = 'Bullish' if current_price >= window['close'].mean() else 'Bearish'
-
-        return current_price, gauge
-
-    def _assess_risk(self, rsi, rsi_avg, ewo_avg, statsbook, timestamp, signal_time):
-        """
-        Assess risk at entry time.
-
-        Conditions (any TRUE = HIGH risk):
-        1. (RSI + RSI_avg) / 2 > 80
-        2. EWO_avg > Median.Max(EWO) from StatsBook (1m = 5m value / 5)
-        3. Purchase during first 15 minutes of market open (9:30-9:45 EST)
-
-        Returns: (risk_level, reasons_list)
-        """
-        risk_config = self.config.get('risk_assessment', {})
-        if not risk_config.get('enabled', False):
-            return None, None
-
-        reasons = []
-
-        # Condition 1: RSI overbought
-        rsi_threshold = risk_config.get('rsi_overbought_threshold', 80)
-        if not np.isnan(rsi) and not np.isnan(rsi_avg):
-            combined_rsi = (rsi + rsi_avg) / 2
-            if combined_rsi > rsi_threshold:
-                reasons.append(f'RSI({combined_rsi:.0f}>{rsi_threshold})')
-
-        # Condition 2: EWO overbought vs Median.Max(EWO) from StatsBook
-        if risk_config.get('ewo_overbought_enabled', True) and not np.isnan(ewo_avg):
-            if statsbook is not None and not statsbook.empty:
-                try:
-                    # Get Median.Max(EWO) from 5m timeframe, normalize to 1m by dividing by 5
-                    ewo_max_5m = float(statsbook.loc['Median.Max(EWO)', '5m'])
-                    ewo_max_1m = ewo_max_5m / 5
-                    if not np.isnan(ewo_max_1m) and ewo_avg > ewo_max_1m:
-                        reasons.append(f'EWO({ewo_avg:.3f}>{ewo_max_1m:.3f})')
-                except (KeyError, TypeError, ValueError):
-                    pass
-
-        # Condition 3: First 15 minutes of market open
-        open_window = risk_config.get('market_open_window_minutes', 15)
-        market_open = signal_time.replace(hour=9, minute=30, second=0, microsecond=0)
-        market_open_end = market_open + timedelta(minutes=open_window)
-        if market_open <= timestamp <= market_open_end:
-            reasons.append(f'Open({open_window}min)')
-
-        if reasons:
-            return 'HIGH', '|'.join(reasons)
-        return 'NORMAL', None
-
     def _process_signal(self, signal):
-        """Process a single signal through the backtest."""
+        """Process a single signal through the backtest using SimulationEngine."""
         ticker = signal['ticker']
         signal_time = signal['signal_time']
 
@@ -1182,520 +2149,36 @@ class Backtest:
         entry_time = stock_data.index[entry_idx]
         entry_stock_price = entry_bar['close']
 
-        # Get entry option price (use intraday precision for 0DTE)
-        if signal['expiration']:
-            expiry_dt = dt.datetime.combine(
-                signal['expiration'], dt.time(16, 0), tzinfo=EASTERN
-            )
-            days_to_expiry = max(0, (expiry_dt - entry_time).total_seconds() / 86400)
-        else:
-            days_to_expiry = 30
-
-        if signal.get('cost'):
-            entry_option_price = signal.get('cost')
-        else:
-            entry_option_price = Analysis.estimate_option_price_bs(
-                stock_price=entry_stock_price,
-                strike=signal['strike'],
-                option_type=signal['option_type'],
-                days_to_expiry=days_to_expiry
-            )
-
-        entry_option_price *= (1 + self.slippage_pct)
-
-        # Create position
-        position = Position(
+        # Create position via engine
+        position, entry_option_price = self.engine.create_position(
             signal=signal,
-            entry_price=entry_option_price,
-            entry_time=entry_time,
-            contracts=self.default_contracts
+            entry_stock_price=entry_stock_price,
+            entry_time=entry_time
         )
 
         # Create tracking matrix
         matrix = Databook(position)
 
-        # Simulate through all bars
-        self._simulate_position(position, matrix, stock_data, signal, entry_idx, entry_stock_price)
-
-        return position, matrix
-
-    def _simulate_position(self, position, matrix, stock_data, signal, entry_idx, entry_stock_price):
-        """Simulate position through historical data."""
-        # Calculate expiry as a precise datetime (market close at 16:00 ET)
-        # so that 0DTE and intraday options get fractional T instead of T=0
-        if signal['expiration']:
-            expiry_dt = dt.datetime.combine(
-                signal['expiration'], dt.time(16, 0), tzinfo=EASTERN
-            )
-        else:
-            expiry_dt = position.entry_time + dt.timedelta(days=30)
-
-        # Fractional days from entry to expiry (used once for offset calibration)
-        entry_days_to_expiry = max(0, (expiry_dt - position.entry_time).total_seconds() / 86400)
-
-        # Get indicator settings from config
-        indicator_config = self.config.get('indicators', {})
-        ema_periods = indicator_config.get('ema_periods', [10, 21, 50, 100, 200])
-
-        # Get supertrend settings from config
-        supertrend_period = indicator_config.get('supertrend_period', 10)
-        supertrend_multiplier = indicator_config.get('supertrend_multiplier', 3.0)
-
-        # Get ichimoku settings from config
-        ichimoku_tenkan = indicator_config.get('ichimoku_tenkan', 9)
-        ichimoku_kijun = indicator_config.get('ichimoku_kijun', 26)
-        ichimoku_senkou_b = indicator_config.get('ichimoku_senkou_b', 52)
-        ichimoku_displacement = indicator_config.get('ichimoku_displacement', 26)
-
-        # Get ATR-SL settings from config
-        atr_sl_period = indicator_config.get('atr_sl_period', 5)
-        atr_sl_hhv = indicator_config.get('atr_sl_hhv', 10)
-        atr_sl_multiplier = indicator_config.get('atr_sl_multiplier', 2.5)
-
-        # Get MACD and ROC settings from options_exit config for add_indicators
-        oe_config = self.config.get('options_exit', {})
-        macd_fast = oe_config.get('macd_fast', 12)
-        macd_slow = oe_config.get('macd_slow', 26)
-        macd_signal_period = oe_config.get('macd_signal', 9)
-        roc_period = oe_config.get('roc_period', 30)
-
-        # Add technical indicators to stock data
-        stock_data = Analysis.add_indicators(stock_data, ema_periods=ema_periods,
-                                             supertrend_period=supertrend_period,
-                                             supertrend_multiplier=supertrend_multiplier,
-                                             ichimoku_tenkan=ichimoku_tenkan,
-                                             ichimoku_kijun=ichimoku_kijun,
-                                             ichimoku_senkou_b=ichimoku_senkou_b,
-                                             ichimoku_displacement=ichimoku_displacement,
-                                             atr_sl_period=atr_sl_period,
-                                             atr_sl_hhv=atr_sl_hhv,
-                                             atr_sl_multiplier=atr_sl_multiplier,
-                                             macd_fast=macd_fast,
-                                             macd_slow=macd_slow,
-                                             macd_signal=macd_signal_period,
-                                             roc_period=roc_period)
-
-        # Get Momentum Peak settings from config
-        mp_strategy = Strategy.MomentumPeak(self.config.get('momentum_peak', {}))
-        mp_detector = mp_strategy.create_detector()
-
-        # Get StatsBook Exit settings from config
-        sb_strategy = Strategy.StatsBookExit(self.config.get('statsbook_exit', {}))
-        sb_detector = sb_strategy.create_detector(self.statsbooks.get(position.ticker))
-
-        # Get AI Exit Signal detector for this position
-        ai_detector = self.ai_strategy.create_detector(
-            ticker=position.ticker,
-            option_type=position.option_type,
-            strike=position.strike,
-        )
-
-        # Get Options Exit System (primary TP/SL) settings from config
-        oe_strategy = Strategy.OptionsExit(self.config.get('options_exit', {}))
-        oe_detector = oe_strategy.create_detector(position.entry_price, position.option_type)
-        oe_favorability_assessed = False
-
-        # Get Closure - Peak settings from config
-        CP_config = self.config.get('closure_peak', {})
-        CP_enabled = CP_config.get('enabled', True)
-        CP_rsi_call = CP_config.get('rsi_call_threshold', 87)
-        CP_rsi_put = CP_config.get('rsi_put_threshold', 13)
-        CP_minutes = CP_config.get('minutes_before_close', 30)
-        # Calculate closure window start time (e.g., 15:30 for 30 mins before 16:00)
-        CP_start_hour = 15
-        CP_start_minute = 60 - CP_minutes
-        CP_start_time = dt.time(CP_start_hour, CP_start_minute)
-
-        # Risk assessment state
-        risk_level = None
-        risk_reasons = None
-        risk_trend = None
-        risk_assessed = False
-        risk_config = self.config.get('risk_assessment', {})
-        risk_enabled = risk_config.get('enabled', False)
-        risk_downtrend_delay_min = risk_config.get('downtrend_delay_minutes', 5)
-        risk_downtrend_bars = risk_config.get('downtrend_monitor_bars', 3)
-        risk_downtrend_drop_pct = risk_config.get('downtrend_drop_pct', 10)
-        risk_downtrend_reason = risk_config.get('downtrend_exit_reason', 'DownTrend-SL')
-        risk_negative_bar_count = 0  # Consecutive negative bars after entry for HIGH risk
-
         # Fetch SPY data for this signal's trading day
         spy_data = self._fetch_spy_data(signal['signal_time'])
 
-        max_vwap_ema_avg = np.nan  # Running max of (VWAP+EMA+High)/3
+        # Simulate through all bars using shared engine
+        self.engine.simulate_position(
+            position=position,
+            matrix=matrix,
+            stock_data=stock_data,
+            signal=signal,
+            entry_idx=entry_idx,
+            entry_stock_price=entry_stock_price,
+            statsbooks=self.statsbooks,
+            spy_data=spy_data,
+        )
 
-        for i, (timestamp, bar) in enumerate(stock_data.iterrows()):
-            stock_price = bar['close']
-            stock_high = bar.get('high', stock_price)
-            stock_low = bar.get('low', stock_price)
-            volume = bar.get('volume', 0)
-
-            # Get indicator values for this bar
-            vwap = bar.get('vwap', np.nan)
-            ema_10 = bar.get('ema_10', np.nan)
-            ema_21 = bar.get('ema_21', np.nan)
-            ema_50 = bar.get('ema_50', np.nan)
-            ema_100 = bar.get('ema_100', np.nan)
-            ema_200 = bar.get('ema_200', np.nan)
-            current_vwap_ema_avg = bar.get('vwap_ema_avg', np.nan)
-
-            # Track running max of (VWAP+EMA+High)/3
-            if not np.isnan(current_vwap_ema_avg):
-                if np.isnan(max_vwap_ema_avg):
-                    max_vwap_ema_avg = current_vwap_ema_avg
-                else:
-                    max_vwap_ema_avg = max(max_vwap_ema_avg, current_vwap_ema_avg)
-            vwap_ema_avg = max_vwap_ema_avg
-            emavwap = bar.get('emavwap', np.nan)
-            ewo = bar.get('ewo', np.nan)
-            ewo_15min_avg = bar.get('ewo_15min_avg', np.nan)
-            rsi = bar.get('rsi', np.nan)
-            rsi_10min_avg = bar.get('rsi_10min_avg', np.nan)
-            st_value = bar.get('supertrend', np.nan)
-            st_direction = bar.get('supertrend_direction', np.nan)
-            ichi_tenkan = bar.get('ichimoku_tenkan', np.nan)
-            ichi_kijun = bar.get('ichimoku_kijun', np.nan)
-            ichi_senkou_a = bar.get('ichimoku_senkou_a', np.nan)
-            ichi_senkou_b = bar.get('ichimoku_senkou_b', np.nan)
-            atr_sl_value = bar.get('atr_sl', np.nan)
-            macd_line_val = bar.get('macd_line', np.nan)
-            macd_signal_val = bar.get('macd_signal', np.nan)
-            macd_histogram_val = bar.get('macd_histogram', np.nan)
-            roc_val = bar.get('roc', np.nan)
-
-            current_days_to_expiry = max(0, (expiry_dt - timestamp).total_seconds() / 86400)
-
-            # Estimate option price
-            option_price = Analysis.estimate_option_price_bs(
-                stock_price=stock_price,
-                strike=position.strike,
-                option_type=position.option_type,
-                days_to_expiry=current_days_to_expiry,
-                entry_price=position.entry_price,
-                entry_stock_price=entry_stock_price,
-                entry_days_to_expiry=entry_days_to_expiry
-            )
-
-            # Determine holding status
-            is_pre_entry = i < entry_idx
-            is_post_exit = position.is_closed
-            holding = not is_pre_entry and not is_post_exit
-
-            # Track max price from entry to end of market day (even after exit)
-            if not is_pre_entry:
-                position.update_eod_price(option_price)
-
-            # Calculate SPY and ticker gauges for current bar
-            spy_price, spy_gauge_data = self._calculate_gauge(spy_data, timestamp)
-            _, ticker_gauge_data = self._calculate_gauge(stock_data, timestamp)
-
-            # --- Shared indicator kwargs for add_record (holding + non-holding) ---
-            indicator_kwargs = dict(
-                vwap=vwap, ema_10=ema_10, ema_21=ema_21, ema_50=ema_50,
-                ema_100=ema_100, ema_200=ema_200, vwap_ema_avg=vwap_ema_avg,
-                emavwap=emavwap, stock_high=stock_high, stock_low=stock_low,
-                ewo=ewo, ewo_15min_avg=ewo_15min_avg, rsi=rsi,
-                rsi_10min_avg=rsi_10min_avg, supertrend=st_value,
-                supertrend_direction=st_direction,
-                ichimoku_tenkan=ichi_tenkan, ichimoku_kijun=ichi_kijun,
-                ichimoku_senkou_a=ichi_senkou_a, ichimoku_senkou_b=ichi_senkou_b,
-                atr_sl=atr_sl_value,
-                macd_line=macd_line_val, macd_signal_line=macd_signal_val,
-                macd_histogram=macd_histogram_val, roc=roc_val,
-                spy_price=spy_price, spy_gauge=spy_gauge_data,
-                ticker_gauge=ticker_gauge_data,
-            )
-
-            if holding:
-                position.update(timestamp, option_price, stock_price)
-
-                # --- Risk Assessment (once at entry) ---
-                if not risk_assessed and risk_enabled:
-                    risk_assessed = True
-                    risk_level, risk_reasons = self._assess_risk(
-                        rsi, rsi_10min_avg, ewo_15min_avg,
-                        self.statsbooks.get(position.ticker),
-                        timestamp, signal['signal_time']
-                    )
-                    if risk_level == 'HIGH':
-                        print(f"    RISK: HIGH [{risk_reasons}]")
-
-                # --- Options Exit: RiskOutlook (once at entry) ---
-                oe_state = {}
-                oe_exit = False
-                oe_reason = None
-                ema_vals = {10: ema_10, 21: ema_21, 50: ema_50, 100: ema_100, 200: ema_200}
-                if oe_detector and not oe_favorability_assessed:
-                    oe_favorability_assessed = True
-                    open_price = stock_data.iloc[0]['close']
-                    roc_day = ((stock_price - open_price) / open_price) * 100 if open_price > 0 else np.nan
-                    fav_level, fav_reasons = oe_detector.RiskOutlook(
-                        rsi=rsi, rsi_avg=rsi_10min_avg, ema_values=ema_vals,
-                        stock_price=stock_price, atr_sl_value=atr_sl_value,
-                        macd_histogram=macd_histogram_val, roc_30m=roc_val,
-                        roc_day=roc_day, supertrend_direction=st_direction,
-                        ewo=ewo, ewo_avg=ewo_15min_avg,
-                    )
-                    if risk_level == 'HIGH':
-                        oe_detector.is_high_risk = True
-                    if fav_level == 'HIGH':
-                        print(f"    RISK OUTLOOK: HIGH [{fav_reasons}]")
-
-                # --- Options Exit: Per-bar update (hard SL + trailing SL + reversal) ---
-                if oe_detector and not position.is_closed:
-                    oe_exit, oe_reason, oe_state = oe_detector.update(
-                        option_price=option_price, stock_price=stock_price,
-                        ema_values=ema_vals,
-                    )
-
-                # --- Risk trend monitoring (only for HIGH risk trades, after delay) ---
-                if risk_level == 'HIGH' and not position.is_closed and position.get_minutes_held(timestamp) >= risk_downtrend_delay_min:
-                    pnl_pct_now = position.get_pnl_pct(option_price)
-                    risk_trend = 'Uptrend' if option_price >= position.entry_price else 'Downtrend'
-
-                    if risk_trend == 'Downtrend':
-                        risk_negative_bar_count = risk_negative_bar_count + 1 if pnl_pct_now < 0 else 0
-                        if not position.is_closed:
-                            if risk_negative_bar_count >= risk_downtrend_bars or pnl_pct_now <= -risk_downtrend_drop_pct:
-                                exit_price = option_price * (1 - self.slippage_pct)
-                                position.close(exit_price, timestamp, risk_downtrend_reason)
-
-                # Update exit signal detectors
-                mp_exit, mp_reason = (False, None)
-                sb_exit, sb_reason = (False, None)
-                ai_exit, ai_reason = (False, None)
-                ai_signal_data = {}
-
-                if mp_detector and not position.is_closed:
-                    mp_exit, mp_reason = mp_detector.update(
-                        position.get_pnl_pct(option_price), rsi, rsi_10min_avg, ewo)
-
-                if sb_detector and not position.is_closed:
-                    sb_exit, sb_reason = sb_detector.update(
-                        position.get_pnl_pct(option_price), ewo, stock_high, stock_low)
-
-                if ai_detector and not position.is_closed:
-                    ai_bar_data = {
-                        'stock_price': stock_price, 'stock_high': stock_high,
-                        'stock_low': stock_low,
-                        'true_price': Analysis.true_price(stock_price, stock_high, stock_low),
-                        'volume': volume, 'option_price': option_price,
-                        'pnl_pct': position.get_pnl_pct(option_price),
-                        'vwap': vwap, 'ema_21': ema_21, 'ewo': ewo,
-                        'ewo_15min_avg': ewo_15min_avg, 'rsi': rsi,
-                        'rsi_10min_avg': rsi_10min_avg,
-                        'supertrend_direction': st_direction,
-                        'market_bias': matrix.records[-1]['market_bias'] if matrix.records else np.nan,
-                        'ichimoku_tenkan': ichi_tenkan, 'ichimoku_kijun': ichi_kijun,
-                        'ichimoku_senkou_a': ichi_senkou_a,
-                        'ichimoku_senkou_b': ichi_senkou_b,
-                    }
-                    ai_exit, ai_reason = ai_detector.update(
-                        bar_data=ai_bar_data, pnl_pct=position.get_pnl_pct(option_price),
-                        minutes_held=position.get_minutes_held(timestamp),
-                        option_price=option_price, timestamp=timestamp,
-                    )
-                    ai_signal_data = ai_detector.current_signal
-
-                # Compute Closure-Peak signal flag (last 30 min RSI-based)
-                cp_signal = False
-                if CP_enabled and not np.isnan(rsi_10min_avg) and timestamp.time() >= CP_start_time:
-                    if position.option_type.upper() in ['CALL', 'CALLS', 'C'] and rsi_10min_avg >= CP_rsi_call:
-                        cp_signal = True
-                    elif position.option_type.upper() in ['PUT', 'PUTS', 'P'] and rsi_10min_avg <= CP_rsi_put:
-                        cp_signal = True
-
-                # Record tracking data
-                matrix.add_record(
-                    timestamp=timestamp, stock_price=stock_price,
-                    option_price=option_price, volume=volume, holding=True,
-                    risk=risk_level, risk_reasons=risk_reasons, risk_trend=risk_trend,
-                    ai_outlook_1m=ai_signal_data.get('outlook_1m'),
-                    ai_outlook_5m=ai_signal_data.get('outlook_5m'),
-                    ai_outlook_30m=ai_signal_data.get('outlook_30m'),
-                    ai_outlook_1h=ai_signal_data.get('outlook_1h'),
-                    ai_action=ai_signal_data.get('action'),
-                    ai_reason=ai_signal_data.get('reason'),
-                    oe_state=oe_state,
-                    exit_sig_sb=sb_exit, exit_sig_mp=mp_exit,
-                    exit_sig_ai=ai_exit, exit_sig_closure_peak=cp_signal,
-                    exit_sig_oe=oe_exit,
-                    **indicator_kwargs,
-                )
-
-                # === EXIT PRIORITY CHAIN ===
-                exit_candidates = [
-                    (oe_exit, oe_reason),
-                    (sb_exit, sb_reason),
-                    (mp_exit, mp_reason),
-                    (ai_exit, 'AI Exit Signal'),
-                    (cp_signal, 'Closure - Peak'),
-                    (timestamp.time() >= dt.time(15, 55), 'Closure-Market'),
-                ]
-                if not position.is_closed:
-                    for should_exit, reason in exit_candidates:
-                        if should_exit:
-                            exit_price = option_price * (1 - self.slippage_pct)
-                            position.close(exit_price, timestamp, reason)
-                            break
-            else:
-                # Non-holding period (pre-entry or post-exit)
-                matrix.add_record(
-                    timestamp=timestamp, stock_price=stock_price,
-                    option_price=option_price, volume=volume, holding=False,
-                    **indicator_kwargs,
-                )
-
-        # Close at end of data if still open
-        if not position.is_closed:
-            exit_price = position.current_price * (1 - self.slippage_pct)
-            position.close(exit_price, stock_data.index[-1], 'Closure-Market')
-
-        # Finalize AI inference log with trade outcome
-        if ai_detector and self.ai_strategy.logger is not None:
-            final_pnl = position.get_pnl_pct(position.exit_price) if position.exit_price else np.nan
-            self.ai_strategy.logger.finalize_trade(
-                trade_label=ai_detector.trade_label,
-                exit_reason=position.exit_reason or 'unknown',
-                final_pnl_pct=final_pnl,
-                exit_price=position.exit_price or np.nan,
-            )
-
-        # Log optimal exit data (runs every backtest, even without AI model)
-        if self.ai_strategy.optimal_logger is not None and matrix.records:
-            final_pnl_pct = position.get_pnl_pct(position.exit_price) if position.exit_price else np.nan
-            self.ai_strategy.optimal_logger.log_trade(
-                databook_records=matrix.records,
-                position_info={
-                    'trade_label': position.get_trade_label(),
-                    'ticker': position.ticker,
-                    'option_type': position.option_type,
-                    'strike': position.strike,
-                    'expiration': position.expiration,
-                    'entry_price': position.entry_price,
-                    'exit_price': position.exit_price,
-                    'exit_reason': position.exit_reason,
-                    'pnl_pct': float(final_pnl_pct) if not np.isnan(final_pnl_pct) else None,
-                },
-            )
+        return position, matrix
 
     def _compile_results(self):
-        """Compile backtest results into DataFrames."""
-        signals_df = self.signals_df.copy() if self.signals_df is not None else pd.DataFrame()
-
-        if self.positions:
-            positions_data = [p.to_dict() for p in self.positions]
-            positions_df = pd.DataFrame(positions_data)
-            # Reorder columns per Config source of truth
-            col_order = Config.DATAFRAME_COLUMNS['positions']
-            positions_df = positions_df[[c for c in col_order if c in positions_df.columns]]
-        else:
-            positions_df = pd.DataFrame()
-
-        databooks = {}
-        for label, databook in self.databooks.items():
-            databooks[label] = databook.to_dataframe()
-
-        summary = self._calculate_summary(positions_df)
-
-        return {
-            'Signals': signals_df,
-            'Positions': positions_df,
-            'Databooks': databooks,
-            'StatsBooks': dict(self.statsbooks),
-            'Summary': summary
-        }
-
-    def _calculate_summary(self, positions_df):
-        """Calculate summary statistics."""
-        if positions_df.empty:
-            return {}
-
-        total_trades = len(positions_df)
-        closed_trades = positions_df[positions_df['exit_price'].notna()]
-
-        if closed_trades.empty:
-            return {'total_trades': total_trades, 'closed_trades': 0}
-
-        winners = closed_trades[closed_trades['pnl'] > 0]
-        losers = closed_trades[closed_trades['pnl'] <= 0]
-
-        total_pnl = closed_trades['pnl'].sum()
-        commission_total = total_trades * self.commission_per_contract * self.default_contracts * 2
-        net_pnl = total_pnl - commission_total
-
-        # Calculate capital metrics
-        # Capital per position = entry_price * 100 (option multiplier) * contracts
-        positions_df['position_cost'] = positions_df['entry_price'] * 100 * positions_df['contracts']
-        total_capital_utilized = positions_df['position_cost'].sum()
-
-        # Calculate max capital held at any one time (considering overlapping positions)
-        max_capital_held = self._calculate_max_capital_held(positions_df)
-
-        # Calculate Capitalized P&L: (Total P&L + Capital Utilized) / Capital Utilized
-        capitalized_pnl = (total_pnl + total_capital_utilized) / total_capital_utilized if total_capital_utilized > 0 else 0
-
-        # Calculate Profit[min] - sum of P&L at worst stop loss point for all trades
-        total_profit_min = closed_trades['profit_min'].sum() if 'profit_min' in closed_trades.columns else 0
-
-        return {
-            'total_trades': total_trades,
-            'closed_trades': len(closed_trades),
-            'winners': len(winners),
-            'losers': len(losers),
-            'win_rate': len(winners) / len(closed_trades) * 100 if len(closed_trades) > 0 else 0,
-            'total_pnl': total_pnl,
-            'net_pnl': net_pnl,
-            'commission_total': commission_total,
-            'average_pnl': closed_trades['pnl'].mean() if len(closed_trades) > 0 else 0,
-            'best_trade': closed_trades['pnl'].max() if len(closed_trades) > 0 else 0,
-            'worst_trade': closed_trades['pnl'].min() if len(closed_trades) > 0 else 0,
-            'average_minutes_held': closed_trades['minutes_held'].mean() if len(closed_trades) > 0 else 0,
-            'profit_factor': abs(winners['pnl'].sum() / losers['pnl'].sum()) if len(losers) > 0 and losers['pnl'].sum() != 0 else float('inf'),
-            'exit_reasons': closed_trades['exit_reason'].value_counts().to_dict() if len(closed_trades) > 0 else {},
-            'initial_capital': self.initial_capital,
-            'total_capital_utilized': total_capital_utilized,
-            'max_capital_held': max_capital_held,
-            'capitalized_pnl': capitalized_pnl,
-            'profit_min': total_profit_min
-        }
-
-    def _calculate_max_capital_held(self, positions_df):
-        """
-        Calculate maximum capital held at any one time.
-
-        Tracks overlapping positions to find peak capital usage.
-        """
-        if positions_df.empty:
-            return 0.0
-
-        # Create events list: (+cost at entry, -cost at exit)
-        events = []
-        for _, row in positions_df.iterrows():
-            cost = row['entry_price'] * 100 * row['contracts']
-            entry_time = row['entry_time']
-            exit_time = row['exit_time']
-
-            if pd.notna(entry_time):
-                events.append((entry_time, cost))  # Add capital at entry
-            if pd.notna(exit_time):
-                events.append((exit_time, -cost))  # Release capital at exit
-
-        if not events:
-            return 0.0
-
-        # Sort events by time
-        events.sort(key=lambda x: x[0])
-
-        # Track running capital and find maximum
-        running_capital = 0.0
-        max_capital = 0.0
-
-        for _, amount in events:
-            running_capital += amount
-            max_capital = max(max_capital, running_capital)
-
-        return max_capital
+        """Compile backtest results via SimulationEngine."""
+        return self.engine.compile_results(self.signals_df, self.positions, self.databooks, self.statsbooks)
 
     def _empty_results(self):
         """Return empty results structure."""
@@ -1810,6 +2293,1109 @@ class Backtest:
         except Exception as e:
             print(f"Error saving backtest results: {e}")
             return False
+
+
+# =============================================================================
+# EXTERNAL - LiveTest Class (Live Data Collection + Real-time Simulation)
+# =============================================================================
+
+class LiveTest:
+    """
+    Live testing engine - collects real-time data via Robinhood webscraping
+    and applies the same exit strategies as Backtest.
+
+    Shares SimulationEngine with Backtest for identical simulation logic.
+
+    Architecture:
+    1. Discord signals arrive (same as Backtest)
+    2. RobinhoodScraper collects live stock + option prices each cycle
+    3. Data is accumulated into DataFrames (1-min bars)
+    4. SimulationEngine processes bars with all exit strategies
+    5. DataBook/DataSummary/DataStats are updated each cycle
+
+    Output: Three signal-based DataFrames:
+    - DataBook:    Full tick-level stock + option data per signal
+    - DataSummary: 2-minute aggregated summary for dashboard
+    - DataStats:   Per-signal trade statistics
+
+    Usage:
+        lt = LiveTest()
+        lt.start()
+        # Runs continuously until market close or manual stop
+        lt.stop()
+        lt.summary()
+        lt.save()
+    """
+
+    def __init__(self, config=None):
+        self.config = config or Config.get_config('backtest').copy()
+        live_config = Config.get_config('live')
+        self.cycle_interval = live_config.get('cycle_interval_seconds', 60)
+        self.data_dir = live_config.get('data_dir', 'live_data')
+        self.summary_interval = live_config.get('summary_interval_minutes', 2)
+        self.auto_save_interval = live_config.get('auto_save_interval', 5)
+
+        self.initial_capital = self.config.get('initial_capital', 10000.0)
+        self.slippage_pct = self.config.get('slippage_pct', 0.001)
+        self.default_contracts = self.config.get('default_contracts', 1)
+
+        # Initialize AI strategy (same as Backtest)
+        import AIModel
+        ai_config = self.config.get('ai_exit_signal', {})
+        self.ai_strategy = AIModel.AIExitSignal(ai_config)
+        if self.ai_strategy.enabled:
+            self.ai_strategy.load_model()
+        else:
+            log_dir = ai_config.get('log_dir', 'ai_training_data')
+            self.ai_strategy._optimal_logger = AIModel.OptimalExitLogger(log_dir=log_dir)
+
+        # Shared simulation engine
+        self.engine = SimulationEngine(config=self.config, ai_strategy=self.ai_strategy)
+
+        # Data fetchers
+        from Data import RobinhoodScraper, LiveDataFetcher
+        self.scraper = RobinhoodScraper()
+        self.live_fetcher = LiveDataFetcher(scraper=self.scraper)
+
+        # Discord + Signal parsing (same as Backtest)
+        self.discord_fetcher = DiscordFetcher()
+        self.signal_parser = SignalParser()
+        self.data_fetcher = HistoricalDataFetcher()  # For SPY data
+
+        # StatsBook builder
+        self.statsbook_builder = StatsBook()
+
+        # Results storage (signal-based)
+        self.signals = {}          # signal_id -> signal dict
+        self.positions = {}        # signal_id -> Position
+        self.databooks = {}        # signal_id -> Databook
+        self.statsbooks = {}       # ticker -> statsbook DataFrame
+
+        # Live data accumulation (per ticker, deduplicated)
+        self._stock_bars = {}      # ticker -> list of bar dicts
+        self._option_bars = {}     # signal_id -> list of bar dicts
+        self._stock_df_cache = {}  # ticker -> (len_at_build, DataFrame) cached stock DFs
+
+        # Per-signal incremental simulation state (avoids O(n^2) full re-simulation)
+        self._signal_detectors = {}  # signal_id -> dict of detectors and state
+        self._signal_last_bar = {}   # signal_id -> last processed bar index
+
+        # Three output dataframes
+        self.data_book = DataSummary(interval_minutes=1)    # Full 1-min data (uses DataSummary container but 1-min interval)
+        self.data_summary = DataSummary(interval_minutes=self.summary_interval)
+        self.data_stats = DataStats()
+
+        # Control
+        self._running = False
+        self._cycle_count = 0
+        self._start_time = None
+        self._spy_data = None
+
+    def start(self):
+        """
+        Start live testing session.
+
+        1. Authenticate with Robinhood
+        2. Fetch initial Discord signals
+        3. Begin collection cycle loop
+        """
+        import os
+        os.makedirs(self.data_dir, exist_ok=True)
+
+        print(f"\n{'='*60}")
+        print("LIVE TEST - Starting")
+        print(f"{'='*60}")
+        print(f"  Cycle interval: {self.cycle_interval}s")
+        print(f"  Data directory: {self.data_dir}")
+
+        # Authenticate
+        self.live_fetcher.start()
+        self._running = True
+        self._start_time = dt.datetime.now(EASTERN)
+
+        # Fetch and parse initial signals
+        self._fetch_signals()
+
+        if not self.signals:
+            print("  No signals found. Waiting for signals...")
+
+        # Main loop
+        try:
+            self._run_loop()
+        except KeyboardInterrupt:
+            print("\n  Interrupted by user")
+        finally:
+            self.stop()
+
+    def _fetch_signals(self):
+        """Fetch Discord signals (same logic as Backtest step 1+2)."""
+        print("  Fetching Discord signals...")
+        messages = self.discord_fetcher.fetch_messages_for_days(days=1)
+
+        if messages is None or messages.empty:
+            print("  No Discord messages found")
+            return
+
+        signals_df = self.signal_parser.parse_all_messages(messages)
+        if signals_df is None or signals_df.empty:
+            print("  No valid signals parsed")
+            return
+
+        # Register each signal
+        for _, signal in signals_df.iterrows():
+            signal_dict = signal.to_dict()
+            signal_id = f"{signal_dict['ticker']}:{signal_dict['strike']}:{signal_dict['option_type']}:{signal_dict.get('message_id', '')}"
+            signal_dict['signal_id'] = signal_id
+
+            if signal_id not in self.signals:
+                self.signals[signal_id] = signal_dict
+
+                # Build StatsBook for ticker if not already done
+                ticker = signal_dict['ticker']
+                if ticker not in self.statsbooks:
+                    print(f"  Building StatsBook for {ticker}...")
+                    self.statsbooks[ticker] = self.statsbook_builder.build(ticker)
+
+                # Add to live fetcher for data collection
+                self.live_fetcher.add_signal(signal_dict)
+
+                # Initialize position and databook
+                print(f"  Registered signal: {signal_id}")
+
+        print(f"  {len(self.signals)} signals active")
+
+    def _run_loop(self):
+        """Main collection + simulation cycle loop."""
+        market_close = dt.time(16, 0)
+
+        while self._running:
+            now = dt.datetime.now(EASTERN)
+
+            # Check market hours (stop after 4:00 PM ET)
+            if now.time() >= market_close:
+                print(f"\n  Market closed at {now.strftime('%H:%M:%S')}")
+                break
+
+            self._cycle_count += 1
+            cycle_start = time.time()
+
+            # Collect live data
+            cycle_data = self.live_fetcher.collect_cycle()
+
+            # Process collected data
+            self._process_cycle(cycle_data)
+
+            # Auto-save periodically
+            if self._cycle_count % self.auto_save_interval == 0:
+                self._auto_save()
+
+            # Print cycle status
+            cycle_ms = (time.time() - cycle_start) * 1000
+            active_count = sum(1 for p in self.positions.values() if not p.is_closed)
+            print(f"  Cycle {self._cycle_count}: {cycle_ms:.0f}ms | "
+                  f"Active: {active_count} | "
+                  f"Data: {cycle_data.get('cycle_time_ms', 0):.0f}ms | "
+                  f"{now.strftime('%H:%M:%S')}")
+
+            # Wait for next cycle
+            elapsed = time.time() - cycle_start
+            sleep_time = max(0, self.cycle_interval - elapsed)
+            if sleep_time > 0 and self._running:
+                time.sleep(sleep_time)
+
+    def _process_cycle(self, cycle_data):
+        """
+        Process one data collection cycle (incremental).
+
+        Instead of re-running full simulation from bar 0, we:
+        1. Accumulate new bar data
+        2. Rebuild indicators on the full stock DataFrame (required for rolling indicators)
+        3. Only process the NEW bar through the per-bar simulation logic
+        4. Update DataSummary incrementally (only new interval if completed)
+
+        This reduces per-cycle cost from O(n) to O(1) for the simulation loop.
+        """
+        stock_quotes = cycle_data.get('stock_quotes', {})
+        option_quotes = cycle_data.get('option_quotes', {})
+        timestamp = cycle_data.get('timestamp', dt.datetime.now(EASTERN))
+
+        for signal_id, signal in self.signals.items():
+            ticker = signal['ticker']
+
+            # Get stock data (deduplicated)
+            stock_quote = stock_quotes.get(ticker)
+            option_quote = option_quotes.get(signal_id)
+
+            if not stock_quote:
+                continue
+
+            stock_price = stock_quote['price']
+            stock_high = stock_quote.get('high', stock_price)
+            stock_low = stock_quote.get('low', stock_price)
+            volume = stock_quote.get('volume', 0)
+
+            # Accumulate stock bar
+            if ticker not in self._stock_bars:
+                self._stock_bars[ticker] = []
+            self._stock_bars[ticker].append({
+                'timestamp': timestamp,
+                'open': stock_quote.get('open', stock_price),
+                'high': stock_high,
+                'low': stock_low,
+                'close': stock_price,
+                'volume': volume,
+            })
+
+            # Get option price (live from RH, or fallback to BS)
+            if option_quote:
+                option_price = option_quote.get('mark_price', 0)
+            else:
+                # Fallback to Black-Scholes estimation
+                if signal.get('expiration'):
+                    expiry_dt = dt.datetime.combine(
+                        signal['expiration'], dt.time(16, 0), tzinfo=EASTERN
+                    )
+                    days_to_expiry = max(0, (expiry_dt - timestamp).total_seconds() / 86400)
+                else:
+                    days_to_expiry = 30
+
+                option_price = Analysis.estimate_option_price_bs(
+                    stock_price=stock_price,
+                    strike=signal['strike'],
+                    option_type=signal['option_type'],
+                    days_to_expiry=days_to_expiry
+                )
+
+            # Accumulate option bar
+            if signal_id not in self._option_bars:
+                self._option_bars[signal_id] = []
+            self._option_bars[signal_id].append({
+                'timestamp': timestamp,
+                'mark_price': option_price,
+                'bid': option_quote.get('bid', 0) if option_quote else 0,
+                'ask': option_quote.get('ask', 0) if option_quote else 0,
+                'iv': option_quote.get('implied_volatility', 0) if option_quote else 0,
+                'delta': option_quote.get('delta', 0) if option_quote else 0,
+                'volume': option_quote.get('volume', 0) if option_quote else 0,
+            })
+
+            # Create position on first data point (if not already created)
+            if signal_id not in self.positions:
+                entry_price = signal.get('cost', option_price)
+                if entry_price and entry_price > 0:
+                    position, _ = self.engine.create_position(
+                        signal=signal,
+                        entry_stock_price=stock_price,
+                        entry_time=timestamp,
+                        entry_option_price=entry_price
+                    )
+                    self.positions[signal_id] = position
+                    self.databooks[signal_id] = Databook(position)
+                    self._signal_last_bar[signal_id] = -1  # No bars processed yet
+                    print(f"    Position opened: {signal_id} @ ${entry_price:.2f}")
+
+            # Update position if open
+            position = self.positions.get(signal_id)
+            if position and not position.is_closed:
+                # Build stock DataFrame with indicators (cached, only rebuilt when new bars added)
+                stock_df = self._build_stock_dataframe(ticker)
+                if stock_df is not None and len(stock_df) >= 2:
+                    matrix = self.databooks[signal_id]
+
+                    # Initialize detectors if first time
+                    if signal_id not in self._signal_detectors:
+                        self._init_signal_detectors(signal_id, signal, position, stock_df)
+
+                    # Process ONLY the new bar (incremental)
+                    last_bar = self._signal_last_bar.get(signal_id, -1)
+                    new_bar_idx = len(stock_df) - 1
+
+                    if new_bar_idx > last_bar:
+                        # Fetch SPY data (cached)
+                        spy_data = self._fetch_spy_data(timestamp)
+
+                        # Process the new bar through incremental simulation
+                        self._process_new_bar(
+                            signal_id=signal_id,
+                            signal=signal,
+                            position=position,
+                            matrix=matrix,
+                            stock_df=stock_df,
+                            bar_idx=new_bar_idx,
+                            option_price=option_price,
+                            spy_data=spy_data,
+                        )
+                        self._signal_last_bar[signal_id] = new_bar_idx
+
+                    # Update DataStats (lightweight, just updates the record)
+                    self.data_stats.record(signal_id, position, data_source='live',
+                                          bars_recorded=len(matrix.records))
+
+                    if position.is_closed:
+                        # Final DataSummary update on close
+                        db_df = matrix.to_dataframe()
+                        self.data_summary.update_from_databook(signal_id, db_df)
+                        self.data_stats.update_from_databook(signal_id, db_df)
+                        print(f"    Position closed: {signal_id} | "
+                              f"Reason: {position.exit_reason} | "
+                              f"PnL: {position.get_pnl_pct(position.exit_price):+.1f}%")
+
+        # Periodic DataSummary rebuild (every summary_interval cycles, not every cycle)
+        if self._cycle_count % self.summary_interval == 0:
+            for sig_id, db in self.databooks.items():
+                db_df = db.to_dataframe()
+                self.data_summary.update_from_databook(sig_id, db_df)
+
+    def _init_signal_detectors(self, signal_id, signal, position, stock_df):
+        """Initialize per-signal strategy detectors (once per signal)."""
+        config = self.config
+        mp_strategy = Strategy.MomentumPeak(config.get('momentum_peak', {}))
+        mp_detector = mp_strategy.create_detector()
+
+        sb_strategy = Strategy.StatsBookExit(config.get('statsbook_exit', {}))
+        sb_detector = sb_strategy.create_detector(self.statsbooks.get(position.ticker))
+
+        ai_detector = None
+        if self.ai_strategy and self.ai_strategy.enabled:
+            ai_detector = self.ai_strategy.create_detector(
+                ticker=position.ticker,
+                option_type=position.option_type,
+                strike=position.strike,
+            )
+
+        oe_strategy = Strategy.OptionsExit(config.get('options_exit', {}))
+        oe_detector = oe_strategy.create_detector(position.entry_price, position.option_type)
+
+        # Risk assessment config
+        risk_config = config.get('risk_assessment', {})
+        CP_config = config.get('closure_peak', {})
+
+        self._signal_detectors[signal_id] = {
+            'mp_detector': mp_detector,
+            'sb_detector': sb_detector,
+            'ai_detector': ai_detector,
+            'oe_detector': oe_detector,
+            'oe_favorability_assessed': False,
+            'risk_assessed': False,
+            'risk_level': None,
+            'risk_reasons': None,
+            'risk_trend': None,
+            'risk_negative_bar_count': 0,
+            'max_vwap_ema_avg': np.nan,
+            # Config caches
+            'risk_config': risk_config,
+            'CP_config': CP_config,
+            'CP_enabled': CP_config.get('enabled', True),
+            'CP_rsi_call': CP_config.get('rsi_call_threshold', 87),
+            'CP_rsi_put': CP_config.get('rsi_put_threshold', 13),
+            'CP_start_time': dt.time(15, 60 - CP_config.get('minutes_before_close', 30)),
+            # Expiry info
+            'expiry_dt': (dt.datetime.combine(signal['expiration'], dt.time(16, 0), tzinfo=EASTERN)
+                          if signal.get('expiration') else position.entry_time + dt.timedelta(days=30)),
+            'entry_days_to_expiry': None,  # Set below
+        }
+        state = self._signal_detectors[signal_id]
+        state['entry_days_to_expiry'] = max(0, (state['expiry_dt'] - position.entry_time).total_seconds() / 86400)
+
+    def _process_new_bar(self, signal_id, signal, position, matrix, stock_df, bar_idx,
+                         option_price, spy_data):
+        """
+        Process a single new bar incrementally (avoids full re-simulation).
+
+        This mirrors the logic in SimulationEngine.simulate_position() but processes
+        only one bar, maintaining state in self._signal_detectors[signal_id].
+        """
+        state = self._signal_detectors[signal_id]
+        config = self.config
+
+        timestamp = stock_df.index[bar_idx]
+        bar = stock_df.iloc[bar_idx]
+
+        stock_price = float(bar['close'])
+        stock_high = float(bar.get('high', stock_price))
+        stock_low = float(bar.get('low', stock_price))
+        volume = float(bar.get('volume', 0))
+
+        # Get indicator values
+        vwap = float(bar.get('vwap', np.nan))
+        ema_10 = float(bar.get('ema_10', np.nan))
+        ema_21 = float(bar.get('ema_21', np.nan))
+        ema_50 = float(bar.get('ema_50', np.nan))
+        ema_100 = float(bar.get('ema_100', np.nan))
+        ema_200 = float(bar.get('ema_200', np.nan))
+        current_vwap_ema_avg = float(bar.get('vwap_ema_avg', np.nan))
+
+        if not np.isnan(current_vwap_ema_avg):
+            if np.isnan(state['max_vwap_ema_avg']):
+                state['max_vwap_ema_avg'] = current_vwap_ema_avg
+            else:
+                state['max_vwap_ema_avg'] = max(state['max_vwap_ema_avg'], current_vwap_ema_avg)
+        vwap_ema_avg = state['max_vwap_ema_avg']
+        emavwap = float(bar.get('emavwap', np.nan))
+        ewo = float(bar.get('ewo', np.nan))
+        ewo_15min_avg = float(bar.get('ewo_15min_avg', np.nan))
+        rsi = float(bar.get('rsi', np.nan))
+        rsi_10min_avg = float(bar.get('rsi_10min_avg', np.nan))
+        st_value = float(bar.get('supertrend', np.nan))
+        st_direction = float(bar.get('supertrend_direction', np.nan))
+        ichi_tenkan = float(bar.get('ichimoku_tenkan', np.nan))
+        ichi_kijun = float(bar.get('ichimoku_kijun', np.nan))
+        ichi_senkou_a = float(bar.get('ichimoku_senkou_a', np.nan))
+        ichi_senkou_b = float(bar.get('ichimoku_senkou_b', np.nan))
+        atr_sl_value = float(bar.get('atr_sl', np.nan))
+        macd_line_val = float(bar.get('macd_line', np.nan))
+        macd_signal_val = float(bar.get('macd_signal', np.nan))
+        macd_histogram_val = float(bar.get('macd_histogram', np.nan))
+        roc_val = float(bar.get('roc', np.nan))
+
+        current_days_to_expiry = max(0, (state['expiry_dt'] - timestamp).total_seconds() / 86400)
+
+        # Use live option price directly (no BS estimation needed)
+        # option_price is passed in from the cycle data
+
+        # Track max price from entry to end of market day
+        position.update_eod_price(option_price)
+        position.update(timestamp, option_price, stock_price)
+
+        # SPY gauge (use engine's method for single bar)
+        spy_price, spy_gauge_data = self.engine.calculate_spy_gauge(spy_data, timestamp)
+        ticker_gauge_data = self.engine.calculate_ticker_gauge(stock_df, timestamp)
+
+        # --- Risk Assessment (once at entry) ---
+        risk_level = state['risk_level']
+        risk_reasons = state['risk_reasons']
+        risk_trend = state['risk_trend']
+
+        if not state['risk_assessed'] and state['risk_config'].get('enabled', False):
+            state['risk_assessed'] = True
+            risk_level, risk_reasons = self.engine.assess_risk(
+                rsi, rsi_10min_avg, ewo_15min_avg,
+                self.statsbooks.get(position.ticker),
+                timestamp, signal['signal_time']
+            )
+            state['risk_level'] = risk_level
+            state['risk_reasons'] = risk_reasons
+            if risk_level == 'HIGH':
+                print(f"    RISK: HIGH [{risk_reasons}]")
+
+        # --- Options Exit: RiskOutlook (once at entry) ---
+        oe_state = {}
+        oe_exit = False
+        oe_reason = None
+        oe_detector = state['oe_detector']
+
+        if oe_detector and not state['oe_favorability_assessed']:
+            state['oe_favorability_assessed'] = True
+            ema_vals = {10: ema_10, 21: ema_21, 50: ema_50, 100: ema_100, 200: ema_200}
+            open_price = stock_df.iloc[0]['close']
+            roc_day = ((stock_price - open_price) / open_price) * 100 if open_price > 0 else np.nan
+            fav_level, fav_reasons = oe_detector.RiskOutlook(
+                rsi=rsi, rsi_avg=rsi_10min_avg, ema_values=ema_vals,
+                stock_price=stock_price, atr_sl_value=atr_sl_value,
+                macd_histogram=macd_histogram_val, roc_30m=roc_val,
+                roc_day=roc_day, supertrend_direction=st_direction,
+                ewo=ewo, ewo_avg=ewo_15min_avg,
+            )
+            if risk_level == 'HIGH':
+                oe_detector.is_high_risk = True
+
+        # --- Options Exit: Per-bar update ---
+        if oe_detector and not position.is_closed:
+            ema_vals = {10: ema_10, 21: ema_21, 50: ema_50, 100: ema_100, 200: ema_200}
+            oe_exit, oe_reason, oe_state = oe_detector.update(
+                option_price=option_price, stock_price=stock_price, ema_values=ema_vals,
+            )
+
+        # --- Risk trend monitoring ---
+        risk_config = state['risk_config']
+        if risk_level == 'HIGH' and not position.is_closed:
+            delay_min = risk_config.get('downtrend_delay_minutes', 5)
+            if position.get_minutes_held(timestamp) >= delay_min:
+                pnl_pct_now = position.get_pnl_pct(option_price)
+                risk_trend = 'Uptrend' if option_price >= position.entry_price else 'Downtrend'
+                state['risk_trend'] = risk_trend
+
+                if risk_trend == 'Downtrend':
+                    if pnl_pct_now < 0:
+                        state['risk_negative_bar_count'] += 1
+                    else:
+                        state['risk_negative_bar_count'] = 0
+
+                    monitor_bars = risk_config.get('downtrend_monitor_bars', 3)
+                    drop_pct = risk_config.get('downtrend_drop_pct', 10)
+                    reason = risk_config.get('downtrend_exit_reason', 'DownTrend-SL')
+
+                    if not position.is_closed:
+                        if state['risk_negative_bar_count'] >= monitor_bars:
+                            exit_price = option_price * (1 - self.slippage_pct)
+                            position.close(exit_price, timestamp, reason)
+                        elif pnl_pct_now <= -drop_pct:
+                            exit_price = option_price * (1 - self.slippage_pct)
+                            position.close(exit_price, timestamp, reason)
+
+        # Update strategy detectors
+        mp_exit, mp_reason = False, None
+        mp_detector = state['mp_detector']
+        if mp_detector and not position.is_closed:
+            mp_pnl = position.get_pnl_pct(option_price)
+            mp_exit, mp_reason = mp_detector.update(mp_pnl, rsi, rsi_10min_avg, ewo)
+
+        sb_exit, sb_reason = False, None
+        sb_detector = state['sb_detector']
+        if sb_detector and not position.is_closed:
+            sb_pnl = position.get_pnl_pct(option_price)
+            sb_exit, sb_reason = sb_detector.update(sb_pnl, ewo, stock_high, stock_low)
+
+        ai_exit, ai_reason = False, None
+        ai_signal_data = {}
+        ai_detector = state['ai_detector']
+        if ai_detector and not position.is_closed:
+            ai_bar_data = {
+                'stock_price': stock_price, 'stock_high': stock_high, 'stock_low': stock_low,
+                'true_price': Analysis.true_price(stock_price, stock_high, stock_low),
+                'volume': volume, 'option_price': option_price,
+                'pnl_pct': position.get_pnl_pct(option_price),
+                'vwap': vwap, 'ema_21': ema_21, 'ewo': ewo, 'ewo_15min_avg': ewo_15min_avg,
+                'rsi': rsi, 'rsi_10min_avg': rsi_10min_avg,
+                'supertrend_direction': st_direction,
+                'market_bias': matrix.records[-1]['market_bias'] if matrix.records else np.nan,
+                'ichimoku_tenkan': ichi_tenkan, 'ichimoku_kijun': ichi_kijun,
+                'ichimoku_senkou_a': ichi_senkou_a, 'ichimoku_senkou_b': ichi_senkou_b,
+            }
+            ai_exit, ai_reason = ai_detector.update(
+                bar_data=ai_bar_data, pnl_pct=position.get_pnl_pct(option_price),
+                minutes_held=position.get_minutes_held(timestamp),
+                option_price=option_price, timestamp=timestamp,
+            )
+            ai_signal_data = ai_detector.current_signal
+
+        # Closure-Peak signal
+        CP_enabled = state['CP_enabled']
+        cp_signal = False
+        if CP_enabled and not np.isnan(rsi_10min_avg) and timestamp.time() >= state['CP_start_time']:
+            if position.option_type.upper() in ['CALL', 'CALLS', 'C'] and rsi_10min_avg >= state['CP_rsi_call']:
+                cp_signal = True
+            elif position.option_type.upper() in ['PUT', 'PUTS', 'P'] and rsi_10min_avg <= state['CP_rsi_put']:
+                cp_signal = True
+
+        # Record tracking data
+        matrix.add_record(
+            timestamp=timestamp, stock_price=stock_price, option_price=option_price,
+            volume=volume, holding=True, vwap=vwap,
+            ema_10=ema_10, ema_21=ema_21, ema_50=ema_50, ema_100=ema_100, ema_200=ema_200,
+            vwap_ema_avg=vwap_ema_avg, emavwap=emavwap,
+            stock_high=stock_high, stock_low=stock_low,
+            ewo=ewo, ewo_15min_avg=ewo_15min_avg, rsi=rsi, rsi_10min_avg=rsi_10min_avg,
+            supertrend=st_value, supertrend_direction=st_direction,
+            ichimoku_tenkan=ichi_tenkan, ichimoku_kijun=ichi_kijun,
+            ichimoku_senkou_a=ichi_senkou_a, ichimoku_senkou_b=ichi_senkou_b,
+            atr_sl=atr_sl_value,
+            macd_line=macd_line_val, macd_signal_line=macd_signal_val,
+            macd_histogram=macd_histogram_val, roc=roc_val,
+            risk=risk_level, risk_reasons=risk_reasons, risk_trend=risk_trend,
+            spy_price=spy_price, spy_gauge=spy_gauge_data, ticker_gauge=ticker_gauge_data,
+            ai_outlook_1m=ai_signal_data.get('outlook_1m'),
+            ai_outlook_5m=ai_signal_data.get('outlook_5m'),
+            ai_outlook_30m=ai_signal_data.get('outlook_30m'),
+            ai_outlook_1h=ai_signal_data.get('outlook_1h'),
+            ai_action=ai_signal_data.get('action'),
+            ai_reason=ai_signal_data.get('reason'),
+            oe_state=oe_state,
+            exit_sig_sb=sb_exit, exit_sig_mp=mp_exit,
+            exit_sig_ai=ai_exit, exit_sig_closure_peak=cp_signal, exit_sig_oe=oe_exit,
+        )
+
+        # === EXIT PRIORITY CHAIN ===
+        slippage = self.slippage_pct
+        if oe_exit and not position.is_closed:
+            position.close(option_price * (1 - slippage), timestamp, oe_reason)
+        elif sb_exit and not position.is_closed:
+            position.close(option_price * (1 - slippage), timestamp, sb_reason)
+        elif mp_exit and not position.is_closed:
+            position.close(option_price * (1 - slippage), timestamp, mp_reason)
+        elif ai_exit and not position.is_closed:
+            position.close(option_price * (1 - slippage), timestamp, 'AI Exit Signal')
+        elif CP_enabled and not position.is_closed and not np.isnan(rsi_10min_avg) and timestamp.time() >= state['CP_start_time']:
+            if position.option_type.upper() in ['CALL', 'CALLS', 'C'] and rsi_10min_avg >= state['CP_rsi_call']:
+                position.close(option_price * (1 - slippage), timestamp, 'Closure - Peak')
+            elif position.option_type.upper() in ['PUT', 'PUTS', 'P'] and rsi_10min_avg <= state['CP_rsi_put']:
+                position.close(option_price * (1 - slippage), timestamp, 'Closure - Peak')
+        elif timestamp.time() >= dt.time(15, 55) and not position.is_closed:
+            position.close(option_price * (1 - slippage), timestamp, 'Closure-Market')
+
+    def _build_stock_dataframe(self, ticker):
+        """
+        Convert accumulated stock bars into a DataFrame with indicators.
+
+        Uses a cache to avoid rebuilding when no new bars have been added.
+        Indicators must be recalculated on the full DataFrame because they
+        use rolling windows, but the DataFrame construction is cached.
+        """
+        bars = self._stock_bars.get(ticker, [])
+        if not bars:
+            return None
+
+        # Check cache: only rebuild if new bars added
+        cache = self._stock_df_cache.get(ticker)
+        if cache and cache[0] == len(bars):
+            return cache[1]  # Return cached DataFrame with indicators
+
+        df = pd.DataFrame(bars)
+        df['timestamp'] = pd.to_datetime(df['timestamp'])
+        df = df.set_index('timestamp')
+        df = df.sort_index()
+
+        # Add indicators (must recalculate on full DF for rolling windows)
+        indicator_config = self.config.get('indicators', {})
+        oe_config = self.config.get('options_exit', {})
+        df = Analysis.add_indicators(
+            df,
+            ema_periods=indicator_config.get('ema_periods', [10, 21, 50, 100, 200]),
+            supertrend_period=indicator_config.get('supertrend_period', 10),
+            supertrend_multiplier=indicator_config.get('supertrend_multiplier', 3.0),
+            ichimoku_tenkan=indicator_config.get('ichimoku_tenkan', 9),
+            ichimoku_kijun=indicator_config.get('ichimoku_kijun', 26),
+            ichimoku_senkou_b=indicator_config.get('ichimoku_senkou_b', 52),
+            ichimoku_displacement=indicator_config.get('ichimoku_displacement', 26),
+            atr_sl_period=indicator_config.get('atr_sl_period', 5),
+            atr_sl_hhv=indicator_config.get('atr_sl_hhv', 10),
+            atr_sl_multiplier=indicator_config.get('atr_sl_multiplier', 2.5),
+            macd_fast=oe_config.get('macd_fast', 12),
+            macd_slow=oe_config.get('macd_slow', 26),
+            macd_signal=oe_config.get('macd_signal', 9),
+            roc_period=oe_config.get('roc_period', 30),
+        )
+
+        # Cache with bar count as key
+        self._stock_df_cache[ticker] = (len(bars), df)
+        return df
+
+    def _fetch_spy_data(self, signal_time):
+        """Fetch SPY intraday data (cached)."""
+        if self._spy_data is not None:
+            return self._spy_data
+
+        try:
+            signal_date = signal_time.date() if hasattr(signal_time, 'date') else signal_time
+            start_date = signal_date
+            end_date = signal_date + timedelta(days=1)
+            df = self.data_fetcher.fetch_stock_data('SPY', start_date, end_date, interval='1m')
+            if df is not None and not df.empty:
+                self._spy_data = df
+                return df
+        except Exception:
+            pass
+        return None
+
+    def stop(self):
+        """Stop live testing and cleanup."""
+        self._running = False
+        print(f"\n{'='*60}")
+        print("LIVE TEST - Stopped")
+        print(f"{'='*60}")
+        print(f"  Cycles completed: {self._cycle_count}")
+        print(f"  Signals tracked: {len(self.signals)}")
+
+        # Final save
+        self.save()
+
+        # Cleanup
+        self.live_fetcher.close()
+        self.discord_fetcher.close()
+
+    def _auto_save(self):
+        """Auto-save live data periodically."""
+        try:
+            self.save(quiet=True)
+        except Exception as e:
+            print(f"  Auto-save failed: {e}")
+
+    def save(self, filepath=None, quiet=False):
+        """
+        Save live test data to pickle.
+
+        Saves: DataBooks (per signal), DataSummary, DataStats,
+               positions, raw stock/option bars.
+        """
+        import pickle
+        import os
+
+        if filepath is None:
+            os.makedirs(self.data_dir, exist_ok=True)
+            filepath = os.path.join(self.data_dir, 'LT_DATA.pkl')
+
+        try:
+            # Convert databooks to DataFrames
+            databook_dfs = {}
+            for sig_id, db in self.databooks.items():
+                databook_dfs[sig_id] = db.to_dataframe()
+
+            save_data = {
+                'mode': 'live',
+                'matrices': databook_dfs,                              # DataBook (per signal)
+                'data_summary': self.data_summary.to_dataframe(),      # DataSummary
+                'data_stats': self.data_stats.to_dataframe(),          # DataStats
+                'statsbooks': dict(self.statsbooks),
+                'signals': self.signals,
+                'stock_bars': self._stock_bars,
+                'option_bars': self._option_bars,
+                'start_time': self._start_time,
+                'cycles': self._cycle_count,
+            }
+            with open(filepath, 'wb') as f:
+                pickle.dump(save_data, f)
+            if not quiet:
+                print(f"  Live test data saved to {filepath}")
+            return True
+        except Exception as e:
+            if not quiet:
+                print(f"  Error saving live test data: {e}")
+            return False
+
+    def summary(self):
+        """Print live test summary."""
+        stats_df = self.data_stats.to_dataframe()
+
+        print(f"\n{'='*60}")
+        print("LIVE TEST SUMMARY")
+        print(f"{'='*60}")
+
+        print(f"\n  Signals: {len(self.signals)}")
+        closed = sum(1 for p in self.positions.values() if p.is_closed)
+        active = sum(1 for p in self.positions.values() if not p.is_closed)
+        print(f"  Closed positions: {closed}")
+        print(f"  Active positions: {active}")
+        print(f"  Cycles: {self._cycle_count}")
+
+        if not stats_df.empty and 'pnl_pct' in stats_df.columns:
+            completed = stats_df[stats_df['pnl_pct'].notna()]
+            if not completed.empty:
+                winners = completed[completed['pnl_pct'] > 0]
+                print(f"\n  Win rate: {len(winners)/len(completed)*100:.1f}%")
+                print(f"  Avg PnL: {completed['pnl_pct'].mean():+.1f}%")
+                print(f"  Best: {completed['pnl_pct'].max():+.1f}%")
+                print(f"  Worst: {completed['pnl_pct'].min():+.1f}%")
+
+        print(f"{'='*60}\n")
+
+    def get_databooks(self):
+        """Get all signal databooks as DataFrames."""
+        return {sig_id: db.to_dataframe() for sig_id, db in self.databooks.items()}
+
+    def get_data_summary(self):
+        """Get DataSummary DataFrame."""
+        return self.data_summary.to_dataframe()
+
+    def get_data_stats(self):
+        """Get DataStats DataFrame."""
+        return self.data_stats.to_dataframe()
+
+
+# =============================================================================
+# EXTERNAL - LiveRerun Class (Replay collected live data through simulation)
+# =============================================================================
+
+class LiveRerun:
+    """
+    Re-run simulation on previously collected live data OR use standard
+    backtesting data sources.
+
+    Modes:
+    1. Live data available: Load from LT_DATA.pkl and replay through SimulationEngine
+    2. No live data: Fall back to standard Backtest (yfinance data + Discord signals)
+
+    This allows re-testing exit strategies on real collected data, comparing
+    live vs backtest results, or re-running with different config.
+
+    Shares SimulationEngine with Backtest and LiveTest.
+
+    Usage:
+        # Mode 1: Replay live collected data
+        lr = LiveRerun(live_data_path='live_data/LT_DATA.pkl')
+        lr.run()
+
+        # Mode 2: No live data, use Backtest path
+        lr = LiveRerun()
+        lr.run()  # Equivalent to Backtest.run()
+    """
+
+    def __init__(self, live_data_path=None, lookback_days=None, config=None):
+        self.config = config or Config.get_config('backtest').copy()
+        self.live_data_path = live_data_path
+        self.lookback_days = lookback_days or self.config.get('lookback_days', 5)
+
+        self.initial_capital = self.config.get('initial_capital', 10000.0)
+
+        # Initialize AI strategy
+        import AIModel
+        ai_config = self.config.get('ai_exit_signal', {})
+        self.ai_strategy = AIModel.AIExitSignal(ai_config)
+        if self.ai_strategy.enabled:
+            self.ai_strategy.load_model()
+        else:
+            log_dir = ai_config.get('log_dir', 'ai_training_data')
+            self.ai_strategy._optimal_logger = AIModel.OptimalExitLogger(log_dir=log_dir)
+
+        # Shared engine
+        self.engine = SimulationEngine(config=self.config, ai_strategy=self.ai_strategy)
+
+        # Data source detection
+        self._has_live_data = False
+        self._live_data = None
+
+        if live_data_path:
+            self._has_live_data = self._load_live_data(live_data_path)
+
+        # Results storage
+        self.positions = []
+        self.databooks = {}
+        self.statsbooks = {}
+        self.signals_df = None
+        self.results = None
+        self._has_run = False
+
+        # Three output dataframes
+        self.data_summary = DataSummary(interval_minutes=Config.get_config('live').get('summary_interval_minutes', 2))
+        self.data_stats = DataStats()
+
+    def _load_live_data(self, path):
+        """Load previously collected live data."""
+        import pickle
+        try:
+            with open(path, 'rb') as f:
+                self._live_data = pickle.load(f)
+            print(f"Loaded live data from {path}")
+            print(f"  Mode: {self._live_data.get('mode', 'unknown')}")
+            print(f"  Signals: {len(self._live_data.get('signals', {}))}")
+            print(f"  Cycles: {self._live_data.get('cycles', 0)}")
+            return True
+        except FileNotFoundError:
+            print(f"Live data not found at {path}")
+            return False
+        except Exception as e:
+            print(f"Error loading live data: {e}")
+            return False
+
+    def run(self):
+        """
+        Execute the rerun.
+
+        If live data is available, replay it through SimulationEngine.
+        Otherwise, fall back to standard Backtest.
+        """
+        if self._has_live_data:
+            return self._run_live_rerun()
+        else:
+            return self._run_backtest_fallback()
+
+    def _run_live_rerun(self):
+        """Replay collected live data through SimulationEngine."""
+        print(f"\n{'='*60}")
+        print("LIVE RERUN - Replaying collected data")
+        print(f"{'='*60}")
+
+        signals = self._live_data.get('signals', {})
+        stock_bars = self._live_data.get('stock_bars', {})
+        statsbooks_data = self._live_data.get('statsbooks', {})
+
+        self.statsbooks = statsbooks_data
+
+        # Reconstruct SPY data from saved stock bars
+        spy_data = None
+        if 'SPY' in stock_bars:
+            spy_df = pd.DataFrame(stock_bars['SPY'])
+            spy_df['timestamp'] = pd.to_datetime(spy_df['timestamp'])
+            spy_df = spy_df.set_index('timestamp').sort_index()
+            spy_data = spy_df
+
+        print(f"  Signals to replay: {len(signals)}")
+
+        for signal_id, signal in signals.items():
+            ticker = signal['ticker']
+            print(f"\n  Processing: {signal_id}")
+
+            # Build stock DataFrame from collected bars
+            if ticker not in stock_bars or not stock_bars[ticker]:
+                print(f"    No stock data for {ticker}")
+                continue
+
+            stock_df = pd.DataFrame(stock_bars[ticker])
+            stock_df['timestamp'] = pd.to_datetime(stock_df['timestamp'])
+            stock_df = stock_df.set_index('timestamp').sort_index()
+
+            if stock_df.empty:
+                print(f"    Empty stock data for {ticker}")
+                continue
+
+            # Create position
+            entry_stock_price = stock_df.iloc[0]['close']
+            entry_time = stock_df.index[0]
+
+            # Use recorded option price if available
+            option_bars = self._live_data.get('option_bars', {}).get(signal_id, [])
+            entry_option_price = None
+            if option_bars:
+                entry_option_price = option_bars[0].get('mark_price')
+
+            position, _ = self.engine.create_position(
+                signal=signal,
+                entry_stock_price=entry_stock_price,
+                entry_time=entry_time,
+                entry_option_price=entry_option_price
+            )
+
+            matrix = Databook(position)
+
+            # Run simulation on the collected data
+            self.engine.simulate_position(
+                position=position,
+                matrix=matrix,
+                stock_data=stock_df,
+                signal=signal,
+                entry_idx=0,
+                entry_stock_price=entry_stock_price,
+                statsbooks=self.statsbooks,
+                spy_data=spy_data,
+            )
+
+            # Store results
+            self.positions.append(position)
+            trade_label = position.get_trade_label()
+            self.databooks[trade_label] = matrix
+
+            # Update DataSummary and DataStats
+            db_df = matrix.to_dataframe()
+            self.data_summary.update_from_databook(signal_id, db_df)
+            self.data_stats.record(signal_id, position, data_source='livererun', bars_recorded=len(db_df))
+            self.data_stats.update_from_databook(signal_id, db_df)
+
+            # Print result
+            if position.is_closed:
+                pnl = position.get_pnl_pct(position.exit_price)
+                print(f"    Exit: {position.exit_reason} | PnL: {pnl:+.1f}%")
+
+        # Compile results
+        self.results = self.engine.compile_results(
+            pd.DataFrame(list(signals.values())),
+            self.positions, self.databooks, self.statsbooks
+        )
+        self._has_run = True
+
+        self.summary()
+        return self.results
+
+    def _run_backtest_fallback(self):
+        """Fall back to standard Backtest when no live data is available."""
+        print(f"\n{'='*60}")
+        print("LIVE RERUN - No live data found, using Backtest mode")
+        print(f"{'='*60}")
+
+        bt = Backtest(lookback_days=self.lookback_days, config=self.config)
+        self.results = bt.run()
+        self._has_run = True
+
+        # Copy results to match LiveRerun interface
+        self.positions = bt.positions
+        self.databooks = bt.databooks
+        self.statsbooks = bt.statsbooks
+        self.signals_df = bt.signals_df
+
+        # Generate DataSummary and DataStats from backtest results
+        for label, db in self.databooks.items():
+            db_df = db.to_dataframe() if hasattr(db, 'to_dataframe') else db
+            self.data_summary.update_from_databook(label, db_df)
+
+        for pos in self.positions:
+            sig_id = pos.get_trade_label()
+            self.data_stats.record(sig_id, pos, data_source='backtest')
+            if sig_id in self.results.get('Databooks', {}):
+                self.data_stats.update_from_databook(sig_id, self.results['Databooks'][sig_id])
+
+        return self.results
+
+    def summary(self):
+        """Print rerun summary."""
+        if not self._has_run:
+            print("Rerun has not been executed yet. Call run() first.")
+            return
+
+        summary = self.results.get('Summary', {})
+
+        print(f"\n{'='*60}")
+        print("LIVE RERUN SUMMARY")
+        print(f"{'='*60}")
+
+        if not summary:
+            print("  No trades executed")
+            return
+
+        data_source = "Live Data" if self._has_live_data else "Backtest (yfinance)"
+        print(f"\n  Data Source: {data_source}")
+
+        print(f"\n  TRADES:")
+        print(f"    Total: {summary.get('total_trades', 0)}")
+        print(f"    Winners: {summary.get('winners', 0)}")
+        print(f"    Losers: {summary.get('losers', 0)}")
+        print(f"    Win Rate: {summary.get('win_rate', 0):.1f}%")
+
+        print(f"\n  P&L:")
+        print(f"    Total: ${summary.get('total_pnl', 0):+,.2f}")
+        print(f"    Net: ${summary.get('net_pnl', 0):+,.2f}")
+        print(f"    Best: ${summary.get('best_trade', 0):+,.2f}")
+        print(f"    Worst: ${summary.get('worst_trade', 0):+,.2f}")
+
+        print(f"\n  EXIT REASONS:")
+        for reason, count in summary.get('exit_reasons', {}).items():
+            print(f"    {reason}: {count}")
+
+        print(f"{'='*60}\n")
+
+    def save(self, filepath=None):
+        """Save rerun results to pickle."""
+        import pickle
+        import os
+
+        if not self._has_run:
+            print("Rerun has not been executed yet.")
+            return False
+
+        if filepath is None:
+            live_config = Config.get_config('live')
+            data_dir = live_config.get('data_dir', 'live_data')
+            os.makedirs(data_dir, exist_ok=True)
+            filepath = os.path.join(data_dir, 'LR_DATA.pkl')
+
+        try:
+            save_data = {
+                'mode': 'livererun',
+                'matrices': self.results.get('Databooks', {}),
+                'data_summary': self.data_summary.to_dataframe(),
+                'data_stats': self.data_stats.to_dataframe(),
+                'statsbooks': self.results.get('StatsBooks', {}),
+                'summary': self.results.get('Summary', {}),
+                'has_live_data': self._has_live_data,
+            }
+            with open(filepath, 'wb') as f:
+                pickle.dump(save_data, f)
+            print(f"  Rerun results saved to {filepath}")
+            return True
+        except Exception as e:
+            print(f"  Error saving rerun results: {e}")
+            return False
+
+    def get_databooks(self):
+        """Get all trade databooks."""
+        if not self._has_run:
+            return {}
+        return self.results.get('Databooks', {})
+
+    def get_data_summary(self):
+        """Get DataSummary DataFrame."""
+        return self.data_summary.to_dataframe()
+
+    def get_data_stats(self):
+        """Get DataStats DataFrame."""
+        return self.data_stats.to_dataframe()
 
 
 def test_options_pricing():

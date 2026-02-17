@@ -121,6 +121,89 @@ DATA_CONFIG = {
 
 
 # =============================================================================
+# ROBINHOOD SCRAPER (Data.py - Internal Webscraping)
+# =============================================================================
+
+def _load_robinhood_credentials():
+    """Load Robinhood credentials from settings.csv (rows 2,3,4+ col B)."""
+    try:
+        import pandas as pd
+        config_dir = os.path.dirname(os.path.abspath(__file__))
+        csv_path = os.path.join(config_dir, 'settings.csv')
+        if os.path.exists(csv_path):
+            df = pd.read_csv(csv_path, header=None)
+            creds = {}
+            if len(df) > 1 and pd.notna(df.iloc[1, 1]):
+                creds['username'] = str(df.iloc[1, 1]).strip()
+            if len(df) > 2 and pd.notna(df.iloc[2, 1]):
+                creds['password'] = str(df.iloc[2, 1]).strip()
+            if len(df) > 3 and pd.notna(df.iloc[3, 1]):
+                creds['mfa_secret'] = str(df.iloc[3, 1]).strip()
+            return creds
+    except Exception as e:
+        print(f"Warning: Could not load Robinhood credentials from settings.csv: {e}")
+    return {}
+
+_RH_CREDENTIALS = _load_robinhood_credentials()
+
+ROBINHOOD_CONFIG = {
+    'username': _RH_CREDENTIALS.get('username', ''),
+    'password': _RH_CREDENTIALS.get('password', ''),
+    'mfa_secret': _RH_CREDENTIALS.get('mfa_secret', ''),
+    'base_url': 'https://robinhood.com',
+    'api_base': 'https://api.robinhood.com',
+    'login_url': 'https://api.robinhood.com/oauth2/token/',
+    'quotes_url': 'https://api.robinhood.com/quotes/',
+    'options_url': 'https://api.robinhood.com/options/marketdata/',
+    'instruments_url': 'https://api.robinhood.com/instruments/',
+    'options_instruments_url': 'https://api.robinhood.com/options/instruments/',
+    'options_chains_url': 'https://api.robinhood.com/options/chains/',
+    'client_id': 'c82SH0WZOsabOXGP2sxqcj34FxkvfnWRZBKlBjFS',  # Robinhood public client ID
+    'device_token': None,              # Generated at runtime (UUID4)
+    'session_timeout': 86400,          # Session valid for 24 hours
+    'max_retries': 3,                  # Max login retries
+    'request_timeout': 10,            # HTTP request timeout (seconds)
+    'rate_limit_delay': 0.5,          # Delay between requests (seconds)
+    'browser_config': {
+        'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36',
+        'accept': 'application/json',
+        'accept_language': 'en-US,en;q=0.9',
+        'accept_encoding': 'gzip, deflate, br',
+        'origin': 'https://robinhood.com',
+        'referer': 'https://robinhood.com/',
+        'sec_ch_ua': '"Chromium";v="144", "Google Chrome";v="144"',
+        'sec_ch_ua_mobile': '?0',
+        'sec_ch_ua_platform': '"Windows"',
+        'sec_fetch_dest': 'empty',
+        'sec_fetch_mode': 'cors',
+        'sec_fetch_site': 'same-site',
+    },
+}
+
+
+# =============================================================================
+# LIVE TESTING MODULE (Test.py)
+# =============================================================================
+
+LIVE_CONFIG = {
+    'cycle_interval_seconds': 60,      # Data collection cycle interval (1 minute)
+    'max_concurrent_tickers': 10,      # Max tickers to scrape in parallel
+    'thread_pool_size': 5,             # Thread pool for parallel webscraping
+    'data_dir': 'live_data',           # Directory for live data storage
+    'summary_interval_minutes': 2,     # DataSummary aggregation interval
+    'auto_save_interval': 5,           # Auto-save data every N minutes
+
+    # Stock data deduplication: track unique tickers across signals
+    # to avoid pulling stock data twice for same underlying
+    'deduplicate_stock_data': True,
+
+    # Data retention
+    'max_databook_rows': 50000,        # Max rows per signal databook
+    'compress_on_save': True,          # Compress pickle files on save
+}
+
+
+# =============================================================================
 # ANALYSIS MODULE (Analysis.py)
 # =============================================================================
 
@@ -403,9 +486,64 @@ DATAFRAME_COLUMNS = {
         'contracts', 'entry_time', 'exit_time', 'exit_reason',
     ],
 
-    # Dashboard databook display: reuses the same column order as 'databook'
-    # (kept as an alias so Dashboard.py can reference it by name).
-    'dashboard_databook': None,  # Resolved to 'databook' at module load — see below
+    # DataSummary: 2-minute aggregated summary of DataBook for dashboard display
+    'datasummary': [
+        'timestamp_start', 'timestamp_end',
+        'stock_open', 'stock_high', 'stock_low', 'stock_close',
+        'option_open', 'option_high', 'option_low', 'option_close',
+        'volume_sum', 'bar_count',
+        'pnl_pct_start', 'pnl_pct_end', 'pnl_pct_max', 'pnl_pct_min',
+        'rsi_avg', 'ewo_avg', 'vwap_avg',
+        'market_bias_mode',
+        'exit_signals_fired',
+        'signal_id',
+    ],
+
+    # DataStats: per-signal trade statistics
+    'datastats': [
+        'signal_id', 'ticker', 'strike', 'option_type', 'expiration',
+        'entry_time', 'entry_price', 'entry_stock_price',
+        'exit_time', 'exit_price', 'exit_reason',
+        'pnl', 'pnl_pct', 'minutes_held',
+        'max_pnl_pct', 'min_pnl_pct', 'max_option_price', 'min_option_price',
+        'risk_level', 'risk_reasons',
+        'bars_recorded', 'data_source',
+    ],
+
+    # Dashboard databook display columns (Dashboard.py)
+    # Mirrors 'databook' columns so the dashboard table reflects the full databook.
+    'dashboard_databook': [
+        'timestamp', 'stock_price', 'stock_high', 'stock_low', 'true_price',
+        'option_price', 'volume', 'holding', 'entry_price',
+        'pnl', 'pnl_pct', 'highest_price', 'lowest_price', 'minutes_held',
+        'risk', 'risk_reasons', 'risk_trend',
+        'market_bias',
+        'spy_price', 'spy_since_open', 'spy_1m', 'spy_5m', 'spy_15m', 'spy_30m', 'spy_1h',
+        'ticker_since_open', 'ticker_1m', 'ticker_5m', 'ticker_15m', 'ticker_30m', 'ticker_1h',
+        'vwap', 'ema_10', 'ema_21', 'ema_50', 'ema_100', 'ema_200',
+        'vwap_ema_avg', 'emavwap', 'ewo', 'ewo_15min_avg', 'rsi', 'rsi_10min_avg',
+        'supertrend', 'supertrend_direction',
+        'ichimoku_tenkan', 'ichimoku_kijun', 'ichimoku_senkou_a', 'ichimoku_senkou_b',
+        'atr_sl',
+        # MACD indicator columns
+        'macd_line', 'macd_signal', 'macd_histogram',
+        # Price momentum (ROC)
+        'roc',
+        'ai_outlook_1m', 'ai_outlook_5m', 'ai_outlook_30m', 'ai_outlook_1h',
+        'ai_action', 'ai_reason',
+        # Options Exit System columns (SL = stop loss, TP = take profit)
+        'sl_trailing',
+        'sl_hard',
+        'tp_risk_outlook',
+        'tp_risk_reasons',
+        'tp_trend_30m',
+        'sl_ema_reversal',
+        'tp_confirmed',
+        # Exit signal flags (per-bar boolean: which signals would fire)
+        'exit_sig_sb', 'exit_sig_mp', 'exit_sig_ai',
+        'exit_sig_closure_peak',
+        'exit_sig_oe',
+    ],
 }
 
 # Resolve alias: dashboard_databook uses the same columns as databook
@@ -423,6 +561,8 @@ def get_config(section):
         'data': DATA_CONFIG,
         'analysis': ANALYSIS_CONFIG,
         'backtest': BACKTEST_CONFIG,
+        'robinhood': ROBINHOOD_CONFIG,
+        'live': LIVE_CONFIG,
         'ai': BACKTEST_CONFIG.get('ai_exit_signal', {}),
     }
     return configs.get(section.lower(), {})
