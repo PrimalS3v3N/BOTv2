@@ -204,7 +204,7 @@ BACKTEST_CONFIG = {
         'enabled': True,
         'timeframe': '5m',                 # StatsBook timeframe to compare against
         'ewo_max_exit': True,              # Exit when EWO >= Median.Max(EWO)
-        'hl_max_exit': True,               # Exit when rolling H-L >= Median.Max(H-L)
+        'hl_max_exit': False,              # Exit when rolling H-L >= Median.Max(H-L)
         'min_profit_pct': 10,              # Minimum option profit % to consider exit
         'min_hold_bars': 5,                # Minimum bars held before StatsBook exit
         'rolling_window': 5,               # Bars for rolling H-L range calculation
@@ -243,7 +243,7 @@ BACKTEST_CONFIG = {
         'downtrend_delay_minutes': 5,      # Wait N minutes after entry before monitoring
         'downtrend_monitor_bars': 3,       # If next N bars are all negative, sell
         'downtrend_drop_pct': 10,          # OR if option drops X% below entry, sell
-        'downtrend_exit_reason': 'SL-DT',  # Exit reason label for risk downtrend
+        'downtrend_exit_reason': 'DownTrend-SL',  # Exit reason label for risk downtrend
     },
 
     # SPY Market Gauge: Use SPY as overall market health indicator

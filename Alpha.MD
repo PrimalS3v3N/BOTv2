@@ -201,7 +201,7 @@ a Factory class creates per-position Detector instances that track state bar-by-
 | Priority | Strategy | Exit Reasons | Description |
 |----------|----------|-------------|-------------|
 | 1 | **Options Exit (Primary TP/SL)** | `OE-Hard-SL`, `OE-Trail-SL` | Hard stop loss + trailing stop loss on option contract price |
-| 2 | **Risk Downtrend** | `SL-DT` | HIGH-risk trades: 3 negative bars or -10% drop |
+| 2 | **Risk Downtrend** | `DownTrend-SL` | HIGH-risk trades: 3 negative bars or -10% drop |
 | 3 | **StatsBook Exit** | `StatsBook - EWO Max`, `StatsBook - Range Max` | EWO or H-L range hits historical extreme |
 | 4 | **Momentum Peak** | `Momentum Peak` | RSI overbought reversal + EWO decline |
 | 5 | **AI Exit Signal** | `AI Exit Signal` | Local LLM recommends selling |
@@ -349,7 +349,7 @@ Monitors for sustained downtrend:
 - **3 consecutive negative bars** (configurable via `downtrend_monitor_bars`)
 - **-10% drop** below entry (configurable via `downtrend_drop_pct`)
 
-Exit reason: `SL-DT`
+Exit reason: `DownTrend-SL`
 
 ---
 
