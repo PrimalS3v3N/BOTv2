@@ -1122,6 +1122,9 @@ def main():
         show_ichimoku = st.toggle("Show Ichimoku Cloud", value=False, help="Overlay Ichimoku Cloud (Tenkan, Kijun, Senkou spans) on main chart")
         show_atr_sl = st.toggle("Show ATR-SL", value=True, help="Overlay ATR Trailing Stoploss indicator on main chart")
         show_market_bias = st.toggle("Show Market Bias", value=True, help="Market bias on indicator subplot: +1 Bull, 0 Side, -1 Bear")
+        show_trade_summary = st.toggle("Show Trade Summary", value=False, help="Display trade summary details")
+        show_stats_book = st.toggle("Show Stats Book", value=False, help="Display statistics book")
+        show_data_book = st.toggle("Show Data Book", value=False, help="Display data book")
 
         st.markdown("---")
 
