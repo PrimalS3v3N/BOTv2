@@ -76,7 +76,6 @@ def adjust_lookback_for_weekend(lookback_days):
 
 
 # Module-level DataFrame for variable explorer visibility
-discord_messages_df = pd.DataFrame()
 
 
 """
@@ -992,12 +991,8 @@ class Backtest:
         print(f"{'='*60}\n")
 
         # Step 1: Fetch Discord messages
-        global discord_messages_df
         messages_df = self.discord_fetcher.fetch_messages_for_days(self.lookback_days)
-
-        # Save to module-level variable for variable explorer visibility
-        discord_messages_df = messages_df.copy() if not messages_df.empty else pd.DataFrame()
-        self.messages_df = discord_messages_df
+        self.messages_df = messages_df
 
         if messages_df.empty:
             print("No messages found")
@@ -1081,80 +1076,35 @@ class Backtest:
             print(f"    SPY data fetch failed: {e}")
         return None
 
-    def _calculate_spy_gauge(self, spy_data, timestamp):
+    def _calculate_gauge(self, data, timestamp):
         """
-        Calculate SPY gauge at a given timestamp.
+        Calculate price gauge at a given timestamp.
 
-        For each timeframe, compare current SPY price to average price over that lookback.
-        Returns dict: {'since_open': 'Bullish'/'Bearish', '1m': ..., '5m': ..., etc.}
-        Also returns current spy_price.
-        """
-        if spy_data is None or spy_data.empty:
-            return np.nan, {}
-
-        # Get SPY data up to current timestamp
-        available = spy_data[spy_data.index <= timestamp]
-        if available.empty:
-            return np.nan, {}
-
-        spy_price = available['close'].iloc[-1]
-        market_open = timestamp.replace(hour=9, minute=30, second=0, microsecond=0)
-
-        spy_config = self.config.get('spy_gauge', {})
-        timeframes = spy_config.get('timeframes', {})
-        gauge = {}
-
-        for label, minutes in timeframes.items():
-            if minutes == 0:
-                # Since open
-                lookback_start = market_open
-            else:
-                lookback_start = timestamp - timedelta(minutes=minutes)
-
-            window = available[(available.index >= lookback_start) & (available.index <= timestamp)]
-            if window.empty or len(window) < 1:
-                gauge[label] = None
-                continue
-
-            avg_price = window['close'].mean()
-            gauge[label] = 'Bullish' if spy_price >= avg_price else 'Bearish'
-
-        return spy_price, gauge
-
-    def _calculate_ticker_gauge(self, stock_data, timestamp):
-        """
-        Calculate ticker gauge at a given timestamp.
-
-        Same logic as SPY gauge but applied to the main ticker's stock data.
         For each timeframe, compare current price to average price over that lookback.
-        Returns dict: {'since_open': 'Bullish'/'Bearish', '1m': ..., '5m': ..., etc.}
+        Returns (current_price, gauge_dict).
         """
-        available = stock_data[stock_data.index <= timestamp]
+        if data is None or data.empty:
+            return np.nan, {}
+
+        available = data[data.index <= timestamp]
         if available.empty:
-            return {}
+            return np.nan, {}
 
         current_price = available['close'].iloc[-1]
         market_open = timestamp.replace(hour=9, minute=30, second=0, microsecond=0)
 
-        spy_config = self.config.get('spy_gauge', {})
-        timeframes = spy_config.get('timeframes', {})
+        timeframes = self.config.get('spy_gauge', {}).get('timeframes', {})
         gauge = {}
 
         for label, minutes in timeframes.items():
-            if minutes == 0:
-                lookback_start = market_open
-            else:
-                lookback_start = timestamp - timedelta(minutes=minutes)
-
+            lookback_start = market_open if minutes == 0 else timestamp - timedelta(minutes=minutes)
             window = available[(available.index >= lookback_start) & (available.index <= timestamp)]
             if window.empty or len(window) < 1:
                 gauge[label] = None
                 continue
+            gauge[label] = 'Bullish' if current_price >= window['close'].mean() else 'Bearish'
 
-            avg_price = window['close'].mean()
-            gauge[label] = 'Bullish' if current_price >= avg_price else 'Bearish'
-
-        return gauge
+        return current_price, gauge
 
     def _assess_risk(self, rsi, rsi_avg, ewo_avg, statsbook, timestamp, signal_time):
         """
@@ -1435,11 +1385,26 @@ class Backtest:
             if not is_pre_entry:
                 position.update_eod_price(option_price)
 
-            # Calculate SPY gauge for current bar
-            spy_price, spy_gauge_data = self._calculate_spy_gauge(spy_data, timestamp)
+            # Calculate SPY and ticker gauges for current bar
+            spy_price, spy_gauge_data = self._calculate_gauge(spy_data, timestamp)
+            _, ticker_gauge_data = self._calculate_gauge(stock_data, timestamp)
 
-            # Calculate ticker gauge for current bar
-            ticker_gauge_data = self._calculate_ticker_gauge(stock_data, timestamp)
+            # --- Shared indicator kwargs for add_record (holding + non-holding) ---
+            indicator_kwargs = dict(
+                vwap=vwap, ema_10=ema_10, ema_21=ema_21, ema_50=ema_50,
+                ema_100=ema_100, ema_200=ema_200, vwap_ema_avg=vwap_ema_avg,
+                emavwap=emavwap, stock_high=stock_high, stock_low=stock_low,
+                ewo=ewo, ewo_15min_avg=ewo_15min_avg, rsi=rsi,
+                rsi_10min_avg=rsi_10min_avg, supertrend=st_value,
+                supertrend_direction=st_direction,
+                ichimoku_tenkan=ichi_tenkan, ichimoku_kijun=ichi_kijun,
+                ichimoku_senkou_a=ichi_senkou_a, ichimoku_senkou_b=ichi_senkou_b,
+                atr_sl=atr_sl_value,
+                macd_line=macd_line_val, macd_signal_line=macd_signal_val,
+                macd_histogram=macd_histogram_val, roc=roc_val,
+                spy_price=spy_price, spy_gauge=spy_gauge_data,
+                ticker_gauge=ticker_gauge_data,
+            )
 
             if holding:
                 position.update(timestamp, option_price, stock_price)
@@ -1459,28 +1424,18 @@ class Backtest:
                 oe_state = {}
                 oe_exit = False
                 oe_reason = None
+                ema_vals = {10: ema_10, 21: ema_21, 50: ema_50, 100: ema_100, 200: ema_200}
                 if oe_detector and not oe_favorability_assessed:
                     oe_favorability_assessed = True
-                    # Build EMA values dict for the detector
-                    ema_vals = {10: ema_10, 21: ema_21, 50: ema_50, 100: ema_100, 200: ema_200}
-                    # Compute since-open ROC (secondary time horizon)
-                    # First bar of the day is index 0 in stock_data
                     open_price = stock_data.iloc[0]['close']
                     roc_day = ((stock_price - open_price) / open_price) * 100 if open_price > 0 else np.nan
                     fav_level, fav_reasons = oe_detector.RiskOutlook(
-                        rsi=rsi,
-                        rsi_avg=rsi_10min_avg,
-                        ema_values=ema_vals,
-                        stock_price=stock_price,
-                        atr_sl_value=atr_sl_value,
-                        macd_histogram=macd_histogram_val,
-                        roc_30m=roc_val,
-                        roc_day=roc_day,
-                        supertrend_direction=st_direction,
-                        ewo=ewo,
-                        ewo_avg=ewo_15min_avg,
+                        rsi=rsi, rsi_avg=rsi_10min_avg, ema_values=ema_vals,
+                        stock_price=stock_price, atr_sl_value=atr_sl_value,
+                        macd_histogram=macd_histogram_val, roc_30m=roc_val,
+                        roc_day=roc_day, supertrend_direction=st_direction,
+                        ewo=ewo, ewo_avg=ewo_15min_avg,
                     )
-                    # Feed risk info from existing risk assessment into OE detector
                     if risk_level == 'HIGH':
                         oe_detector.is_high_risk = True
                     if fav_level == 'HIGH':
@@ -1488,85 +1443,57 @@ class Backtest:
 
                 # --- Options Exit: Per-bar update (hard SL + trailing SL + reversal) ---
                 if oe_detector and not position.is_closed:
-                    ema_vals = {10: ema_10, 21: ema_21, 50: ema_50, 100: ema_100, 200: ema_200}
                     oe_exit, oe_reason, oe_state = oe_detector.update(
-                        option_price=option_price,
-                        stock_price=stock_price,
+                        option_price=option_price, stock_price=stock_price,
                         ema_values=ema_vals,
                     )
 
                 # --- Risk trend monitoring (only for HIGH risk trades, after delay) ---
                 if risk_level == 'HIGH' and not position.is_closed and position.get_minutes_held(timestamp) >= risk_downtrend_delay_min:
                     pnl_pct_now = position.get_pnl_pct(option_price)
+                    risk_trend = 'Uptrend' if option_price >= position.entry_price else 'Downtrend'
 
-                    # Determine trend: Uptrend if option above entry, Downtrend if below
-                    if option_price >= position.entry_price:
-                        risk_trend = 'Uptrend'
-                    else:
-                        risk_trend = 'Downtrend'
-
-                    # Track consecutive negative bars for risk downtrend exit
                     if risk_trend == 'Downtrend':
-                        if pnl_pct_now < 0:
-                            risk_negative_bar_count += 1
-                        else:
-                            risk_negative_bar_count = 0
-
-                        # Exit: 3 consecutive negative bars OR 10% drop below entry
+                        risk_negative_bar_count = risk_negative_bar_count + 1 if pnl_pct_now < 0 else 0
                         if not position.is_closed:
-                            if risk_negative_bar_count >= risk_downtrend_bars:
-                                exit_price = option_price * (1 - self.slippage_pct)
-                                position.close(exit_price, timestamp, risk_downtrend_reason)
-                            elif pnl_pct_now <= -risk_downtrend_drop_pct:
+                            if risk_negative_bar_count >= risk_downtrend_bars or pnl_pct_now <= -risk_downtrend_drop_pct:
                                 exit_price = option_price * (1 - self.slippage_pct)
                                 position.close(exit_price, timestamp, risk_downtrend_reason)
 
-                # Update momentum peak detector
-                mp_exit = False
-                mp_reason = None
-                if mp_detector and not position.is_closed:
-                    mp_pnl = position.get_pnl_pct(option_price)
-                    mp_exit, mp_reason = mp_detector.update(mp_pnl, rsi, rsi_10min_avg, ewo)
-
-                # Update StatsBook detector
-                sb_exit = False
-                sb_reason = None
-                if sb_detector and not position.is_closed:
-                    sb_pnl = position.get_pnl_pct(option_price)
-                    sb_exit, sb_reason = sb_detector.update(sb_pnl, ewo, stock_high, stock_low)
-
-                # Update AI exit signal detector
-                ai_exit = False
-                ai_reason = None
+                # Update exit signal detectors
+                mp_exit, mp_reason = (False, None)
+                sb_exit, sb_reason = (False, None)
+                ai_exit, ai_reason = (False, None)
                 ai_signal_data = {}
+
+                if mp_detector and not position.is_closed:
+                    mp_exit, mp_reason = mp_detector.update(
+                        position.get_pnl_pct(option_price), rsi, rsi_10min_avg, ewo)
+
+                if sb_detector and not position.is_closed:
+                    sb_exit, sb_reason = sb_detector.update(
+                        position.get_pnl_pct(option_price), ewo, stock_high, stock_low)
+
                 if ai_detector and not position.is_closed:
                     ai_bar_data = {
-                        'stock_price': stock_price,
-                        'stock_high': stock_high,
+                        'stock_price': stock_price, 'stock_high': stock_high,
                         'stock_low': stock_low,
                         'true_price': Analysis.true_price(stock_price, stock_high, stock_low),
-                        'volume': volume,
-                        'option_price': option_price,
+                        'volume': volume, 'option_price': option_price,
                         'pnl_pct': position.get_pnl_pct(option_price),
-                        'vwap': vwap,
-                        'ema_21': ema_21,
-                        'ewo': ewo,
-                        'ewo_15min_avg': ewo_15min_avg,
-                        'rsi': rsi,
+                        'vwap': vwap, 'ema_21': ema_21, 'ewo': ewo,
+                        'ewo_15min_avg': ewo_15min_avg, 'rsi': rsi,
                         'rsi_10min_avg': rsi_10min_avg,
                         'supertrend_direction': st_direction,
                         'market_bias': matrix.records[-1]['market_bias'] if matrix.records else np.nan,
-                        'ichimoku_tenkan': ichi_tenkan,
-                        'ichimoku_kijun': ichi_kijun,
+                        'ichimoku_tenkan': ichi_tenkan, 'ichimoku_kijun': ichi_kijun,
                         'ichimoku_senkou_a': ichi_senkou_a,
                         'ichimoku_senkou_b': ichi_senkou_b,
                     }
                     ai_exit, ai_reason = ai_detector.update(
-                        bar_data=ai_bar_data,
-                        pnl_pct=position.get_pnl_pct(option_price),
+                        bar_data=ai_bar_data, pnl_pct=position.get_pnl_pct(option_price),
                         minutes_held=position.get_minutes_held(timestamp),
-                        option_price=option_price,
-                        timestamp=timestamp,
+                        option_price=option_price, timestamp=timestamp,
                     )
                     ai_signal_data = ai_detector.current_signal
 
@@ -1578,44 +1505,11 @@ class Backtest:
                     elif position.option_type.upper() in ['PUT', 'PUTS', 'P'] and rsi_10min_avg <= CP_rsi_put:
                         cp_signal = True
 
-                # Record tracking data with indicators, risk, SPY, AI signals, and exit signal flags
+                # Record tracking data
                 matrix.add_record(
-                    timestamp=timestamp,
-                    stock_price=stock_price,
-                    option_price=option_price,
-                    volume=volume,
-                    holding=True,
-                    vwap=vwap,
-                    ema_10=ema_10,
-                    ema_21=ema_21,
-                    ema_50=ema_50,
-                    ema_100=ema_100,
-                    ema_200=ema_200,
-                    vwap_ema_avg=vwap_ema_avg,
-                    emavwap=emavwap,
-                    stock_high=stock_high,
-                    stock_low=stock_low,
-                    ewo=ewo,
-                    ewo_15min_avg=ewo_15min_avg,
-                    rsi=rsi,
-                    rsi_10min_avg=rsi_10min_avg,
-                    supertrend=st_value,
-                    supertrend_direction=st_direction,
-                    ichimoku_tenkan=ichi_tenkan,
-                    ichimoku_kijun=ichi_kijun,
-                    ichimoku_senkou_a=ichi_senkou_a,
-                    ichimoku_senkou_b=ichi_senkou_b,
-                    atr_sl=atr_sl_value,
-                    macd_line=macd_line_val,
-                    macd_signal_line=macd_signal_val,
-                    macd_histogram=macd_histogram_val,
-                    roc=roc_val,
-                    risk=risk_level,
-                    risk_reasons=risk_reasons,
-                    risk_trend=risk_trend,
-                    spy_price=spy_price,
-                    spy_gauge=spy_gauge_data,
-                    ticker_gauge=ticker_gauge_data,
+                    timestamp=timestamp, stock_price=stock_price,
+                    option_price=option_price, volume=volume, holding=True,
+                    risk=risk_level, risk_reasons=risk_reasons, risk_trend=risk_trend,
                     ai_outlook_1m=ai_signal_data.get('outlook_1m'),
                     ai_outlook_5m=ai_signal_data.get('outlook_5m'),
                     ai_outlook_30m=ai_signal_data.get('outlook_30m'),
@@ -1623,84 +1517,33 @@ class Backtest:
                     ai_action=ai_signal_data.get('action'),
                     ai_reason=ai_signal_data.get('reason'),
                     oe_state=oe_state,
-                    # Exit signal flags: which signals would fire this bar
-                    exit_sig_sb=sb_exit,
-                    exit_sig_mp=mp_exit,
-                    exit_sig_ai=ai_exit,
-                    exit_sig_closure_peak=cp_signal,
+                    exit_sig_sb=sb_exit, exit_sig_mp=mp_exit,
+                    exit_sig_ai=ai_exit, exit_sig_closure_peak=cp_signal,
                     exit_sig_oe=oe_exit,
+                    **indicator_kwargs,
                 )
 
                 # === EXIT PRIORITY CHAIN ===
-                # 1. Options Exit (Primary TP/SL) — hard SL and trailing SL
-                if oe_exit and not position.is_closed:
-                    exit_price = option_price * (1 - self.slippage_pct)
-                    position.close(exit_price, timestamp, oe_reason)
-
-                # 2. StatsBook Exit: EWO or H-L range at historical extreme
-                elif sb_exit and not position.is_closed:
-                    exit_price = option_price * (1 - self.slippage_pct)
-                    position.close(exit_price, timestamp, sb_reason)
-
-                # 3. Momentum Peak: RSI overbought reversal + EWO decline
-                elif mp_exit and not position.is_closed:
-                    exit_price = option_price * (1 - self.slippage_pct)
-                    position.close(exit_price, timestamp, mp_reason)
-
-                # 4. AI Exit Signal: local LLM recommends selling
-                elif ai_exit and not position.is_closed:
-                    exit_price = option_price * (1 - self.slippage_pct)
-                    position.close(exit_price, timestamp, 'AI Exit Signal')
-
-                # 5. Closure - Peak: Avg RSI (10min) based exit in last 30 minutes of trading day
-                elif CP_enabled and not position.is_closed and not np.isnan(rsi_10min_avg) and timestamp.time() >= CP_start_time:
-                    if position.option_type.upper() in ['CALL', 'CALLS', 'C'] and rsi_10min_avg >= CP_rsi_call:
-                        exit_price = option_price * (1 - self.slippage_pct)
-                        position.close(exit_price, timestamp, 'Closure - Peak')
-                    elif position.option_type.upper() in ['PUT', 'PUTS', 'P'] and rsi_10min_avg <= CP_rsi_put:
-                        exit_price = option_price * (1 - self.slippage_pct)
-                        position.close(exit_price, timestamp, 'Closure - Peak')
-
-                # 6. Exit at market close
-                elif timestamp.time() >= dt.time(15, 55) and not position.is_closed:
-                    exit_price = option_price * (1 - self.slippage_pct)
-                    position.close(exit_price, timestamp, 'Closure-Market')
+                exit_candidates = [
+                    (oe_exit, oe_reason),
+                    (sb_exit, sb_reason),
+                    (mp_exit, mp_reason),
+                    (ai_exit, 'AI Exit Signal'),
+                    (cp_signal, 'Closure - Peak'),
+                    (timestamp.time() >= dt.time(15, 55), 'Closure-Market'),
+                ]
+                if not position.is_closed:
+                    for should_exit, reason in exit_candidates:
+                        if should_exit:
+                            exit_price = option_price * (1 - self.slippage_pct)
+                            position.close(exit_price, timestamp, reason)
+                            break
             else:
-                # Record tracking data for non-holding periods (pre-entry or post-exit)
+                # Non-holding period (pre-entry or post-exit)
                 matrix.add_record(
-                    timestamp=timestamp,
-                    stock_price=stock_price,
-                    option_price=option_price,
-                    volume=volume,
-                    holding=False,
-                    vwap=vwap,
-                    ema_10=ema_10,
-                    ema_21=ema_21,
-                    ema_50=ema_50,
-                    ema_100=ema_100,
-                    ema_200=ema_200,
-                    vwap_ema_avg=vwap_ema_avg,
-                    emavwap=emavwap,
-                    stock_high=stock_high,
-                    stock_low=stock_low,
-                    ewo=ewo,
-                    ewo_15min_avg=ewo_15min_avg,
-                    rsi=rsi,
-                    rsi_10min_avg=rsi_10min_avg,
-                    supertrend=st_value,
-                    supertrend_direction=st_direction,
-                    ichimoku_tenkan=ichi_tenkan,
-                    ichimoku_kijun=ichi_kijun,
-                    ichimoku_senkou_a=ichi_senkou_a,
-                    ichimoku_senkou_b=ichi_senkou_b,
-                    atr_sl=atr_sl_value,
-                    macd_line=macd_line_val,
-                    macd_signal_line=macd_signal_val,
-                    macd_histogram=macd_histogram_val,
-                    roc=roc_val,
-                    spy_price=spy_price,
-                    spy_gauge=spy_gauge_data,
-                    ticker_gauge=ticker_gauge_data,
+                    timestamp=timestamp, stock_price=stock_price,
+                    option_price=option_price, volume=volume, holding=False,
+                    **indicator_kwargs,
                 )
 
         # Close at end of data if still open
@@ -1735,28 +1578,6 @@ class Backtest:
                     'pnl_pct': float(final_pnl_pct) if not np.isnan(final_pnl_pct) else None,
                 },
             )
-
-    def _format_exit_reason(self, reason):
-        """
-        Format exit reason to user-friendly display string.
-
-        Mappings:
-        - closure_peak -> "Closure - Peak"
-        - market_close -> "Closure-Market"
-        """
-        if reason is None:
-            return 'Unknown'
-
-        # Closure - Peak
-        elif reason == 'closure_peak':
-            return 'Closure - Peak'
-
-        # Closure-Market
-        elif reason == 'market_close':
-            return 'Closure-Market'
-
-        # Return original if no mapping found
-        return reason
 
     def _compile_results(self):
         """Compile backtest results into DataFrames."""

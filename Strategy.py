@@ -9,15 +9,8 @@ INTERNAL - Strategy Decision Logic
 ================================================================================
 """
 
+import math
 import numpy as np
-
-
-"""
-================================================================================
-EXTERNAL - Module Interface
-================================================================================
-Modules: Config.py, Data.py, Analysis.py, Orders.py, Test.py
-"""
 
 import Config
 
@@ -514,9 +507,6 @@ class AIExitSignalDetector:
 # =============================================================================
 # INTERNAL - Options Exit System (Primary TP / SL)
 # =============================================================================
-
-import math
-
 
 class OptionsExit:
     """
