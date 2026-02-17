@@ -240,6 +240,7 @@ BACKTEST_CONFIG = {
         # Condition 3: First 15 minutes of market open (9:30 - 9:45 EST)
         'market_open_window_minutes': 15,
         # Post-purchase monitoring for HIGH risk trades
+        'downtrend_delay_minutes': 5,      # Wait N minutes after entry before monitoring
         'downtrend_monitor_bars': 3,       # If next N bars are all negative, sell
         'downtrend_drop_pct': 10,          # OR if option drops X% below entry, sell
         'downtrend_exit_reason': 'SL-DT',  # Exit reason label for risk downtrend
@@ -288,6 +289,7 @@ BACKTEST_CONFIG = {
         # --- Trailing Stop Loss ---
         'trail_activation_pct': 10,        # Engage trailing SL when profit margin >= X%
         'trail_base_floor_pct': 5,         # At activation: lock in X% above entry as floor
+        'trail_early_floor_minutes': 5,    # First N minutes: SL floor = 0% (breakeven) instead of base
 
         # Continuous trailing SL scaling parameters (logarithmic curve)
         # trail_sl = base + scale * ln(1 + profit / norm)
