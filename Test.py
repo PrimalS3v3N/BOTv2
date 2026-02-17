@@ -1363,6 +1363,7 @@ class Backtest:
         risk_assessed = False
         risk_config = self.config.get('risk_assessment', {})
         risk_enabled = risk_config.get('enabled', False)
+        risk_downtrend_delay_min = risk_config.get('downtrend_delay_minutes', 5)
         risk_downtrend_bars = risk_config.get('downtrend_monitor_bars', 3)
         risk_downtrend_drop_pct = risk_config.get('downtrend_drop_pct', 10)
         risk_downtrend_reason = risk_config.get('downtrend_exit_reason', 'SL-DT')
@@ -1494,8 +1495,8 @@ class Backtest:
                         ema_values=ema_vals,
                     )
 
-                # --- Risk trend monitoring (only for HIGH risk trades) ---
-                if risk_level == 'HIGH' and not position.is_closed:
+                # --- Risk trend monitoring (only for HIGH risk trades, after delay) ---
+                if risk_level == 'HIGH' and not position.is_closed and position.get_minutes_held(timestamp) >= risk_downtrend_delay_min:
                     pnl_pct_now = position.get_pnl_pct(option_price)
 
                     # Determine trend: Uptrend if option above entry, Downtrend if below
