@@ -276,12 +276,20 @@ class RobinhoodScraper:
         with self._lock:
             return self._access_token is not None
 
-    def _api_get(self, url, params=None):
-        """Make authenticated GET request with rate limiting."""
+    def _api_get(self, url, params=None, skip_rate_limit=False):
+        """
+        Make authenticated GET request.
+
+        Args:
+            url: API endpoint URL
+            params: Query parameters
+            skip_rate_limit: If True, skip the rate limit delay (used for parallel requests)
+        """
         if not self.is_authenticated:
             self._refresh_auth()
 
-        time.sleep(self.rate_limit_delay)
+        if not skip_rate_limit:
+            time.sleep(self.rate_limit_delay)
 
         try:
             response = self.session.get(url, params=params, timeout=self.request_timeout)
@@ -291,8 +299,14 @@ class RobinhoodScraper:
                     response = self.session.get(url, params=params, timeout=self.request_timeout)
             if response.status_code == 200:
                 return response.json()
-            else:
-                return None
+            elif response.status_code == 429:
+                # Rate limited - back off and retry once
+                wait = float(response.headers.get('Retry-After', 2))
+                time.sleep(wait)
+                response = self.session.get(url, params=params, timeout=self.request_timeout)
+                if response.status_code == 200:
+                    return response.json()
+            return None
         except requests.RequestException:
             return None
 
@@ -347,7 +361,7 @@ class RobinhoodScraper:
 
         symbols = ','.join(t.upper() for t in tickers)
         url = f"{self.quotes_url}?symbols={symbols}"
-        data = self._api_get(url)
+        data = self._api_get(url, skip_rate_limit=True)
 
         if not data or 'results' not in data:
             return {}
@@ -510,7 +524,7 @@ class RobinhoodScraper:
 
     def get_option_quotes_batch(self, option_specs):
         """
-        Get option quotes for multiple contracts.
+        Get option quotes for multiple contracts in parallel.
 
         Args:
             option_specs: list of dicts with keys: ticker, strike, option_type, expiration
@@ -518,13 +532,35 @@ class RobinhoodScraper:
         Returns:
             list of option quote dicts (None entries for failed lookups)
         """
-        results = []
-        for spec in option_specs:
-            quote = self.get_option_quote(
-                spec['ticker'], spec['strike'],
-                spec['option_type'], spec['expiration']
-            )
-            results.append(quote)
+        if not option_specs:
+            return []
+
+        # For single spec, avoid thread overhead
+        if len(option_specs) == 1:
+            return [self.get_option_quote(
+                option_specs[0]['ticker'], option_specs[0]['strike'],
+                option_specs[0]['option_type'], option_specs[0]['expiration']
+            )]
+
+        # Parallel fetch for multiple specs
+        results = [None] * len(option_specs)
+        with ThreadPoolExecutor(max_workers=min(len(option_specs), 5)) as executor:
+            future_to_idx = {}
+            for idx, spec in enumerate(option_specs):
+                future = executor.submit(
+                    self.get_option_quote,
+                    spec['ticker'], spec['strike'],
+                    spec['option_type'], spec['expiration']
+                )
+                future_to_idx[future] = idx
+
+            for future in as_completed(future_to_idx):
+                idx = future_to_idx[future]
+                try:
+                    results[idx] = future.result()
+                except Exception:
+                    results[idx] = None
+
         return results
 
     def close(self):
@@ -603,6 +639,10 @@ class LiveDataFetcher:
         """
         Execute one data collection cycle.
 
+        Stock quotes use batch API (single request for all tickers).
+        Option quotes are fetched in parallel via thread pool.
+        No rate limit delays on parallel requests - handled by 429 retry.
+
         Returns:
             dict: {
                 'stock_quotes': {ticker: quote_dict, ...},
@@ -625,44 +665,38 @@ class LiveDataFetcher:
         if not signals:
             return result
 
-        # Deduplicate tickers for stock data
-        unique_tickers = list(set(s['ticker'] for s in signals))
-
         if not self._executor:
             self.start()
 
+        if not self.scraper.is_authenticated:
+            result['cycle_time_ms'] = (time.time() - start_time) * 1000
+            return result
+
+        # Deduplicate tickers for stock data
+        unique_tickers = list(set(s['ticker'] for s in signals))
+
         futures = {}
 
-        # Submit stock quote requests (batch if possible)
-        if self.scraper.is_authenticated and len(unique_tickers) <= 10:
-            # Batch request for small sets
-            future = self._executor.submit(self.scraper.get_stock_quotes_batch, unique_tickers)
-            futures[future] = ('stock_batch', None)
-        elif self.scraper.is_authenticated:
-            # Individual requests for large sets (parallel)
-            for ticker in unique_tickers:
-                future = self._executor.submit(self.scraper.get_stock_quote, ticker)
-                futures[future] = ('stock_single', ticker)
+        # Stock quotes: always batch (single API call, no per-ticker overhead)
+        future = self._executor.submit(self.scraper.get_stock_quotes_batch, unique_tickers)
+        futures[future] = ('stock_batch', None)
 
-        # Submit option quote requests (parallel)
-        if self.scraper.is_authenticated:
-            for signal in signals:
-                future = self._executor.submit(
-                    self.scraper.get_option_quote,
-                    signal['ticker'], signal['strike'],
-                    signal['option_type'], signal['expiration']
-                )
-                futures[future] = ('option', signal.get('signal_id'))
+        # Option quotes: parallel fetch via thread pool
+        for signal in signals:
+            future = self._executor.submit(
+                self.scraper.get_option_quote,
+                signal['ticker'], signal['strike'],
+                signal['option_type'], signal['expiration']
+            )
+            futures[future] = ('option', signal.get('signal_id'))
 
-        # Collect results
+        # Collect results as they complete
         for future in as_completed(futures):
             data_type, key = futures[future]
             try:
                 data = future.result()
                 if data_type == 'stock_batch' and isinstance(data, dict):
                     result['stock_quotes'].update(data)
-                elif data_type == 'stock_single' and data:
-                    result['stock_quotes'][key] = data
                 elif data_type == 'option' and data:
                     result['option_quotes'][key] = data
             except Exception:
