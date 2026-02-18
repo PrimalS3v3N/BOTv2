@@ -647,6 +647,8 @@ class Databook:
                    atr_sl=np.nan,
                    macd_line=np.nan, macd_signal_line=np.nan, macd_histogram=np.nan,
                    roc=np.nan,
+                   stoch_k=np.nan, stoch_d=np.nan,
+                   vpoc=np.nan, book_imbalance=np.nan,
                    risk=None, risk_reasons=None, risk_trend=None,
                    spy_price=np.nan, spy_gauge=None, ticker_gauge=None,
                    ai_outlook_1m=None, ai_outlook_5m=None,
@@ -656,7 +658,9 @@ class Databook:
                    exit_sig_sb=None, exit_sig_mp=None,
                    exit_sig_ai=None,
                    exit_sig_closure_peak=None,
-                   exit_sig_oe=None):
+                   exit_sig_oe=None,
+                   exit_sig_vc=None, exit_sig_ts=None, exit_sig_vwap=None,
+                   exit_sig_st=None):
         """Add a tracking record."""
         pnl_pct = self.position.get_pnl_pct(option_price) if holding else np.nan
 
@@ -750,6 +754,13 @@ class Databook:
             'macd_histogram': macd_histogram,
             # Price momentum (ROC)
             'roc': roc,
+            # Stochastic Oscillator
+            'stoch_k': stoch_k,
+            'stoch_d': stoch_d,
+            # Volume Point of Control
+            'vpoc': vpoc,
+            # Order Book Imbalance (PLACEHOLDER: Webull L2)
+            'book_imbalance': book_imbalance,
             # AI exit signal tracking
             'ai_outlook_1m': ai_outlook_1m,
             'ai_outlook_5m': ai_outlook_5m,
@@ -771,6 +782,10 @@ class Databook:
             'exit_sig_ai': exit_sig_ai,
             'exit_sig_closure_peak': exit_sig_closure_peak,
             'exit_sig_oe': exit_sig_oe,
+            'exit_sig_vc': exit_sig_vc,
+            'exit_sig_ts': exit_sig_ts,
+            'exit_sig_vwap': exit_sig_vwap,
+            'exit_sig_st': exit_sig_st,
         }
 
         self.records.append(record)
@@ -991,7 +1006,9 @@ class DataSummary:
         has_bias = 'market_bias' in df.columns
 
         exit_sig_cols = [c for c in ['exit_sig_sb', 'exit_sig_mp', 'exit_sig_ai',
-                                      'exit_sig_closure_peak', 'exit_sig_oe'] if c in df.columns]
+                                      'exit_sig_closure_peak', 'exit_sig_oe',
+                                      'exit_sig_vc', 'exit_sig_ts', 'exit_sig_vwap',
+                                      'exit_sig_st'] if c in df.columns]
 
         records = []
         for interval_start, idx_group in df.groupby(intervals).groups.items():
@@ -1443,6 +1460,13 @@ class SimulationEngine:
         macd_signal_period = oe_config.get('macd_signal', 9)
         roc_period = oe_config.get('roc_period', 30)
 
+        # Get Stochastic and VPOC settings
+        stoch_k_period = indicator_config.get('stoch_k_period', 5)
+        stoch_d_period = indicator_config.get('stoch_d_period', 3)
+        stoch_smooth = indicator_config.get('stoch_smooth', 3)
+        vpoc_enabled = indicator_config.get('vpoc_enabled', True)
+        vpoc_bin_size = indicator_config.get('vpoc_bin_size', None)
+
         # Add technical indicators to stock data
         stock_data = Analysis.add_indicators(stock_data, ema_periods=ema_periods,
                                              supertrend_period=supertrend_period,
@@ -1457,7 +1481,12 @@ class SimulationEngine:
                                              macd_fast=macd_fast,
                                              macd_slow=macd_slow,
                                              macd_signal=macd_signal_period,
-                                             roc_period=roc_period)
+                                             roc_period=roc_period,
+                                             stoch_k_period=stoch_k_period,
+                                             stoch_d_period=stoch_d_period,
+                                             stoch_smooth=stoch_smooth,
+                                             vpoc_enabled=vpoc_enabled,
+                                             vpoc_bin_size=vpoc_bin_size)
 
         # Pre-compute SPY and ticker gauges for all bars at once (O(n) vs O(n^2))
         _all_timestamps = stock_data.index
@@ -1466,7 +1495,7 @@ class SimulationEngine:
 
         # Create strategy detectors
         mp_strategy = Strategy.MomentumPeak(self.config.get('momentum_peak', {}))
-        mp_detector = mp_strategy.create_detector()
+        mp_detector = mp_strategy.create_detector(position.option_type)
 
         sb_strategy = Strategy.StatsBookExit(self.config.get('statsbook_exit', {}))
         sb_detector = sb_strategy.create_detector(statsbooks.get(position.ticker))
@@ -1482,6 +1511,18 @@ class SimulationEngine:
         oe_strategy = Strategy.OptionsExit(self.config.get('options_exit', {}))
         oe_detector = oe_strategy.create_detector(position.entry_price, position.option_type)
         oe_favorability_assessed = False
+
+        vc_strategy = Strategy.VolumeClimaxExit(self.config.get('volume_climax_exit', {}))
+        vc_detector = vc_strategy.create_detector(position.option_type)
+
+        ts_strategy = Strategy.TimeStop(self.config.get('time_stop', {}))
+        ts_detector = ts_strategy.create_detector()
+
+        vwap_strategy = Strategy.VWAPCrossExit(self.config.get('vwap_cross_exit', {}))
+        vwap_detector = vwap_strategy.create_detector(position.option_type)
+
+        st_flip_strategy = Strategy.SupertrendFlipExit(self.config.get('supertrend_flip_exit', {}))
+        st_flip_detector = st_flip_strategy.create_detector(position.option_type)
 
         # Closure - Peak settings
         CP_config = self.config.get('closure_peak', {})
@@ -1510,6 +1551,7 @@ class SimulationEngine:
 
         # Pre-extract column arrays for fast indexed access (avoids iterrows overhead)
         _col_close = stock_data['close'].values
+        _col_open = stock_data['open'].values if 'open' in stock_data.columns else _col_close
         _col_high = stock_data['high'].values if 'high' in stock_data.columns else _col_close
         _col_low = stock_data['low'].values if 'low' in stock_data.columns else _col_close
         _col_volume = stock_data['volume'].values if 'volume' in stock_data.columns else np.zeros(len(stock_data))
@@ -1536,11 +1578,15 @@ class SimulationEngine:
         _col_macd_signal = stock_data['macd_signal'].values if 'macd_signal' in stock_data.columns else np.full(len(stock_data), np.nan)
         _col_macd_hist = stock_data['macd_histogram'].values if 'macd_histogram' in stock_data.columns else np.full(len(stock_data), np.nan)
         _col_roc = stock_data['roc'].values if 'roc' in stock_data.columns else np.full(len(stock_data), np.nan)
+        _col_stoch_k = stock_data['stoch_k'].values if 'stoch_k' in stock_data.columns else np.full(len(stock_data), np.nan)
+        _col_stoch_d = stock_data['stoch_d'].values if 'stoch_d' in stock_data.columns else np.full(len(stock_data), np.nan)
+        _col_vpoc = stock_data['vpoc'].values if 'vpoc' in stock_data.columns else np.full(len(stock_data), np.nan)
         _timestamps = stock_data.index
 
         for i in range(len(stock_data)):
             timestamp = _timestamps[i]
             stock_price = float(_col_close[i])
+            stock_open = float(_col_open[i])
             stock_high = float(_col_high[i])
             stock_low = float(_col_low[i])
             volume = float(_col_volume[i])
@@ -1576,6 +1622,9 @@ class SimulationEngine:
             macd_signal_val = float(_col_macd_signal[i])
             macd_histogram_val = float(_col_macd_hist[i])
             roc_val = float(_col_roc[i])
+            stoch_k_val = float(_col_stoch_k[i])
+            stoch_d_val = float(_col_stoch_d[i])
+            vpoc_val = float(_col_vpoc[i])
 
             current_days_to_expiry = max(0, (expiry_dt - timestamp).total_seconds() / 86400)
 
@@ -1638,6 +1687,8 @@ class SimulationEngine:
                         supertrend_direction=st_direction,
                         ewo=ewo,
                         ewo_avg=ewo_15min_avg,
+                        stoch_k=stoch_k_val,
+                        stoch_d=stoch_d_val,
                     )
                     if risk_level == 'HIGH':
                         oe_detector.is_high_risk = True
@@ -1681,7 +1732,7 @@ class SimulationEngine:
                 mp_reason = None
                 if mp_detector and not position.is_closed:
                     mp_pnl = position.get_pnl_pct(option_price)
-                    mp_exit, mp_reason = mp_detector.update(mp_pnl, rsi, rsi_10min_avg, ewo)
+                    mp_exit, mp_reason = mp_detector.update(mp_pnl, rsi, rsi_10min_avg, ewo, stoch_k_val, stoch_d_val)
 
                 # Update StatsBook detector
                 sb_exit = False
@@ -1725,6 +1776,35 @@ class SimulationEngine:
                     )
                     ai_signal_data = ai_detector.current_signal
 
+                # Update Volume Climax detector
+                vc_exit = False
+                vc_reason = None
+                if vc_detector and not position.is_closed:
+                    vc_pnl = position.get_pnl_pct(option_price)
+                    vc_exit, vc_reason = vc_detector.update(vc_pnl, volume, stock_price, stock_open, stoch_k_val)
+
+                # Update Time Stop detector
+                ts_exit = False
+                ts_reason = None
+                if ts_detector and not position.is_closed:
+                    ts_pnl = position.get_pnl_pct(option_price)
+                    ts_minutes = position.get_minutes_held(timestamp)
+                    ts_exit, ts_reason = ts_detector.update(ts_pnl, ts_minutes)
+
+                # Update VWAP Cross detector
+                vwap_exit = False
+                vwap_reason = None
+                if vwap_detector and not position.is_closed:
+                    vwap_pnl = position.get_pnl_pct(option_price)
+                    vwap_exit, vwap_reason = vwap_detector.update(vwap_pnl, stock_price, vwap)
+
+                # Update Supertrend Flip detector
+                st_flip_exit = False
+                st_flip_reason = None
+                if st_flip_detector and not position.is_closed:
+                    st_flip_pnl = position.get_pnl_pct(option_price)
+                    st_flip_exit, st_flip_reason = st_flip_detector.update(st_flip_pnl, st_direction)
+
                 # Compute Closure-Peak signal flag
                 cp_signal = False
                 if CP_enabled and not np.isnan(rsi_10min_avg) and timestamp.time() >= CP_start_time:
@@ -1753,6 +1833,8 @@ class SimulationEngine:
                     macd_line=macd_line_val, macd_signal_line=macd_signal_val,
                     macd_histogram=macd_histogram_val,
                     roc=roc_val,
+                    stoch_k=stoch_k_val, stoch_d=stoch_d_val,
+                    vpoc=vpoc_val, book_imbalance=np.nan,
                     risk=risk_level, risk_reasons=risk_reasons, risk_trend=risk_trend,
                     spy_price=spy_price, spy_gauge=spy_gauge_data, ticker_gauge=ticker_gauge_data,
                     ai_outlook_1m=ai_signal_data.get('outlook_1m'),
@@ -1764,6 +1846,8 @@ class SimulationEngine:
                     oe_state=oe_state,
                     exit_sig_sb=sb_exit, exit_sig_mp=mp_exit,
                     exit_sig_ai=ai_exit, exit_sig_closure_peak=cp_signal, exit_sig_oe=oe_exit,
+                    exit_sig_vc=vc_exit, exit_sig_ts=ts_exit, exit_sig_vwap=vwap_exit,
+                    exit_sig_st=st_flip_exit,
                 )
 
                 # === EXIT PRIORITY CHAIN ===
@@ -1776,6 +1860,18 @@ class SimulationEngine:
                 elif mp_exit and not position.is_closed:
                     exit_price = option_price * (1 - self.slippage_pct)
                     position.close(exit_price, timestamp, mp_reason)
+                elif vc_exit and not position.is_closed:
+                    exit_price = option_price * (1 - self.slippage_pct)
+                    position.close(exit_price, timestamp, vc_reason)
+                elif vwap_exit and not position.is_closed:
+                    exit_price = option_price * (1 - self.slippage_pct)
+                    position.close(exit_price, timestamp, vwap_reason)
+                elif st_flip_exit and not position.is_closed:
+                    exit_price = option_price * (1 - self.slippage_pct)
+                    position.close(exit_price, timestamp, st_flip_reason)
+                elif ts_exit and not position.is_closed:
+                    exit_price = option_price * (1 - self.slippage_pct)
+                    position.close(exit_price, timestamp, ts_reason)
                 elif ai_exit and not position.is_closed:
                     exit_price = option_price * (1 - self.slippage_pct)
                     position.close(exit_price, timestamp, 'AI Exit Signal')
@@ -1810,6 +1906,8 @@ class SimulationEngine:
                     macd_line=macd_line_val, macd_signal_line=macd_signal_val,
                     macd_histogram=macd_histogram_val,
                     roc=roc_val,
+                    stoch_k=stoch_k_val, stoch_d=stoch_d_val,
+                    vpoc=vpoc_val, book_imbalance=np.nan,
                     spy_price=spy_price, spy_gauge=spy_gauge_data, ticker_gauge=ticker_gauge_data,
                 )
 
@@ -2650,7 +2748,7 @@ class LiveTest:
         """Initialize per-signal strategy detectors (once per signal)."""
         config = self.config
         mp_strategy = Strategy.MomentumPeak(config.get('momentum_peak', {}))
-        mp_detector = mp_strategy.create_detector()
+        mp_detector = mp_strategy.create_detector(position.option_type)
 
         sb_strategy = Strategy.StatsBookExit(config.get('statsbook_exit', {}))
         sb_detector = sb_strategy.create_detector(self.statsbooks.get(position.ticker))
@@ -2666,6 +2764,18 @@ class LiveTest:
         oe_strategy = Strategy.OptionsExit(config.get('options_exit', {}))
         oe_detector = oe_strategy.create_detector(position.entry_price, position.option_type)
 
+        vc_strategy = Strategy.VolumeClimaxExit(config.get('volume_climax_exit', {}))
+        vc_detector = vc_strategy.create_detector(position.option_type)
+
+        ts_strategy = Strategy.TimeStop(config.get('time_stop', {}))
+        ts_detector = ts_strategy.create_detector()
+
+        vwap_strategy = Strategy.VWAPCrossExit(config.get('vwap_cross_exit', {}))
+        vwap_detector = vwap_strategy.create_detector(position.option_type)
+
+        st_flip_strategy = Strategy.SupertrendFlipExit(config.get('supertrend_flip_exit', {}))
+        st_flip_detector = st_flip_strategy.create_detector(position.option_type)
+
         # Risk assessment config
         risk_config = config.get('risk_assessment', {})
         CP_config = config.get('closure_peak', {})
@@ -2675,6 +2785,10 @@ class LiveTest:
             'sb_detector': sb_detector,
             'ai_detector': ai_detector,
             'oe_detector': oe_detector,
+            'vc_detector': vc_detector,
+            'ts_detector': ts_detector,
+            'vwap_detector': vwap_detector,
+            'st_flip_detector': st_flip_detector,
             'oe_favorability_assessed': False,
             'risk_assessed': False,
             'risk_level': None,
@@ -2712,6 +2826,7 @@ class LiveTest:
         bar = stock_df.iloc[bar_idx]
 
         stock_price = float(bar['close'])
+        stock_open = float(bar.get('open', stock_price))
         stock_high = float(bar.get('high', stock_price))
         stock_low = float(bar.get('low', stock_price))
         volume = float(bar.get('volume', 0))
@@ -2747,6 +2862,9 @@ class LiveTest:
         macd_signal_val = float(bar.get('macd_signal', np.nan))
         macd_histogram_val = float(bar.get('macd_histogram', np.nan))
         roc_val = float(bar.get('roc', np.nan))
+        stoch_k_val = float(bar.get('stoch_k', np.nan))
+        stoch_d_val = float(bar.get('stoch_d', np.nan))
+        vpoc_val = float(bar.get('vpoc', np.nan))
 
         current_days_to_expiry = max(0, (state['expiry_dt'] - timestamp).total_seconds() / 86400)
 
@@ -2795,6 +2913,7 @@ class LiveTest:
                 macd_histogram=macd_histogram_val, roc_30m=roc_val,
                 roc_day=roc_day, supertrend_direction=st_direction,
                 ewo=ewo, ewo_avg=ewo_15min_avg,
+                stoch_k=stoch_k_val, stoch_d=stoch_d_val,
             )
             if risk_level == 'HIGH':
                 oe_detector.is_high_risk = True
@@ -2838,7 +2957,7 @@ class LiveTest:
         mp_detector = state['mp_detector']
         if mp_detector and not position.is_closed:
             mp_pnl = position.get_pnl_pct(option_price)
-            mp_exit, mp_reason = mp_detector.update(mp_pnl, rsi, rsi_10min_avg, ewo)
+            mp_exit, mp_reason = mp_detector.update(mp_pnl, rsi, rsi_10min_avg, ewo, stoch_k_val, stoch_d_val)
 
         sb_exit, sb_reason = False, None
         sb_detector = state['sb_detector']
@@ -2869,6 +2988,35 @@ class LiveTest:
             )
             ai_signal_data = ai_detector.current_signal
 
+        # Update Volume Climax detector
+        vc_exit, vc_reason = False, None
+        vc_detector = state['vc_detector']
+        if vc_detector and not position.is_closed:
+            vc_pnl = position.get_pnl_pct(option_price)
+            vc_exit, vc_reason = vc_detector.update(vc_pnl, volume, stock_price, stock_open, stoch_k_val)
+
+        # Update Time Stop detector
+        ts_exit, ts_reason = False, None
+        ts_detector = state['ts_detector']
+        if ts_detector and not position.is_closed:
+            ts_pnl = position.get_pnl_pct(option_price)
+            ts_minutes = position.get_minutes_held(timestamp)
+            ts_exit, ts_reason = ts_detector.update(ts_pnl, ts_minutes)
+
+        # Update VWAP Cross detector
+        vwap_exit, vwap_reason = False, None
+        vwap_detector = state['vwap_detector']
+        if vwap_detector and not position.is_closed:
+            vwap_pnl = position.get_pnl_pct(option_price)
+            vwap_exit, vwap_reason = vwap_detector.update(vwap_pnl, stock_price, vwap)
+
+        # Update Supertrend Flip detector
+        st_flip_exit, st_flip_reason = False, None
+        st_flip_detector = state['st_flip_detector']
+        if st_flip_detector and not position.is_closed:
+            st_flip_pnl = position.get_pnl_pct(option_price)
+            st_flip_exit, st_flip_reason = st_flip_detector.update(st_flip_pnl, st_direction)
+
         # Closure-Peak signal
         CP_enabled = state['CP_enabled']
         cp_signal = False
@@ -2892,6 +3040,8 @@ class LiveTest:
             atr_sl=atr_sl_value,
             macd_line=macd_line_val, macd_signal_line=macd_signal_val,
             macd_histogram=macd_histogram_val, roc=roc_val,
+            stoch_k=stoch_k_val, stoch_d=stoch_d_val,
+            vpoc=vpoc_val, book_imbalance=np.nan,
             risk=risk_level, risk_reasons=risk_reasons, risk_trend=risk_trend,
             spy_price=spy_price, spy_gauge=spy_gauge_data, ticker_gauge=ticker_gauge_data,
             ai_outlook_1m=ai_signal_data.get('outlook_1m'),
@@ -2903,6 +3053,8 @@ class LiveTest:
             oe_state=oe_state,
             exit_sig_sb=sb_exit, exit_sig_mp=mp_exit,
             exit_sig_ai=ai_exit, exit_sig_closure_peak=cp_signal, exit_sig_oe=oe_exit,
+            exit_sig_vc=vc_exit, exit_sig_ts=ts_exit, exit_sig_vwap=vwap_exit,
+            exit_sig_st=st_flip_exit,
         )
 
         # === EXIT PRIORITY CHAIN ===
@@ -2913,6 +3065,14 @@ class LiveTest:
             position.close(option_price * (1 - slippage), timestamp, sb_reason)
         elif mp_exit and not position.is_closed:
             position.close(option_price * (1 - slippage), timestamp, mp_reason)
+        elif vc_exit and not position.is_closed:
+            position.close(option_price * (1 - slippage), timestamp, vc_reason)
+        elif vwap_exit and not position.is_closed:
+            position.close(option_price * (1 - slippage), timestamp, vwap_reason)
+        elif st_flip_exit and not position.is_closed:
+            position.close(option_price * (1 - slippage), timestamp, st_flip_reason)
+        elif ts_exit and not position.is_closed:
+            position.close(option_price * (1 - slippage), timestamp, ts_reason)
         elif ai_exit and not position.is_closed:
             position.close(option_price * (1 - slippage), timestamp, 'AI Exit Signal')
         elif CP_enabled and not position.is_closed and not np.isnan(rsi_10min_avg) and timestamp.time() >= state['CP_start_time']:
@@ -2964,6 +3124,11 @@ class LiveTest:
             macd_slow=oe_config.get('macd_slow', 26),
             macd_signal=oe_config.get('macd_signal', 9),
             roc_period=oe_config.get('roc_period', 30),
+            stoch_k_period=indicator_config.get('stoch_k_period', 5),
+            stoch_d_period=indicator_config.get('stoch_d_period', 3),
+            stoch_smooth=indicator_config.get('stoch_smooth', 3),
+            vpoc_enabled=indicator_config.get('vpoc_enabled', True),
+            vpoc_bin_size=indicator_config.get('vpoc_bin_size', None),
         )
 
         # Cache with bar count as key

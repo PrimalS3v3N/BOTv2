@@ -440,13 +440,226 @@ def ATR_SL(df, atr_period=5, hhv_period=10, multiplier=2.5):
     return ts
 
 
+def Stochastic(df, k_period=5, d_period=3, smooth=3):
+    """
+    Calculate Stochastic Oscillator (%K and %D).
+
+    Measures where the current close sits within a recent high-low range.
+    Faster than RSI at detecting overbought/oversold on short timeframes,
+    making it ideal for 1-minute intraday data.
+
+    %K (raw) = (Close - Lowest Low over k_period) / (Highest High - Lowest Low) * 100
+    %K (smoothed) = SMA(%K raw, smooth)
+    %D = SMA(%K smoothed, d_period)
+
+    Interpretation:
+    - %K > 80: Overbought (potential sell for CALLs)
+    - %K < 20: Oversold (potential sell for PUTs)
+    - %K crosses below %D in overbought zone: Bearish crossover
+    - %K crosses above %D in oversold zone: Bullish crossover
+
+    Args:
+        df: DataFrame with 'high', 'low', 'close' columns
+        k_period: Lookback period for %K (default: 5)
+        d_period: SMA period for %D signal line (default: 3)
+        smooth: SMA smoothing period for %K (default: 3)
+
+    Returns:
+        tuple: (stoch_k, stoch_d)
+            - stoch_k: Smoothed %K values (0-100 scale)
+            - stoch_d: Signal line %D values (0-100 scale)
+    """
+    empty = pd.Series(index=df.index, dtype=float)
+    if not all(col in df.columns for col in ['high', 'low', 'close']):
+        return empty.copy(), empty.copy()
+
+    high = df['high']
+    low = df['low']
+    close = df['close']
+
+    # Rolling highest high and lowest low over k_period
+    lowest_low = low.rolling(window=k_period, min_periods=k_period).min()
+    highest_high = high.rolling(window=k_period, min_periods=k_period).max()
+
+    # Raw %K
+    hl_range = highest_high - lowest_low
+    raw_k = ((close - lowest_low) / hl_range.replace(0, np.nan)) * 100
+
+    # Smooth %K with SMA
+    stoch_k = raw_k.rolling(window=smooth, min_periods=1).mean()
+
+    # %D = SMA of smoothed %K
+    stoch_d = stoch_k.rolling(window=d_period, min_periods=1).mean()
+
+    # Clamp to 0-100 range
+    stoch_k = stoch_k.clip(0, 100)
+    stoch_d = stoch_d.clip(0, 100)
+
+    return stoch_k, stoch_d
+
+
+def VPOC(df, price_col='close', volume_col='volume', bin_size=None):
+    """
+    Calculate Volume Point of Control (VPOC).
+
+    VPOC is the price level where the most volume has traded in the session.
+    It acts as a "magnet" — price tends to revert to VPOC — and represents
+    fair value consensus. Breaking through VPOC signals a shift in the
+    market's accepted value zone.
+
+    Builds a cumulative intraday volume profile (volume at each price bin)
+    and returns the price level with the highest accumulated volume at
+    each bar. Resets at market open each day.
+
+    Args:
+        df: DataFrame with price and volume data (DatetimeIndex)
+        price_col: Column for price (default: 'close')
+        volume_col: Column for volume (default: 'volume')
+        bin_size: Price bin width for volume aggregation. If None, auto-calculated
+                  as 0.1% of mean price (balances resolution vs noise).
+
+    Returns:
+        Series with VPOC price level at each bar
+    """
+    if price_col not in df.columns or volume_col not in df.columns:
+        return pd.Series(index=df.index, dtype=float)
+
+    prices = df[price_col].values
+    volumes = df[volume_col].fillna(0).values
+
+    # Auto-calculate bin size if not provided
+    if bin_size is None:
+        mean_price = np.nanmean(prices)
+        if mean_price > 0:
+            bin_size = mean_price * 0.001  # 0.1% of mean price
+        else:
+            bin_size = 0.01
+
+    vpoc_values = np.full(len(df), np.nan)
+
+    # Group by date for intraday reset
+    if hasattr(df.index, 'date'):
+        dates = df.index.date
+        unique_dates = np.unique(dates)
+
+        for date in unique_dates:
+            mask = dates == date
+            day_indices = np.where(mask)[0]
+
+            if len(day_indices) == 0:
+                continue
+
+            # Cumulative volume profile for this day
+            volume_profile = {}
+
+            for idx in day_indices:
+                price = prices[idx]
+                vol = volumes[idx]
+
+                if np.isnan(price) or np.isnan(vol) or vol <= 0:
+                    # Carry forward previous VPOC
+                    if idx > day_indices[0]:
+                        vpoc_values[idx] = vpoc_values[idx - 1]
+                    continue
+
+                # Bin the price
+                price_bin = round(price / bin_size) * bin_size
+
+                # Accumulate volume at this price level
+                volume_profile[price_bin] = volume_profile.get(price_bin, 0) + vol
+
+                # Find price level with max cumulative volume
+                vpoc_values[idx] = max(volume_profile, key=volume_profile.get)
+    else:
+        # No date grouping — continuous VPOC
+        volume_profile = {}
+        for i in range(len(df)):
+            price = prices[i]
+            vol = volumes[i]
+
+            if np.isnan(price) or np.isnan(vol) or vol <= 0:
+                if i > 0:
+                    vpoc_values[i] = vpoc_values[i - 1]
+                continue
+
+            price_bin = round(price / bin_size) * bin_size
+            volume_profile[price_bin] = volume_profile.get(price_bin, 0) + vol
+            vpoc_values[i] = max(volume_profile, key=volume_profile.get)
+
+    return pd.Series(vpoc_values, index=df.index, dtype=float)
+
+
+def BookImbalance(bid_depth, ask_depth):
+    """
+    Calculate Order Book Imbalance from Level 2 / Depth of Market data.
+
+    Measures the ratio of buying pressure to selling pressure from the
+    order book. Values > 0 indicate more buy orders (bullish), values < 0
+    indicate more sell orders (bearish).
+
+    Formula:
+        imbalance = (bid_depth - ask_depth) / (bid_depth + ask_depth)
+
+    Range: -1.0 (all sellers) to +1.0 (all buyers), 0.0 = balanced
+
+    Interpretation:
+    - imbalance > +0.3: Strong buy pressure (support likely)
+    - imbalance < -0.3: Strong sell pressure (resistance likely)
+    - Combined with VPOC: imbalance at VPOC level = high-confidence S/R
+
+    Args:
+        bid_depth: Total bid depth (sum of buy orders, float or Series)
+        ask_depth: Total ask depth (sum of sell orders, float or Series)
+
+    Returns:
+        float or Series: Imbalance value (-1.0 to +1.0)
+
+    # -----------------------------------------------------------------
+    # PLACEHOLDER: Webull Integration
+    # -----------------------------------------------------------------
+    # This function currently accepts pre-computed bid/ask depth values.
+    # When Webull Level 2 data is integrated:
+    #
+    # 1. Data.py will fetch order book snapshots via Webull API
+    #    - Endpoint: TBD (Webull L2 market data)
+    #    - Format: {price_level: quantity} for bids and asks
+    #    - Refresh rate: per-bar or per-second depending on API limits
+    #
+    # 2. Data.py will aggregate raw book into bid_depth / ask_depth:
+    #    - Option A: Sum all levels (total depth)
+    #    - Option B: Sum top N levels (near-touch depth, more responsive)
+    #    - Option C: Weighted by distance from mid (closer levels matter more)
+    #
+    # 3. This function will be called per bar in Test.py simulation loop
+    #    with the aggregated depth values.
+    #
+    # 4. Consider adding:
+    #    - BookImbalanceAtVPOC(): imbalance specifically at the VPOC price
+    #    - BookWall(): detect large single orders (>3x avg depth at a level)
+    #    - BookDelta(): cumulative bid-ask delta over time (trend of flow)
+    # -----------------------------------------------------------------
+    """
+    if isinstance(bid_depth, pd.Series):
+        total = bid_depth + ask_depth
+        total = total.replace(0, np.nan)
+        return ((bid_depth - ask_depth) / total).fillna(0)
+
+    # Scalar path
+    total = bid_depth + ask_depth
+    if total == 0:
+        return 0.0
+    return (bid_depth - ask_depth) / total
+
+
 def add_indicators(df, ema_periods=None, ewo_fast=5, ewo_slow=35, ewo_avg_period=15,
                    rsi_period=14, rsi_avg_period=10,
                    supertrend_period=10, supertrend_multiplier=3.0,
                    ichimoku_tenkan=9, ichimoku_kijun=26, ichimoku_senkou_b=52, ichimoku_displacement=26,
                    atr_sl_period=5, atr_sl_hhv=10, atr_sl_multiplier=2.5,
                    macd_fast=12, macd_slow=26, macd_signal=9,
-                   roc_period=30):
+                   roc_period=30,
+                   stoch_k_period=5, stoch_d_period=3, stoch_smooth=3,
+                   vpoc_enabled=True, vpoc_bin_size=None):
     """
     Add all standard indicators to a DataFrame.
 
@@ -471,6 +684,11 @@ def add_indicators(df, ema_periods=None, ewo_fast=5, ewo_slow=35, ewo_avg_period
         macd_slow: MACD slow EMA period (default: 26)
         macd_signal: MACD signal line EMA period (default: 9)
         roc_period: Rate of Change lookback period (default: 30)
+        stoch_k_period: Stochastic %K lookback period (default: 5)
+        stoch_d_period: Stochastic %D signal line period (default: 3)
+        stoch_smooth: Stochastic %K smoothing period (default: 3)
+        vpoc_enabled: Calculate VPOC (default: True)
+        vpoc_bin_size: VPOC price bin width (default: None = auto 0.1% of mean)
 
     Returns:
         DataFrame with added indicator columns:
@@ -493,6 +711,9 @@ def add_indicators(df, ema_periods=None, ewo_fast=5, ewo_slow=35, ewo_avg_period
         - macd_signal: MACD signal line
         - macd_histogram: MACD histogram (line - signal)
         - roc: Rate of Change (price momentum %)
+        - stoch_k: Stochastic %K (0-100, overbought > 80, oversold < 20)
+        - stoch_d: Stochastic %D signal line (0-100)
+        - vpoc: Volume Point of Control (price level with most volume)
     """
     if ema_periods is None:
         ema_periods = [10, 21, 50, 100, 200]
@@ -553,6 +774,17 @@ def add_indicators(df, ema_periods=None, ewo_fast=5, ewo_slow=35, ewo_avg_period
 
     # Add Rate of Change / Price Momentum (based on true price)
     df['roc'] = ROC(df, column='_true_price', period=roc_period)
+
+    # Add Stochastic Oscillator (uses raw OHLC, not true price — needs actual H/L range)
+    df['stoch_k'], df['stoch_d'] = Stochastic(
+        df, k_period=stoch_k_period, d_period=stoch_d_period, smooth=stoch_smooth
+    )
+
+    # Add VPOC (uses close + volume for volume profile)
+    if vpoc_enabled:
+        df['vpoc'] = VPOC(df, price_col='close', volume_col='volume', bin_size=vpoc_bin_size)
+    else:
+        df['vpoc'] = np.nan
 
     # Clean up temporary column
     df = df.drop(columns=['_true_price'])
@@ -779,5 +1011,6 @@ def estimate_option_price_bs(stock_price, strike, option_type, days_to_expiry,
 # Export functions for use by other modules
 __all__ = ['EMA', 'VWAP', 'EWO', 'true_price', 'RSI', 'MACD', 'ROC',
            'Supertrend', 'IchimokuCloud', 'ATR_SL',
+           'Stochastic', 'VPOC', 'BookImbalance',
            'add_indicators', 'black_scholes_call', 'black_scholes_put', 'black_scholes_price',
            'calculate_greeks', 'estimate_option_price_bs']

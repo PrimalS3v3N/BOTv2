@@ -251,6 +251,13 @@ BACKTEST_CONFIG = {
         'atr_sl_period': 5,                        # ATR-SL: ATR calculation period
         'atr_sl_hhv': 10,                          # ATR-SL: HHV lookback period
         'atr_sl_multiplier': 2.5,                  # ATR-SL: ATR multiplier
+        'stoch_k_period': 5,                       # Stochastic %K lookback period
+        'stoch_d_period': 3,                       # Stochastic %D signal line SMA period
+        'stoch_smooth': 3,                         # Stochastic %K smoothing SMA period
+        'stoch_overbought': 80,                    # Stochastic overbought threshold
+        'stoch_oversold': 20,                      # Stochastic oversold threshold
+        'vpoc_enabled': True,                      # Calculate VPOC (Volume Point of Control)
+        'vpoc_bin_size': None,                     # VPOC price bin width (None = auto 0.1% of mean)
     },
 
     # Closure - Peak: Avg RSI (10min) based exit in last 30 minutes of trading day
@@ -262,16 +269,21 @@ BACKTEST_CONFIG = {
     },
 
     # Momentum Peak: Detect momentum exhaustion peaks for early exit
-    # Combines RSI overbought reversal + EWO decline + RSI < avg confirmation
+    # CALLs: RSI overbought→dropping + EWO declining + Stochastic bearish crossover
+    # PUTs:  RSI oversold→bouncing + EWO increasing + Stochastic bullish crossover
     # Designed to exit 1-2 bars after a peak, before the bulk of the reversal
     'momentum_peak': {
         'enabled': True,
         'min_profit_pct': 15,              # Only consider when option profit >= this %
-        'rsi_overbought': 80,              # RSI must have reached this recently
-        'rsi_lookback': 5,                 # Bars back to check for overbought RSI
-        'rsi_drop_threshold': 10,          # RSI must drop by >= this from recent peak
-        'ewo_declining_bars': 1,           # EWO must decline for N consecutive bars
-        'require_rsi_below_avg': True,     # Require RSI < RSI_10min_avg
+        'rsi_overbought': 80,              # RSI must have reached this recently (CALLs)
+        'rsi_oversold': 20,                # RSI must have reached this recently (PUTs)
+        'rsi_lookback': 5,                 # Bars back to check for RSI extreme
+        'rsi_drop_threshold': 10,          # RSI must change by >= this from extreme
+        'ewo_declining_bars': 1,           # EWO must trend adversely for N bars
+        'require_rsi_below_avg': True,     # Require RSI vs RSI_10min_avg confirmation
+        'stoch_overbought': 80,            # Stochastic overbought zone threshold
+        'stoch_oversold': 20,              # Stochastic oversold zone threshold
+        'use_stochastic': True,            # Enable stochastic crossover confirmation
     },
 
     # StatsBook Exit: Exit based on historical statistical bounds
@@ -285,6 +297,52 @@ BACKTEST_CONFIG = {
         'min_profit_pct': 10,              # Minimum option profit % to consider exit
         'min_hold_bars': 5,                # Minimum bars held before StatsBook exit
         'rolling_window': 5,               # Bars for rolling H-L range calculation
+    },
+
+    # Volume Climax Exit: Detect exhaustion via volume spike + price reversal
+    # A sudden volume spike (Nx above rolling average) combined with a price
+    # reversal bar signals institutional exhaustion. High-volume reversals are
+    # among the most reliable intraday signals for directional shifts.
+    'volume_climax_exit': {
+        'enabled': True,
+        'volume_lookback': 20,             # Bars for rolling avg volume calculation
+        'volume_multiplier': 3.0,          # Volume must be >= Nx rolling avg to qualify
+        'min_profit_pct': 10,              # Minimum option profit % to consider exit
+        'min_hold_bars': 10,               # Minimum bars held before checking
+        'use_stochastic': False,           # Require stochastic extreme zone confirmation
+        'stoch_overbought': 75,            # Stochastic overbought threshold (CALLs)
+        'stoch_oversold': 25,              # Stochastic oversold threshold (PUTs)
+    },
+
+    # Time Stop: Exit stale positions that haven't moved meaningfully
+    # Options lose value every minute via theta decay. Holding a position
+    # that isn't moving costs real money. Frees capital for redeployment.
+    'time_stop': {
+        'enabled': True,
+        'max_minutes': 90,                 # Exit if held longer than N minutes
+        'min_profit_pct': 5,               # ... and profit is below this %
+    },
+
+    # VWAP Cross Exit: Exit when price crosses VWAP against position direction
+    # VWAP is the institutional benchmark. Price crossing to the adverse side
+    # signals that institutional flow has shifted against the position.
+    # Requires confirmation (N bars on wrong side) to avoid whipsaws.
+    'vwap_cross_exit': {
+        'enabled': True,
+        'min_profit_pct': 5,               # Minimum option profit % to consider exit
+        'min_hold_bars': 10,               # Minimum bars held before checking
+        'confirm_bars': 2,                 # Bars price must stay on adverse side of VWAP
+    },
+
+    # Supertrend Flip Exit: Exit when Supertrend direction flips against position
+    # Supertrend uses ATR-based bands to define trend direction. A flip from
+    # favorable to adverse means price broke through a volatility-adjusted
+    # support/resistance level — a mechanical trend reversal confirmation.
+    'supertrend_flip_exit': {
+        'enabled': True,
+        'min_profit_pct': 5,               # Minimum option profit % to consider exit
+        'min_hold_bars': 5,                # Minimum bars held before checking
+        'confirm_bars': 1,                 # Bars adverse direction must persist (1 = immediate)
     },
 
     # AI Exit Signal: Local LLM-based exit signal generation
@@ -343,6 +401,27 @@ BACKTEST_CONFIG = {
     # Smaller = more sensitive (more bull/bear signals), Larger = wider band (more sideways).
     # Default was 0.10, reduced to 0.05 for higher sensitivity.
     'bias_sideways_band': 0.05,
+
+    # ==========================================================================
+    # Order Book / Book Imbalance (Webull Integration)
+    # ==========================================================================
+    # PLACEHOLDER: Webull L2 data integration
+    # When Webull API is connected, Data.py will fetch order book snapshots
+    # and aggregate bid/ask depth per bar. The BookImbalance indicator in
+    # Analysis.py will then produce a -1.0 to +1.0 imbalance signal.
+    #
+    # Combined with VPOC, this enables high-confidence S/R detection:
+    # - VPOC + positive imbalance = strong support
+    # - VPOC + negative imbalance = support weakening, potential breakdown
+    # - Large sell wall above VPOC = resistance ceiling
+    'book_imbalance': {
+        'enabled': False,                          # Disabled until Webull L2 data connected
+        'data_source': 'webull',                   # PLACEHOLDER: Future data provider
+        'depth_levels': 5,                         # Top N price levels to aggregate
+        'refresh_interval': 1,                     # Seconds between book snapshots
+        'strong_imbalance_threshold': 0.3,         # |imbalance| >= this = strong signal
+        'wall_multiplier': 3.0,                    # Order size >= Nx avg = "wall" detection
+    },
 
     # ==========================================================================
     # Options Exit System (Primary TP/SL)
@@ -466,6 +545,12 @@ DATAFRAME_COLUMNS = {
         'macd_line', 'macd_signal', 'macd_histogram',
         # Price momentum (ROC)
         'roc',
+        # Stochastic Oscillator
+        'stoch_k', 'stoch_d',
+        # Volume Point of Control
+        'vpoc',
+        # Order Book Imbalance (PLACEHOLDER: Webull L2 integration)
+        'book_imbalance',
         'ai_outlook_1m', 'ai_outlook_5m', 'ai_outlook_30m', 'ai_outlook_1h',
         'ai_action', 'ai_reason',
         # Options Exit System columns (SL = stop loss, TP = take profit)
@@ -480,6 +565,10 @@ DATAFRAME_COLUMNS = {
         'exit_sig_sb', 'exit_sig_mp', 'exit_sig_ai',
         'exit_sig_closure_peak',
         'exit_sig_oe',             # Options Exit system SL/TP triggered
+        'exit_sig_vc',             # Volume Climax exit triggered
+        'exit_sig_ts',             # Time Stop exit triggered
+        'exit_sig_vwap',           # VWAP Cross exit triggered
+        'exit_sig_st',             # Supertrend Flip exit triggered
     ],
 
     # Metadata columns appended to databook (Test.py)
