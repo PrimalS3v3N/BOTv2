@@ -362,6 +362,8 @@ BACKTEST_CONFIG = {
 
         # --- Initial Stop Loss ---
         'initial_sl_pct': 20,              # Hard SL: exit if option drops X% below entry (adjustable)
+        'hard_sl_tighten_on_peak': True,   # Tighten hard SL based on peak gain before trailing activates
+                                            # E.g. entry=100, peak=105 → SL% shrinks 20→15%, hard SL 80→85
 
         # --- Trailing Stop Loss ---
         'trail_activation_pct': 10,        # Engage trailing SL when profit margin >= X%

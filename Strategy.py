@@ -574,6 +574,7 @@ class OptionsExitDetector:
         # Hard SL
         self.initial_sl_pct = config.get('initial_sl_pct', 20)
         self.hard_sl_price = entry_option_price * (1 - self.initial_sl_pct / 100)
+        self.hard_sl_tighten_on_peak = config.get('hard_sl_tighten_on_peak', True)
 
         # Trailing SL parameters
         self.trail_activation_pct = config.get('trail_activation_pct', 10)
@@ -864,14 +865,37 @@ class OptionsExitDetector:
                 emas_against += 1
         self.ema_reversal = emas_against >= self.ema_reversal_sensitivity
 
-        # --- Hard stop loss ---
+        # --- Update profit watermark (needed before hard SL adjustment) ---
+        if profit_pct > self.highest_profit_pct:
+            self.highest_profit_pct = profit_pct
+
+        # --- Hard stop loss (dynamic tightening before trailing SL activates) ---
+        # If the option price hasn't yet hit the trailing activation threshold,
+        # tighten the hard SL based on the peak gain seen so far.
+        # Peak gain scales up to just under trail_activation_pct (9.99%).
+        # HIGH risk entries double the peak gain effect for faster tightening.
+        # E.g. buy at 100, peak at 105 → SL% shrinks 20→15%, hard SL 80→85
+        #      HIGH risk same scenario → SL% shrinks 20→10%, hard SL 80→90
+        if self.hard_sl_tighten_on_peak and not self.trailing_active and self.highest_profit_pct > 0:
+            # Cap peak gain just under trailing activation to avoid overlap
+            peak_gain = min(self.highest_profit_pct, self.trail_activation_pct - 0.01)
+
+            # HIGH risk: double the peak gain effect
+            if self.is_high_risk:
+                peak_gain *= 2
+
+            adjusted_sl_pct = self.initial_sl_pct - peak_gain
+            adjusted_sl_pct = max(adjusted_sl_pct, 0.0)  # Never go above entry
+            new_hard_sl = self.entry_option_price * (1 - adjusted_sl_pct / 100)
+            # Ratchet: only tighten (move up), never loosen
+            if new_hard_sl > self.hard_sl_price:
+                self.hard_sl_price = new_hard_sl
+
         if option_price <= self.hard_sl_price:
             state = self._build_state(option_price, profit_pct)
             return True, 'Hard-SL', state
 
         # --- Trailing stop loss ---
-        if profit_pct > self.highest_profit_pct:
-            self.highest_profit_pct = profit_pct
 
         # Calculate where trailing SL should be based on watermark profit
         trail_sl_pct = self._calculate_trail_sl_pct(self.highest_profit_pct)
