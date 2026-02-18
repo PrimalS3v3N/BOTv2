@@ -647,6 +647,8 @@ class Databook:
                    atr_sl=np.nan,
                    macd_line=np.nan, macd_signal_line=np.nan, macd_histogram=np.nan,
                    roc=np.nan,
+                   stoch_k=np.nan, stoch_d=np.nan,
+                   vpoc=np.nan, book_imbalance=np.nan,
                    risk=None, risk_reasons=None, risk_trend=None,
                    spy_price=np.nan, spy_gauge=None, ticker_gauge=None,
                    ai_outlook_1m=None, ai_outlook_5m=None,
@@ -752,6 +754,13 @@ class Databook:
             'macd_histogram': macd_histogram,
             # Price momentum (ROC)
             'roc': roc,
+            # Stochastic Oscillator
+            'stoch_k': stoch_k,
+            'stoch_d': stoch_d,
+            # Volume Point of Control
+            'vpoc': vpoc,
+            # Order Book Imbalance (PLACEHOLDER: Webull L2)
+            'book_imbalance': book_imbalance,
             # AI exit signal tracking
             'ai_outlook_1m': ai_outlook_1m,
             'ai_outlook_5m': ai_outlook_5m,
@@ -1451,6 +1460,13 @@ class SimulationEngine:
         macd_signal_period = oe_config.get('macd_signal', 9)
         roc_period = oe_config.get('roc_period', 30)
 
+        # Get Stochastic and VPOC settings
+        stoch_k_period = indicator_config.get('stoch_k_period', 5)
+        stoch_d_period = indicator_config.get('stoch_d_period', 3)
+        stoch_smooth = indicator_config.get('stoch_smooth', 3)
+        vpoc_enabled = indicator_config.get('vpoc_enabled', True)
+        vpoc_bin_size = indicator_config.get('vpoc_bin_size', None)
+
         # Add technical indicators to stock data
         stock_data = Analysis.add_indicators(stock_data, ema_periods=ema_periods,
                                              supertrend_period=supertrend_period,
@@ -1465,7 +1481,12 @@ class SimulationEngine:
                                              macd_fast=macd_fast,
                                              macd_slow=macd_slow,
                                              macd_signal=macd_signal_period,
-                                             roc_period=roc_period)
+                                             roc_period=roc_period,
+                                             stoch_k_period=stoch_k_period,
+                                             stoch_d_period=stoch_d_period,
+                                             stoch_smooth=stoch_smooth,
+                                             vpoc_enabled=vpoc_enabled,
+                                             vpoc_bin_size=vpoc_bin_size)
 
         # Pre-compute SPY and ticker gauges for all bars at once (O(n) vs O(n^2))
         _all_timestamps = stock_data.index
@@ -1474,7 +1495,7 @@ class SimulationEngine:
 
         # Create strategy detectors
         mp_strategy = Strategy.MomentumPeak(self.config.get('momentum_peak', {}))
-        mp_detector = mp_strategy.create_detector()
+        mp_detector = mp_strategy.create_detector(position.option_type)
 
         sb_strategy = Strategy.StatsBookExit(self.config.get('statsbook_exit', {}))
         sb_detector = sb_strategy.create_detector(statsbooks.get(position.ticker))
@@ -1557,6 +1578,9 @@ class SimulationEngine:
         _col_macd_signal = stock_data['macd_signal'].values if 'macd_signal' in stock_data.columns else np.full(len(stock_data), np.nan)
         _col_macd_hist = stock_data['macd_histogram'].values if 'macd_histogram' in stock_data.columns else np.full(len(stock_data), np.nan)
         _col_roc = stock_data['roc'].values if 'roc' in stock_data.columns else np.full(len(stock_data), np.nan)
+        _col_stoch_k = stock_data['stoch_k'].values if 'stoch_k' in stock_data.columns else np.full(len(stock_data), np.nan)
+        _col_stoch_d = stock_data['stoch_d'].values if 'stoch_d' in stock_data.columns else np.full(len(stock_data), np.nan)
+        _col_vpoc = stock_data['vpoc'].values if 'vpoc' in stock_data.columns else np.full(len(stock_data), np.nan)
         _timestamps = stock_data.index
 
         for i in range(len(stock_data)):
@@ -1598,6 +1622,9 @@ class SimulationEngine:
             macd_signal_val = float(_col_macd_signal[i])
             macd_histogram_val = float(_col_macd_hist[i])
             roc_val = float(_col_roc[i])
+            stoch_k_val = float(_col_stoch_k[i])
+            stoch_d_val = float(_col_stoch_d[i])
+            vpoc_val = float(_col_vpoc[i])
 
             current_days_to_expiry = max(0, (expiry_dt - timestamp).total_seconds() / 86400)
 
@@ -1660,6 +1687,8 @@ class SimulationEngine:
                         supertrend_direction=st_direction,
                         ewo=ewo,
                         ewo_avg=ewo_15min_avg,
+                        stoch_k=stoch_k_val,
+                        stoch_d=stoch_d_val,
                     )
                     if risk_level == 'HIGH':
                         oe_detector.is_high_risk = True
@@ -1703,7 +1732,7 @@ class SimulationEngine:
                 mp_reason = None
                 if mp_detector and not position.is_closed:
                     mp_pnl = position.get_pnl_pct(option_price)
-                    mp_exit, mp_reason = mp_detector.update(mp_pnl, rsi, rsi_10min_avg, ewo)
+                    mp_exit, mp_reason = mp_detector.update(mp_pnl, rsi, rsi_10min_avg, ewo, stoch_k_val, stoch_d_val)
 
                 # Update StatsBook detector
                 sb_exit = False
@@ -1752,7 +1781,7 @@ class SimulationEngine:
                 vc_reason = None
                 if vc_detector and not position.is_closed:
                     vc_pnl = position.get_pnl_pct(option_price)
-                    vc_exit, vc_reason = vc_detector.update(vc_pnl, volume, stock_price, stock_open)
+                    vc_exit, vc_reason = vc_detector.update(vc_pnl, volume, stock_price, stock_open, stoch_k_val)
 
                 # Update Time Stop detector
                 ts_exit = False
@@ -1804,6 +1833,8 @@ class SimulationEngine:
                     macd_line=macd_line_val, macd_signal_line=macd_signal_val,
                     macd_histogram=macd_histogram_val,
                     roc=roc_val,
+                    stoch_k=stoch_k_val, stoch_d=stoch_d_val,
+                    vpoc=vpoc_val, book_imbalance=np.nan,
                     risk=risk_level, risk_reasons=risk_reasons, risk_trend=risk_trend,
                     spy_price=spy_price, spy_gauge=spy_gauge_data, ticker_gauge=ticker_gauge_data,
                     ai_outlook_1m=ai_signal_data.get('outlook_1m'),
@@ -1875,6 +1906,8 @@ class SimulationEngine:
                     macd_line=macd_line_val, macd_signal_line=macd_signal_val,
                     macd_histogram=macd_histogram_val,
                     roc=roc_val,
+                    stoch_k=stoch_k_val, stoch_d=stoch_d_val,
+                    vpoc=vpoc_val, book_imbalance=np.nan,
                     spy_price=spy_price, spy_gauge=spy_gauge_data, ticker_gauge=ticker_gauge_data,
                 )
 
@@ -2715,7 +2748,7 @@ class LiveTest:
         """Initialize per-signal strategy detectors (once per signal)."""
         config = self.config
         mp_strategy = Strategy.MomentumPeak(config.get('momentum_peak', {}))
-        mp_detector = mp_strategy.create_detector()
+        mp_detector = mp_strategy.create_detector(position.option_type)
 
         sb_strategy = Strategy.StatsBookExit(config.get('statsbook_exit', {}))
         sb_detector = sb_strategy.create_detector(self.statsbooks.get(position.ticker))
@@ -2829,6 +2862,9 @@ class LiveTest:
         macd_signal_val = float(bar.get('macd_signal', np.nan))
         macd_histogram_val = float(bar.get('macd_histogram', np.nan))
         roc_val = float(bar.get('roc', np.nan))
+        stoch_k_val = float(bar.get('stoch_k', np.nan))
+        stoch_d_val = float(bar.get('stoch_d', np.nan))
+        vpoc_val = float(bar.get('vpoc', np.nan))
 
         current_days_to_expiry = max(0, (state['expiry_dt'] - timestamp).total_seconds() / 86400)
 
@@ -2877,6 +2913,7 @@ class LiveTest:
                 macd_histogram=macd_histogram_val, roc_30m=roc_val,
                 roc_day=roc_day, supertrend_direction=st_direction,
                 ewo=ewo, ewo_avg=ewo_15min_avg,
+                stoch_k=stoch_k_val, stoch_d=stoch_d_val,
             )
             if risk_level == 'HIGH':
                 oe_detector.is_high_risk = True
@@ -2920,7 +2957,7 @@ class LiveTest:
         mp_detector = state['mp_detector']
         if mp_detector and not position.is_closed:
             mp_pnl = position.get_pnl_pct(option_price)
-            mp_exit, mp_reason = mp_detector.update(mp_pnl, rsi, rsi_10min_avg, ewo)
+            mp_exit, mp_reason = mp_detector.update(mp_pnl, rsi, rsi_10min_avg, ewo, stoch_k_val, stoch_d_val)
 
         sb_exit, sb_reason = False, None
         sb_detector = state['sb_detector']
@@ -2956,7 +2993,7 @@ class LiveTest:
         vc_detector = state['vc_detector']
         if vc_detector and not position.is_closed:
             vc_pnl = position.get_pnl_pct(option_price)
-            vc_exit, vc_reason = vc_detector.update(vc_pnl, volume, stock_price, stock_open)
+            vc_exit, vc_reason = vc_detector.update(vc_pnl, volume, stock_price, stock_open, stoch_k_val)
 
         # Update Time Stop detector
         ts_exit, ts_reason = False, None
@@ -3003,6 +3040,8 @@ class LiveTest:
             atr_sl=atr_sl_value,
             macd_line=macd_line_val, macd_signal_line=macd_signal_val,
             macd_histogram=macd_histogram_val, roc=roc_val,
+            stoch_k=stoch_k_val, stoch_d=stoch_d_val,
+            vpoc=vpoc_val, book_imbalance=np.nan,
             risk=risk_level, risk_reasons=risk_reasons, risk_trend=risk_trend,
             spy_price=spy_price, spy_gauge=spy_gauge_data, ticker_gauge=ticker_gauge_data,
             ai_outlook_1m=ai_signal_data.get('outlook_1m'),
@@ -3085,6 +3124,11 @@ class LiveTest:
             macd_slow=oe_config.get('macd_slow', 26),
             macd_signal=oe_config.get('macd_signal', 9),
             roc_period=oe_config.get('roc_period', 30),
+            stoch_k_period=indicator_config.get('stoch_k_period', 5),
+            stoch_d_period=indicator_config.get('stoch_d_period', 3),
+            stoch_smooth=indicator_config.get('stoch_smooth', 3),
+            vpoc_enabled=indicator_config.get('vpoc_enabled', True),
+            vpoc_bin_size=indicator_config.get('vpoc_bin_size', None),
         )
 
         # Cache with bar count as key

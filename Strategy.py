@@ -31,19 +31,26 @@ class MomentumPeak:
     """
     Factory for creating MomentumPeakDetector instances.
 
-    Detects momentum exhaustion peaks using RSI overbought reversal,
-    EWO decline, and RSI-below-average confirmation. Triggers 1-2 bars
-    after a peak, before the bulk of the reversal.
+    Detects momentum exhaustion peaks using RSI overbought/oversold reversal,
+    EWO decline/incline, Stochastic crossovers, and RSI-below/above-average
+    confirmation. Works for both CALLs and PUTs.
+
+    CALLs: RSI overbought → dropping, EWO declining, Stochastic bearish crossover
+    PUTs:  RSI oversold → bouncing, EWO increasing, Stochastic bullish crossover
 
     Config: BACKTEST_CONFIG['momentum_peak']
         {
             'enabled': True,
             'min_profit_pct': 15,          # Minimum option profit %
-            'rsi_overbought': 80,          # RSI overbought threshold
-            'rsi_lookback': 5,             # Bars to check for recent overbought
-            'rsi_drop_threshold': 10,      # Min RSI drop from peak
-            'ewo_declining_bars': 1,       # Consecutive declining EWO bars
-            'require_rsi_below_avg': True, # RSI < RSI_10min_avg
+            'rsi_overbought': 80,          # RSI overbought threshold (CALLs)
+            'rsi_oversold': 20,            # RSI oversold threshold (PUTs)
+            'rsi_lookback': 5,             # Bars to check for recent extreme
+            'rsi_drop_threshold': 10,      # Min RSI change from extreme
+            'ewo_declining_bars': 1,       # Consecutive EWO bars in adverse direction
+            'require_rsi_below_avg': True, # RSI vs RSI_10min_avg confirmation
+            'stoch_overbought': 80,        # Stochastic overbought zone
+            'stoch_oversold': 20,          # Stochastic oversold zone
+            'use_stochastic': True,        # Enable stochastic crossover confirmation
         }
     """
 
@@ -52,37 +59,56 @@ class MomentumPeak:
         self.enabled = mp_config.get('enabled', False)
         self.config = mp_config
 
-    def create_detector(self):
+    def create_detector(self, option_type=None):
         """Create a new MomentumPeakDetector for a position. Returns None if disabled."""
         if not self.enabled:
             return None
-        return MomentumPeakDetector(self.config)
+        return MomentumPeakDetector(self.config, option_type)
 
 
 class MomentumPeakDetector:
     """
     Tracks momentum state for a single position and detects peaks.
 
-    Conditions (ALL must be met to trigger exit):
+    For CALLs (stock topped out → sell call):
     1. Option profit >= min_profit_pct
-    2. RSI reached overbought level within lookback window
-    3. RSI dropped by >= rsi_drop_threshold from its recent peak
+    2. RSI reached overbought (>80) within lookback window
+    3. RSI dropped by >= rsi_drop_threshold from peak
     4. EWO declining for N consecutive bars
     5. RSI crossed below RSI_10min_avg (optional)
+    6. Stochastic %K crossed below %D in overbought zone (optional)
+
+    For PUTs (stock bottomed out → sell put):
+    1. Option profit >= min_profit_pct
+    2. RSI reached oversold (<20) within lookback window
+    3. RSI bounced up by >= rsi_drop_threshold from trough
+    4. EWO increasing for N consecutive bars
+    5. RSI crossed above RSI_10min_avg (optional)
+    6. Stochastic %K crossed above %D in oversold zone (optional)
     """
 
-    def __init__(self, config):
+    def __init__(self, config, option_type=None):
         self.min_profit_pct = config.get('min_profit_pct', 15)
         self.rsi_overbought = config.get('rsi_overbought', 80)
+        self.rsi_oversold = config.get('rsi_oversold', 20)
         self.rsi_lookback = config.get('rsi_lookback', 5)
         self.rsi_drop_threshold = config.get('rsi_drop_threshold', 10)
         self.ewo_declining_bars = config.get('ewo_declining_bars', 1)
         self.require_rsi_below_avg = config.get('require_rsi_below_avg', True)
+        self.stoch_overbought = config.get('stoch_overbought', 80)
+        self.stoch_oversold = config.get('stoch_oversold', 20)
+        self.use_stochastic = config.get('use_stochastic', True)
+
+        # Determine position direction
+        ot = (option_type or '').upper()
+        self.is_call = ot in ('CALL', 'CALLS', 'C')
 
         self.rsi_history = []
         self.ewo_history = []
+        self.stoch_k_history = []
+        self.stoch_d_history = []
 
-    def update(self, pnl_pct, rsi, rsi_avg, ewo):
+    def update(self, pnl_pct, rsi, rsi_avg, ewo, stoch_k=np.nan, stoch_d=np.nan):
         """
         Check for momentum peak exit signal.
 
@@ -91,12 +117,16 @@ class MomentumPeakDetector:
             rsi: Current RSI value
             rsi_avg: Current RSI 10-min average
             ewo: Current EWO value
+            stoch_k: Current Stochastic %K value
+            stoch_d: Current Stochastic %D value
 
         Returns:
             (should_exit, exit_reason): Tuple. exit_reason is None if no exit.
         """
         self.rsi_history.append(rsi)
         self.ewo_history.append(ewo)
+        self.stoch_k_history.append(stoch_k)
+        self.stoch_d_history.append(stoch_d)
 
         # Need at least 2 bars of history
         if len(self.rsi_history) < 2 or len(self.ewo_history) < 2:
@@ -110,6 +140,13 @@ class MomentumPeakDetector:
         if pnl_pct < self.min_profit_pct:
             return False, None
 
+        if self.is_call:
+            return self._check_call_peak(rsi, rsi_avg, ewo, stoch_k, stoch_d)
+        else:
+            return self._check_put_peak(rsi, rsi_avg, ewo, stoch_k, stoch_d)
+
+    def _check_call_peak(self, rsi, rsi_avg, ewo, stoch_k, stoch_d):
+        """CALL peak: stock topped out, RSI overbought→dropping, EWO declining."""
         # 2. RSI was overbought recently (within lookback window)
         lookback = min(self.rsi_lookback, len(self.rsi_history))
         recent_rsi = self.rsi_history[-lookback:]
@@ -127,23 +164,96 @@ class MomentumPeakDetector:
             return False, None
 
         # 4. EWO is declining for N consecutive bars
-        ewo_check_len = self.ewo_declining_bars + 1
-        if len(self.ewo_history) < ewo_check_len:
+        if not self._ewo_trending(declining=True):
             return False, None
-
-        recent_ewo = self.ewo_history[-ewo_check_len:]
-        for j in range(len(recent_ewo) - 1):
-            if np.isnan(recent_ewo[j]) or np.isnan(recent_ewo[j + 1]):
-                return False, None
-            if recent_ewo[j + 1] >= recent_ewo[j]:
-                return False, None
 
         # 5. RSI below its 10-min average (optional confirmation)
         if self.require_rsi_below_avg and not np.isnan(rsi_avg):
             if rsi >= rsi_avg:
                 return False, None
 
+        # 6. Stochastic bearish crossover in overbought zone (optional)
+        if self.use_stochastic and not self._stoch_crossover_bearish():
+            return False, None
+
         return True, 'Momentum Peak'
+
+    def _check_put_peak(self, rsi, rsi_avg, ewo, stoch_k, stoch_d):
+        """PUT peak: stock bottomed out, RSI oversold→bouncing, EWO increasing."""
+        # 2. RSI was oversold recently (within lookback window)
+        lookback = min(self.rsi_lookback, len(self.rsi_history))
+        recent_rsi = self.rsi_history[-lookback:]
+        valid_recent = [r for r in recent_rsi if not np.isnan(r)]
+        if not valid_recent:
+            return False, None
+        rsi_trough = min(valid_recent)
+
+        if rsi_trough > self.rsi_oversold:
+            return False, None
+
+        # 3. RSI has bounced up significantly from trough
+        rsi_bounce = rsi - rsi_trough
+        if rsi_bounce < self.rsi_drop_threshold:
+            return False, None
+
+        # 4. EWO is increasing for N consecutive bars (bullish reversal = bad for PUT)
+        if not self._ewo_trending(declining=False):
+            return False, None
+
+        # 5. RSI above its 10-min average (optional confirmation — inverse of CALL)
+        if self.require_rsi_below_avg and not np.isnan(rsi_avg):
+            if rsi <= rsi_avg:
+                return False, None
+
+        # 6. Stochastic bullish crossover in oversold zone (optional)
+        if self.use_stochastic and not self._stoch_crossover_bullish():
+            return False, None
+
+        return True, 'Momentum Peak'
+
+    def _ewo_trending(self, declining=True):
+        """Check if EWO has been trending in the specified direction for N bars."""
+        ewo_check_len = self.ewo_declining_bars + 1
+        if len(self.ewo_history) < ewo_check_len:
+            return False
+
+        recent_ewo = self.ewo_history[-ewo_check_len:]
+        for j in range(len(recent_ewo) - 1):
+            if np.isnan(recent_ewo[j]) or np.isnan(recent_ewo[j + 1]):
+                return False
+            if declining:
+                if recent_ewo[j + 1] >= recent_ewo[j]:
+                    return False
+            else:
+                if recent_ewo[j + 1] <= recent_ewo[j]:
+                    return False
+        return True
+
+    def _stoch_crossover_bearish(self):
+        """Check if %K crossed below %D recently while in overbought zone."""
+        if len(self.stoch_k_history) < 2 or len(self.stoch_d_history) < 2:
+            return False
+        prev_k = self.stoch_k_history[-2]
+        curr_k = self.stoch_k_history[-1]
+        prev_d = self.stoch_d_history[-2]
+        curr_d = self.stoch_d_history[-1]
+        if np.isnan(prev_k) or np.isnan(curr_k) or np.isnan(prev_d) or np.isnan(curr_d):
+            return False
+        # %K was above %D and now crossed below, while in overbought zone
+        return prev_k >= prev_d and curr_k < curr_d and prev_k >= self.stoch_overbought
+
+    def _stoch_crossover_bullish(self):
+        """Check if %K crossed above %D recently while in oversold zone."""
+        if len(self.stoch_k_history) < 2 or len(self.stoch_d_history) < 2:
+            return False
+        prev_k = self.stoch_k_history[-2]
+        curr_k = self.stoch_k_history[-1]
+        prev_d = self.stoch_d_history[-2]
+        curr_d = self.stoch_d_history[-1]
+        if np.isnan(prev_k) or np.isnan(curr_k) or np.isnan(prev_d) or np.isnan(curr_d):
+            return False
+        # %K was below %D and now crossed above, while in oversold zone
+        return prev_k <= prev_d and curr_k > curr_d and prev_k <= self.stoch_oversold
 
 
 # =============================================================================
@@ -667,7 +777,8 @@ class OptionsExitDetector:
     def RiskOutlook(self, rsi, rsi_avg,
                     ema_values, stock_price, atr_sl_value,
                     macd_histogram, roc_30m, roc_day,
-                    supertrend_direction, ewo, ewo_avg):
+                    supertrend_direction, ewo, ewo_avg,
+                    stoch_k=np.nan, stoch_d=np.nan):
         """
         Assess whether the entry is in a favorable region.
 
@@ -815,6 +926,19 @@ class OptionsExitDetector:
                 reasons.append(f'EWO_pos({ewo:.3f})')
                 risk_score += 1
 
+        # --- 8. Stochastic overbought/oversold at entry ---
+        if not np.isnan(stoch_k):
+            if self.is_call and stoch_k >= 80:
+                reasons.append(f'Stoch_OB({stoch_k:.0f})')
+                risk_score += 2
+            elif not self.is_call and stoch_k <= 20:
+                reasons.append(f'Stoch_OS({stoch_k:.0f})')
+                risk_score += 2
+            elif self.is_call and stoch_k <= 20:
+                risk_score -= 1  # Oversold = good for calls
+            elif not self.is_call and stoch_k >= 80:
+                risk_score -= 1  # Overbought = good for puts
+
         # --- Score to label ---
         if risk_score >= 6:
             self.favorability = 'HIGH'
@@ -959,6 +1083,9 @@ class VolumeClimaxExit:
     signals — institutions unloading or short-covering creates a volume
     climax that typically precedes a directional shift.
 
+    Optional: Stochastic confirmation strengthens the signal by requiring
+    the stochastic oscillator to be in the extreme zone matching the reversal.
+
     Config: BACKTEST_CONFIG['volume_climax_exit']
         {
             'enabled': True,
@@ -966,6 +1093,9 @@ class VolumeClimaxExit:
             'volume_multiplier': 3.0,      # Current bar volume must be >= Nx avg
             'min_profit_pct': 10,          # Minimum option profit %
             'min_hold_bars': 10,           # Minimum bars before checking
+            'use_stochastic': False,       # Require stochastic extreme zone confirmation
+            'stoch_overbought': 75,        # Stochastic overbought zone for CALLs
+            'stoch_oversold': 25,          # Stochastic oversold zone for PUTs
         }
     """
 
@@ -992,6 +1122,9 @@ class VolumeClimaxDetector:
     4. Price reversal against position direction on the same bar:
        - CALLs: stock close < stock open (bearish bar)
        - PUTs: stock close > stock open (bullish bar)
+    5. (Optional) Stochastic in extreme zone confirming reversal:
+       - CALLs: Stochastic %K >= stoch_overbought (exhaustion at top)
+       - PUTs: Stochastic %K <= stoch_oversold (exhaustion at bottom)
     """
 
     def __init__(self, config, option_type):
@@ -999,12 +1132,15 @@ class VolumeClimaxDetector:
         self.volume_multiplier = config.get('volume_multiplier', 3.0)
         self.min_profit_pct = config.get('min_profit_pct', 10)
         self.min_hold_bars = config.get('min_hold_bars', 10)
+        self.use_stochastic = config.get('use_stochastic', False)
+        self.stoch_overbought = config.get('stoch_overbought', 75)
+        self.stoch_oversold = config.get('stoch_oversold', 25)
         self.is_call = option_type.upper() in ['CALL', 'CALLS', 'C']
 
         self.volume_history = []
         self.bar_count = 0
 
-    def update(self, pnl_pct, volume, stock_close, stock_open):
+    def update(self, pnl_pct, volume, stock_close, stock_open, stoch_k=np.nan):
         """
         Check for volume climax exit signal.
 
@@ -1013,6 +1149,7 @@ class VolumeClimaxDetector:
             volume: Current bar volume
             stock_close: Current bar close price
             stock_open: Current bar open price
+            stoch_k: Current Stochastic %K value (optional)
 
         Returns:
             (should_exit, exit_reason): Tuple. exit_reason is None if no exit.
@@ -1047,14 +1184,23 @@ class VolumeClimaxDetector:
             return False, None
 
         # 3. Price reversal against position direction
+        price_reversal = False
         if self.is_call and stock_close < stock_open:
-            # Bearish bar on a CALL = reversal
-            return True, 'Volume Climax'
+            price_reversal = True
         elif not self.is_call and stock_close > stock_open:
-            # Bullish bar on a PUT = reversal
-            return True, 'Volume Climax'
+            price_reversal = True
 
-        return False, None
+        if not price_reversal:
+            return False, None
+
+        # 4. Stochastic extreme zone confirmation (optional)
+        if self.use_stochastic and not np.isnan(stoch_k):
+            if self.is_call and stoch_k < self.stoch_overbought:
+                return False, None
+            elif not self.is_call and stoch_k > self.stoch_oversold:
+                return False, None
+
+        return True, 'Volume Climax'
 
 
 # =============================================================================

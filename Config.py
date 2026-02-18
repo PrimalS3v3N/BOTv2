@@ -251,6 +251,13 @@ BACKTEST_CONFIG = {
         'atr_sl_period': 5,                        # ATR-SL: ATR calculation period
         'atr_sl_hhv': 10,                          # ATR-SL: HHV lookback period
         'atr_sl_multiplier': 2.5,                  # ATR-SL: ATR multiplier
+        'stoch_k_period': 5,                       # Stochastic %K lookback period
+        'stoch_d_period': 3,                       # Stochastic %D signal line SMA period
+        'stoch_smooth': 3,                         # Stochastic %K smoothing SMA period
+        'stoch_overbought': 80,                    # Stochastic overbought threshold
+        'stoch_oversold': 20,                      # Stochastic oversold threshold
+        'vpoc_enabled': True,                      # Calculate VPOC (Volume Point of Control)
+        'vpoc_bin_size': None,                     # VPOC price bin width (None = auto 0.1% of mean)
     },
 
     # Closure - Peak: Avg RSI (10min) based exit in last 30 minutes of trading day
@@ -262,16 +269,21 @@ BACKTEST_CONFIG = {
     },
 
     # Momentum Peak: Detect momentum exhaustion peaks for early exit
-    # Combines RSI overbought reversal + EWO decline + RSI < avg confirmation
+    # CALLs: RSI overbought→dropping + EWO declining + Stochastic bearish crossover
+    # PUTs:  RSI oversold→bouncing + EWO increasing + Stochastic bullish crossover
     # Designed to exit 1-2 bars after a peak, before the bulk of the reversal
     'momentum_peak': {
         'enabled': True,
         'min_profit_pct': 15,              # Only consider when option profit >= this %
-        'rsi_overbought': 80,              # RSI must have reached this recently
-        'rsi_lookback': 5,                 # Bars back to check for overbought RSI
-        'rsi_drop_threshold': 10,          # RSI must drop by >= this from recent peak
-        'ewo_declining_bars': 1,           # EWO must decline for N consecutive bars
-        'require_rsi_below_avg': True,     # Require RSI < RSI_10min_avg
+        'rsi_overbought': 80,              # RSI must have reached this recently (CALLs)
+        'rsi_oversold': 20,                # RSI must have reached this recently (PUTs)
+        'rsi_lookback': 5,                 # Bars back to check for RSI extreme
+        'rsi_drop_threshold': 10,          # RSI must change by >= this from extreme
+        'ewo_declining_bars': 1,           # EWO must trend adversely for N bars
+        'require_rsi_below_avg': True,     # Require RSI vs RSI_10min_avg confirmation
+        'stoch_overbought': 80,            # Stochastic overbought zone threshold
+        'stoch_oversold': 20,              # Stochastic oversold zone threshold
+        'use_stochastic': True,            # Enable stochastic crossover confirmation
     },
 
     # StatsBook Exit: Exit based on historical statistical bounds
@@ -297,6 +309,9 @@ BACKTEST_CONFIG = {
         'volume_multiplier': 3.0,          # Volume must be >= Nx rolling avg to qualify
         'min_profit_pct': 10,              # Minimum option profit % to consider exit
         'min_hold_bars': 10,               # Minimum bars held before checking
+        'use_stochastic': False,           # Require stochastic extreme zone confirmation
+        'stoch_overbought': 75,            # Stochastic overbought threshold (CALLs)
+        'stoch_oversold': 25,              # Stochastic oversold threshold (PUTs)
     },
 
     # Time Stop: Exit stale positions that haven't moved meaningfully
@@ -386,6 +401,27 @@ BACKTEST_CONFIG = {
     # Smaller = more sensitive (more bull/bear signals), Larger = wider band (more sideways).
     # Default was 0.10, reduced to 0.05 for higher sensitivity.
     'bias_sideways_band': 0.05,
+
+    # ==========================================================================
+    # Order Book / Book Imbalance (Webull Integration)
+    # ==========================================================================
+    # PLACEHOLDER: Webull L2 data integration
+    # When Webull API is connected, Data.py will fetch order book snapshots
+    # and aggregate bid/ask depth per bar. The BookImbalance indicator in
+    # Analysis.py will then produce a -1.0 to +1.0 imbalance signal.
+    #
+    # Combined with VPOC, this enables high-confidence S/R detection:
+    # - VPOC + positive imbalance = strong support
+    # - VPOC + negative imbalance = support weakening, potential breakdown
+    # - Large sell wall above VPOC = resistance ceiling
+    'book_imbalance': {
+        'enabled': False,                          # Disabled until Webull L2 data connected
+        'data_source': 'webull',                   # PLACEHOLDER: Future data provider
+        'depth_levels': 5,                         # Top N price levels to aggregate
+        'refresh_interval': 1,                     # Seconds between book snapshots
+        'strong_imbalance_threshold': 0.3,         # |imbalance| >= this = strong signal
+        'wall_multiplier': 3.0,                    # Order size >= Nx avg = "wall" detection
+    },
 
     # ==========================================================================
     # Options Exit System (Primary TP/SL)
@@ -507,6 +543,12 @@ DATAFRAME_COLUMNS = {
         'macd_line', 'macd_signal', 'macd_histogram',
         # Price momentum (ROC)
         'roc',
+        # Stochastic Oscillator
+        'stoch_k', 'stoch_d',
+        # Volume Point of Control
+        'vpoc',
+        # Order Book Imbalance (PLACEHOLDER: Webull L2 integration)
+        'book_imbalance',
         'ai_outlook_1m', 'ai_outlook_5m', 'ai_outlook_30m', 'ai_outlook_1h',
         'ai_action', 'ai_reason',
         # Options Exit System columns (SL = stop loss, TP = take profit)
