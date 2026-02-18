@@ -657,7 +657,8 @@ class Databook:
                    exit_sig_ai=None,
                    exit_sig_closure_peak=None,
                    exit_sig_oe=None,
-                   exit_sig_vc=None, exit_sig_ts=None, exit_sig_vwap=None):
+                   exit_sig_vc=None, exit_sig_ts=None, exit_sig_vwap=None,
+                   exit_sig_st=None):
         """Add a tracking record."""
         pnl_pct = self.position.get_pnl_pct(option_price) if holding else np.nan
 
@@ -775,6 +776,7 @@ class Databook:
             'exit_sig_vc': exit_sig_vc,
             'exit_sig_ts': exit_sig_ts,
             'exit_sig_vwap': exit_sig_vwap,
+            'exit_sig_st': exit_sig_st,
         }
 
         self.records.append(record)
@@ -996,7 +998,8 @@ class DataSummary:
 
         exit_sig_cols = [c for c in ['exit_sig_sb', 'exit_sig_mp', 'exit_sig_ai',
                                       'exit_sig_closure_peak', 'exit_sig_oe',
-                                      'exit_sig_vc', 'exit_sig_ts', 'exit_sig_vwap'] if c in df.columns]
+                                      'exit_sig_vc', 'exit_sig_ts', 'exit_sig_vwap',
+                                      'exit_sig_st'] if c in df.columns]
 
         records = []
         for interval_start, idx_group in df.groupby(intervals).groups.items():
@@ -1497,6 +1500,9 @@ class SimulationEngine:
         vwap_strategy = Strategy.VWAPCrossExit(self.config.get('vwap_cross_exit', {}))
         vwap_detector = vwap_strategy.create_detector(position.option_type)
 
+        st_flip_strategy = Strategy.SupertrendFlipExit(self.config.get('supertrend_flip_exit', {}))
+        st_flip_detector = st_flip_strategy.create_detector(position.option_type)
+
         # Closure - Peak settings
         CP_config = self.config.get('closure_peak', {})
         CP_enabled = CP_config.get('enabled', True)
@@ -1763,6 +1769,13 @@ class SimulationEngine:
                     vwap_pnl = position.get_pnl_pct(option_price)
                     vwap_exit, vwap_reason = vwap_detector.update(vwap_pnl, stock_price, vwap)
 
+                # Update Supertrend Flip detector
+                st_flip_exit = False
+                st_flip_reason = None
+                if st_flip_detector and not position.is_closed:
+                    st_flip_pnl = position.get_pnl_pct(option_price)
+                    st_flip_exit, st_flip_reason = st_flip_detector.update(st_flip_pnl, st_direction)
+
                 # Compute Closure-Peak signal flag
                 cp_signal = False
                 if CP_enabled and not np.isnan(rsi_10min_avg) and timestamp.time() >= CP_start_time:
@@ -1803,6 +1816,7 @@ class SimulationEngine:
                     exit_sig_sb=sb_exit, exit_sig_mp=mp_exit,
                     exit_sig_ai=ai_exit, exit_sig_closure_peak=cp_signal, exit_sig_oe=oe_exit,
                     exit_sig_vc=vc_exit, exit_sig_ts=ts_exit, exit_sig_vwap=vwap_exit,
+                    exit_sig_st=st_flip_exit,
                 )
 
                 # === EXIT PRIORITY CHAIN ===
@@ -1821,6 +1835,9 @@ class SimulationEngine:
                 elif vwap_exit and not position.is_closed:
                     exit_price = option_price * (1 - self.slippage_pct)
                     position.close(exit_price, timestamp, vwap_reason)
+                elif st_flip_exit and not position.is_closed:
+                    exit_price = option_price * (1 - self.slippage_pct)
+                    position.close(exit_price, timestamp, st_flip_reason)
                 elif ts_exit and not position.is_closed:
                     exit_price = option_price * (1 - self.slippage_pct)
                     position.close(exit_price, timestamp, ts_reason)
@@ -2723,6 +2740,9 @@ class LiveTest:
         vwap_strategy = Strategy.VWAPCrossExit(config.get('vwap_cross_exit', {}))
         vwap_detector = vwap_strategy.create_detector(position.option_type)
 
+        st_flip_strategy = Strategy.SupertrendFlipExit(config.get('supertrend_flip_exit', {}))
+        st_flip_detector = st_flip_strategy.create_detector(position.option_type)
+
         # Risk assessment config
         risk_config = config.get('risk_assessment', {})
         CP_config = config.get('closure_peak', {})
@@ -2735,6 +2755,7 @@ class LiveTest:
             'vc_detector': vc_detector,
             'ts_detector': ts_detector,
             'vwap_detector': vwap_detector,
+            'st_flip_detector': st_flip_detector,
             'oe_favorability_assessed': False,
             'risk_assessed': False,
             'risk_level': None,
@@ -2952,6 +2973,13 @@ class LiveTest:
             vwap_pnl = position.get_pnl_pct(option_price)
             vwap_exit, vwap_reason = vwap_detector.update(vwap_pnl, stock_price, vwap)
 
+        # Update Supertrend Flip detector
+        st_flip_exit, st_flip_reason = False, None
+        st_flip_detector = state['st_flip_detector']
+        if st_flip_detector and not position.is_closed:
+            st_flip_pnl = position.get_pnl_pct(option_price)
+            st_flip_exit, st_flip_reason = st_flip_detector.update(st_flip_pnl, st_direction)
+
         # Closure-Peak signal
         CP_enabled = state['CP_enabled']
         cp_signal = False
@@ -2987,6 +3015,7 @@ class LiveTest:
             exit_sig_sb=sb_exit, exit_sig_mp=mp_exit,
             exit_sig_ai=ai_exit, exit_sig_closure_peak=cp_signal, exit_sig_oe=oe_exit,
             exit_sig_vc=vc_exit, exit_sig_ts=ts_exit, exit_sig_vwap=vwap_exit,
+            exit_sig_st=st_flip_exit,
         )
 
         # === EXIT PRIORITY CHAIN ===
@@ -3001,6 +3030,8 @@ class LiveTest:
             position.close(option_price * (1 - slippage), timestamp, vc_reason)
         elif vwap_exit and not position.is_closed:
             position.close(option_price * (1 - slippage), timestamp, vwap_reason)
+        elif st_flip_exit and not position.is_closed:
+            position.close(option_price * (1 - slippage), timestamp, st_flip_reason)
         elif ts_exit and not position.is_closed:
             position.close(option_price * (1 - slippage), timestamp, ts_reason)
         elif ai_exit and not position.is_closed:

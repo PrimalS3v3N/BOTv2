@@ -19,7 +19,8 @@ __all__ = ['MomentumPeak', 'MomentumPeakDetector', 'StatsBookExit', 'StatsBookDe
            'AIExitSignal', 'AIExitSignalDetector', 'OptionsExit', 'OptionsExitDetector',
            'VolumeClimaxExit', 'VolumeClimaxDetector',
            'TimeStop', 'TimeStopDetector',
-           'VWAPCrossExit', 'VWAPCrossDetector']
+           'VWAPCrossExit', 'VWAPCrossDetector',
+           'SupertrendFlipExit', 'SupertrendFlipDetector']
 
 
 # =============================================================================
@@ -1229,5 +1230,115 @@ class VWAPCrossDetector:
         # Check confirmation: must be on adverse side for N consecutive bars
         if self.was_favorable and self.adverse_bar_count >= self.confirm_bars:
             return True, 'VWAP Cross'
+
+        return False, None
+
+
+# =============================================================================
+# INTERNAL - Supertrend Flip Exit Strategy
+# =============================================================================
+
+class SupertrendFlipExit:
+    """
+    Factory for creating SupertrendFlipDetector instances.
+
+    The Supertrend indicator produces a binary direction signal (1 = bullish,
+    -1 = bearish) based on ATR-derived support/resistance bands. When the
+    direction flips from favorable to adverse mid-trade, the underlying
+    trend has mechanically reversed — a strong exit signal.
+
+    Unlike oscillator-based strategies (RSI, EWO) that detect exhaustion,
+    Supertrend flips confirm that price has already broken through a
+    volatility-adjusted support/resistance level, making false signals
+    less frequent.
+
+    Config: BACKTEST_CONFIG['supertrend_flip_exit']
+        {
+            'enabled': True,
+            'min_profit_pct': 5,           # Minimum option profit %
+            'min_hold_bars': 5,            # Minimum bars before checking
+            'confirm_bars': 1,             # Bars adverse direction must persist
+        }
+    """
+
+    def __init__(self, config=None):
+        st_config = config or Config.get_setting('backtest', 'supertrend_flip_exit', {})
+        self.enabled = st_config.get('enabled', False)
+        self.config = st_config
+
+    def create_detector(self, option_type):
+        """Create a new SupertrendFlipDetector for a position. Returns None if disabled."""
+        if not self.enabled:
+            return None
+        return SupertrendFlipDetector(self.config, option_type)
+
+
+class SupertrendFlipDetector:
+    """
+    Tracks Supertrend direction changes for a single position.
+
+    Favorable direction:
+      - CALLs want direction = 1 (bullish / uptrend)
+      - PUTs  want direction = -1 (bearish / downtrend)
+
+    Conditions (ALL must be met to trigger exit):
+    1. Position held >= min_hold_bars
+    2. Option profit >= min_profit_pct
+    3. Direction was favorable at some point (established trend)
+    4. Direction flipped to adverse and stayed for confirm_bars
+    """
+
+    def __init__(self, config, option_type):
+        self.min_profit_pct = config.get('min_profit_pct', 5)
+        self.min_hold_bars = config.get('min_hold_bars', 5)
+        self.confirm_bars = config.get('confirm_bars', 1)
+        self.is_call = option_type.upper() in ['CALL', 'CALLS', 'C']
+
+        # Favorable direction for this position type
+        self.favorable_direction = 1.0 if self.is_call else -1.0
+
+        self.bar_count = 0
+        self.was_favorable = False       # Direction was favorable at some point
+        self.adverse_bar_count = 0       # Consecutive bars in adverse direction
+
+    def update(self, pnl_pct, supertrend_direction):
+        """
+        Check for Supertrend flip exit signal.
+
+        Args:
+            pnl_pct: Current P&L percentage
+            supertrend_direction: Current Supertrend direction (1.0 or -1.0)
+
+        Returns:
+            (should_exit, exit_reason): Tuple. exit_reason is None if no exit.
+        """
+        self.bar_count += 1
+
+        if np.isnan(pnl_pct) or np.isnan(supertrend_direction):
+            return False, None
+
+        # Track if direction is currently favorable
+        is_favorable = supertrend_direction == self.favorable_direction
+
+        if is_favorable:
+            self.was_favorable = True
+            self.adverse_bar_count = 0
+            return False, None
+
+        # Direction is adverse — count consecutive bars
+        if self.was_favorable:
+            self.adverse_bar_count += 1
+
+        # Need minimum bars held
+        if self.bar_count < self.min_hold_bars:
+            return False, None
+
+        # Need minimum profit
+        if pnl_pct < self.min_profit_pct:
+            return False, None
+
+        # Check confirmation: must be adverse for N consecutive bars
+        if self.was_favorable and self.adverse_bar_count >= self.confirm_bars:
+            return True, 'Supertrend Flip'
 
         return False, None

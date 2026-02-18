@@ -319,6 +319,17 @@ BACKTEST_CONFIG = {
         'confirm_bars': 2,                 # Bars price must stay on adverse side of VWAP
     },
 
+    # Supertrend Flip Exit: Exit when Supertrend direction flips against position
+    # Supertrend uses ATR-based bands to define trend direction. A flip from
+    # favorable to adverse means price broke through a volatility-adjusted
+    # support/resistance level — a mechanical trend reversal confirmation.
+    'supertrend_flip_exit': {
+        'enabled': True,
+        'min_profit_pct': 5,               # Minimum option profit % to consider exit
+        'min_hold_bars': 5,                # Minimum bars held before checking
+        'confirm_bars': 1,                 # Bars adverse direction must persist (1 = immediate)
+    },
+
     # AI Exit Signal: Local LLM-based exit signal generation
     # Runs a quantized model via llama-cpp-python on GPU during backtesting.
     # The model analyzes multi-timeframe technical data and recommends hold/sell.
@@ -513,6 +524,7 @@ DATAFRAME_COLUMNS = {
         'exit_sig_vc',             # Volume Climax exit triggered
         'exit_sig_ts',             # Time Stop exit triggered
         'exit_sig_vwap',           # VWAP Cross exit triggered
+        'exit_sig_st',             # Supertrend Flip exit triggered
     ],
 
     # Metadata columns appended to databook (Test.py)
