@@ -287,6 +287,38 @@ BACKTEST_CONFIG = {
         'rolling_window': 5,               # Bars for rolling H-L range calculation
     },
 
+    # Volume Climax Exit: Detect exhaustion via volume spike + price reversal
+    # A sudden volume spike (Nx above rolling average) combined with a price
+    # reversal bar signals institutional exhaustion. High-volume reversals are
+    # among the most reliable intraday signals for directional shifts.
+    'volume_climax_exit': {
+        'enabled': True,
+        'volume_lookback': 20,             # Bars for rolling avg volume calculation
+        'volume_multiplier': 3.0,          # Volume must be >= Nx rolling avg to qualify
+        'min_profit_pct': 10,              # Minimum option profit % to consider exit
+        'min_hold_bars': 10,               # Minimum bars held before checking
+    },
+
+    # Time Stop: Exit stale positions that haven't moved meaningfully
+    # Options lose value every minute via theta decay. Holding a position
+    # that isn't moving costs real money. Frees capital for redeployment.
+    'time_stop': {
+        'enabled': True,
+        'max_minutes': 90,                 # Exit if held longer than N minutes
+        'min_profit_pct': 5,               # ... and profit is below this %
+    },
+
+    # VWAP Cross Exit: Exit when price crosses VWAP against position direction
+    # VWAP is the institutional benchmark. Price crossing to the adverse side
+    # signals that institutional flow has shifted against the position.
+    # Requires confirmation (N bars on wrong side) to avoid whipsaws.
+    'vwap_cross_exit': {
+        'enabled': True,
+        'min_profit_pct': 5,               # Minimum option profit % to consider exit
+        'min_hold_bars': 10,               # Minimum bars held before checking
+        'confirm_bars': 2,                 # Bars price must stay on adverse side of VWAP
+    },
+
     # AI Exit Signal: Local LLM-based exit signal generation
     # Runs a quantized model via llama-cpp-python on GPU during backtesting.
     # The model analyzes multi-timeframe technical data and recommends hold/sell.
@@ -478,6 +510,9 @@ DATAFRAME_COLUMNS = {
         'exit_sig_sb', 'exit_sig_mp', 'exit_sig_ai',
         'exit_sig_closure_peak',
         'exit_sig_oe',             # Options Exit system SL/TP triggered
+        'exit_sig_vc',             # Volume Climax exit triggered
+        'exit_sig_ts',             # Time Stop exit triggered
+        'exit_sig_vwap',           # VWAP Cross exit triggered
     ],
 
     # Metadata columns appended to databook (Test.py)

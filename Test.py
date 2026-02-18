@@ -656,7 +656,8 @@ class Databook:
                    exit_sig_sb=None, exit_sig_mp=None,
                    exit_sig_ai=None,
                    exit_sig_closure_peak=None,
-                   exit_sig_oe=None):
+                   exit_sig_oe=None,
+                   exit_sig_vc=None, exit_sig_ts=None, exit_sig_vwap=None):
         """Add a tracking record."""
         pnl_pct = self.position.get_pnl_pct(option_price) if holding else np.nan
 
@@ -771,6 +772,9 @@ class Databook:
             'exit_sig_ai': exit_sig_ai,
             'exit_sig_closure_peak': exit_sig_closure_peak,
             'exit_sig_oe': exit_sig_oe,
+            'exit_sig_vc': exit_sig_vc,
+            'exit_sig_ts': exit_sig_ts,
+            'exit_sig_vwap': exit_sig_vwap,
         }
 
         self.records.append(record)
@@ -991,7 +995,8 @@ class DataSummary:
         has_bias = 'market_bias' in df.columns
 
         exit_sig_cols = [c for c in ['exit_sig_sb', 'exit_sig_mp', 'exit_sig_ai',
-                                      'exit_sig_closure_peak', 'exit_sig_oe'] if c in df.columns]
+                                      'exit_sig_closure_peak', 'exit_sig_oe',
+                                      'exit_sig_vc', 'exit_sig_ts', 'exit_sig_vwap'] if c in df.columns]
 
         records = []
         for interval_start, idx_group in df.groupby(intervals).groups.items():
@@ -1483,6 +1488,15 @@ class SimulationEngine:
         oe_detector = oe_strategy.create_detector(position.entry_price, position.option_type)
         oe_favorability_assessed = False
 
+        vc_strategy = Strategy.VolumeClimaxExit(self.config.get('volume_climax_exit', {}))
+        vc_detector = vc_strategy.create_detector(position.option_type)
+
+        ts_strategy = Strategy.TimeStop(self.config.get('time_stop', {}))
+        ts_detector = ts_strategy.create_detector()
+
+        vwap_strategy = Strategy.VWAPCrossExit(self.config.get('vwap_cross_exit', {}))
+        vwap_detector = vwap_strategy.create_detector(position.option_type)
+
         # Closure - Peak settings
         CP_config = self.config.get('closure_peak', {})
         CP_enabled = CP_config.get('enabled', True)
@@ -1510,6 +1524,7 @@ class SimulationEngine:
 
         # Pre-extract column arrays for fast indexed access (avoids iterrows overhead)
         _col_close = stock_data['close'].values
+        _col_open = stock_data['open'].values if 'open' in stock_data.columns else _col_close
         _col_high = stock_data['high'].values if 'high' in stock_data.columns else _col_close
         _col_low = stock_data['low'].values if 'low' in stock_data.columns else _col_close
         _col_volume = stock_data['volume'].values if 'volume' in stock_data.columns else np.zeros(len(stock_data))
@@ -1541,6 +1556,7 @@ class SimulationEngine:
         for i in range(len(stock_data)):
             timestamp = _timestamps[i]
             stock_price = float(_col_close[i])
+            stock_open = float(_col_open[i])
             stock_high = float(_col_high[i])
             stock_low = float(_col_low[i])
             volume = float(_col_volume[i])
@@ -1725,6 +1741,28 @@ class SimulationEngine:
                     )
                     ai_signal_data = ai_detector.current_signal
 
+                # Update Volume Climax detector
+                vc_exit = False
+                vc_reason = None
+                if vc_detector and not position.is_closed:
+                    vc_pnl = position.get_pnl_pct(option_price)
+                    vc_exit, vc_reason = vc_detector.update(vc_pnl, volume, stock_price, stock_open)
+
+                # Update Time Stop detector
+                ts_exit = False
+                ts_reason = None
+                if ts_detector and not position.is_closed:
+                    ts_pnl = position.get_pnl_pct(option_price)
+                    ts_minutes = position.get_minutes_held(timestamp)
+                    ts_exit, ts_reason = ts_detector.update(ts_pnl, ts_minutes)
+
+                # Update VWAP Cross detector
+                vwap_exit = False
+                vwap_reason = None
+                if vwap_detector and not position.is_closed:
+                    vwap_pnl = position.get_pnl_pct(option_price)
+                    vwap_exit, vwap_reason = vwap_detector.update(vwap_pnl, stock_price, vwap)
+
                 # Compute Closure-Peak signal flag
                 cp_signal = False
                 if CP_enabled and not np.isnan(rsi_10min_avg) and timestamp.time() >= CP_start_time:
@@ -1764,6 +1802,7 @@ class SimulationEngine:
                     oe_state=oe_state,
                     exit_sig_sb=sb_exit, exit_sig_mp=mp_exit,
                     exit_sig_ai=ai_exit, exit_sig_closure_peak=cp_signal, exit_sig_oe=oe_exit,
+                    exit_sig_vc=vc_exit, exit_sig_ts=ts_exit, exit_sig_vwap=vwap_exit,
                 )
 
                 # === EXIT PRIORITY CHAIN ===
@@ -1776,6 +1815,15 @@ class SimulationEngine:
                 elif mp_exit and not position.is_closed:
                     exit_price = option_price * (1 - self.slippage_pct)
                     position.close(exit_price, timestamp, mp_reason)
+                elif vc_exit and not position.is_closed:
+                    exit_price = option_price * (1 - self.slippage_pct)
+                    position.close(exit_price, timestamp, vc_reason)
+                elif vwap_exit and not position.is_closed:
+                    exit_price = option_price * (1 - self.slippage_pct)
+                    position.close(exit_price, timestamp, vwap_reason)
+                elif ts_exit and not position.is_closed:
+                    exit_price = option_price * (1 - self.slippage_pct)
+                    position.close(exit_price, timestamp, ts_reason)
                 elif ai_exit and not position.is_closed:
                     exit_price = option_price * (1 - self.slippage_pct)
                     position.close(exit_price, timestamp, 'AI Exit Signal')
@@ -2666,6 +2714,15 @@ class LiveTest:
         oe_strategy = Strategy.OptionsExit(config.get('options_exit', {}))
         oe_detector = oe_strategy.create_detector(position.entry_price, position.option_type)
 
+        vc_strategy = Strategy.VolumeClimaxExit(config.get('volume_climax_exit', {}))
+        vc_detector = vc_strategy.create_detector(position.option_type)
+
+        ts_strategy = Strategy.TimeStop(config.get('time_stop', {}))
+        ts_detector = ts_strategy.create_detector()
+
+        vwap_strategy = Strategy.VWAPCrossExit(config.get('vwap_cross_exit', {}))
+        vwap_detector = vwap_strategy.create_detector(position.option_type)
+
         # Risk assessment config
         risk_config = config.get('risk_assessment', {})
         CP_config = config.get('closure_peak', {})
@@ -2675,6 +2732,9 @@ class LiveTest:
             'sb_detector': sb_detector,
             'ai_detector': ai_detector,
             'oe_detector': oe_detector,
+            'vc_detector': vc_detector,
+            'ts_detector': ts_detector,
+            'vwap_detector': vwap_detector,
             'oe_favorability_assessed': False,
             'risk_assessed': False,
             'risk_level': None,
@@ -2712,6 +2772,7 @@ class LiveTest:
         bar = stock_df.iloc[bar_idx]
 
         stock_price = float(bar['close'])
+        stock_open = float(bar.get('open', stock_price))
         stock_high = float(bar.get('high', stock_price))
         stock_low = float(bar.get('low', stock_price))
         volume = float(bar.get('volume', 0))
@@ -2869,6 +2930,28 @@ class LiveTest:
             )
             ai_signal_data = ai_detector.current_signal
 
+        # Update Volume Climax detector
+        vc_exit, vc_reason = False, None
+        vc_detector = state['vc_detector']
+        if vc_detector and not position.is_closed:
+            vc_pnl = position.get_pnl_pct(option_price)
+            vc_exit, vc_reason = vc_detector.update(vc_pnl, volume, stock_price, stock_open)
+
+        # Update Time Stop detector
+        ts_exit, ts_reason = False, None
+        ts_detector = state['ts_detector']
+        if ts_detector and not position.is_closed:
+            ts_pnl = position.get_pnl_pct(option_price)
+            ts_minutes = position.get_minutes_held(timestamp)
+            ts_exit, ts_reason = ts_detector.update(ts_pnl, ts_minutes)
+
+        # Update VWAP Cross detector
+        vwap_exit, vwap_reason = False, None
+        vwap_detector = state['vwap_detector']
+        if vwap_detector and not position.is_closed:
+            vwap_pnl = position.get_pnl_pct(option_price)
+            vwap_exit, vwap_reason = vwap_detector.update(vwap_pnl, stock_price, vwap)
+
         # Closure-Peak signal
         CP_enabled = state['CP_enabled']
         cp_signal = False
@@ -2903,6 +2986,7 @@ class LiveTest:
             oe_state=oe_state,
             exit_sig_sb=sb_exit, exit_sig_mp=mp_exit,
             exit_sig_ai=ai_exit, exit_sig_closure_peak=cp_signal, exit_sig_oe=oe_exit,
+            exit_sig_vc=vc_exit, exit_sig_ts=ts_exit, exit_sig_vwap=vwap_exit,
         )
 
         # === EXIT PRIORITY CHAIN ===
@@ -2913,6 +2997,12 @@ class LiveTest:
             position.close(option_price * (1 - slippage), timestamp, sb_reason)
         elif mp_exit and not position.is_closed:
             position.close(option_price * (1 - slippage), timestamp, mp_reason)
+        elif vc_exit and not position.is_closed:
+            position.close(option_price * (1 - slippage), timestamp, vc_reason)
+        elif vwap_exit and not position.is_closed:
+            position.close(option_price * (1 - slippage), timestamp, vwap_reason)
+        elif ts_exit and not position.is_closed:
+            position.close(option_price * (1 - slippage), timestamp, ts_reason)
         elif ai_exit and not position.is_closed:
             position.close(option_price * (1 - slippage), timestamp, 'AI Exit Signal')
         elif CP_enabled and not position.is_closed and not np.isnan(rsi_10min_avg) and timestamp.time() >= state['CP_start_time']:
