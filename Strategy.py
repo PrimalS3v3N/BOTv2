@@ -872,10 +872,19 @@ class OptionsExitDetector:
         # --- Hard stop loss (dynamic tightening before trailing SL activates) ---
         # If the option price hasn't yet hit the trailing activation threshold,
         # tighten the hard SL based on the peak gain seen so far.
-        # E.g. buy at 100, peak at 105 → SL% shrinks from 20% to 15%,
-        #      so hard SL moves from 80 → 85.
+        # Peak gain scales up to just under trail_activation_pct (9.99%).
+        # HIGH risk entries double the peak gain effect for faster tightening.
+        # E.g. buy at 100, peak at 105 → SL% shrinks 20→15%, hard SL 80→85
+        #      HIGH risk same scenario → SL% shrinks 20→10%, hard SL 80→90
         if self.hard_sl_tighten_on_peak and not self.trailing_active and self.highest_profit_pct > 0:
-            adjusted_sl_pct = self.initial_sl_pct - self.highest_profit_pct
+            # Cap peak gain just under trailing activation to avoid overlap
+            peak_gain = min(self.highest_profit_pct, self.trail_activation_pct - 0.01)
+
+            # HIGH risk: double the peak gain effect
+            if self.is_high_risk:
+                peak_gain *= 2
+
+            adjusted_sl_pct = self.initial_sl_pct - peak_gain
             adjusted_sl_pct = max(adjusted_sl_pct, 0.0)  # Never go above entry
             new_hard_sl = self.entry_option_price * (1 - adjusted_sl_pct / 100)
             # Ratchet: only tighten (move up), never loosen
