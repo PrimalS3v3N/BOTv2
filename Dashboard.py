@@ -53,6 +53,7 @@ COLORS = {
     'sig_mp': '#E040FB',           # Purple (Momentum Peak)
     'sig_ai': '#00BCD4',           # Cyan (AI Exit)
     'sig_closure_peak': '#7C4DFF', # Deep Purple (Closure Peak)
+    'sig_mt': '#2196F3',           # Blue (MarketTrend)
 }
 
 # Exit signal definitions: column name -> (display label, color key, marker symbol)
@@ -61,6 +62,7 @@ EXIT_SIGNAL_DEFS = {
     'exit_sig_mp':           ('Mom. Peak',    'sig_mp',           'diamond'),
     'exit_sig_ai':           ('AI Exit',      'sig_ai',           'diamond'),
     'exit_sig_closure_peak': ('Closure Peak', 'sig_closure_peak', 'diamond'),
+    'exit_sig_mt':           ('MktTrend',     'sig_mt',           'x'),
 }
 
 @st.cache_data
@@ -150,7 +152,7 @@ def find_entry_exit(df):
 
 
 @st.cache_data
-def create_trade_chart(df, trade_label, market_hours_only=False, show_ewo=True, show_rsi=True, show_supertrend=False, show_ichimoku=False, show_atr_sl=True, show_market_bias=True):
+def create_trade_chart(df, trade_label, market_hours_only=False, show_ewo=True, show_rsi=True, show_supertrend=False, show_ichimoku=False, show_atr_sl=True, show_market_trend=True):
     """Create dual-axis chart with stock/option prices, error bars, EWO/RSI subplot, and SPY subplot."""
     df = df.copy()
     df['time'] = pd.to_datetime(df['timestamp'].astype(str).str.replace(' : ', ' '), errors='coerce')
@@ -181,8 +183,8 @@ def create_trade_chart(df, trade_label, market_hours_only=False, show_ewo=True, 
     # Check if RSI data is available (and toggle is on)
     has_rsi = show_rsi and 'rsi' in df.columns and df['rsi'].notna().any()
 
-    # Check if market bias data is available (and toggle is on)
-    has_market_bias = show_market_bias and 'market_bias' in df.columns and df['market_bias'].notna().any()
+    # Check if MarketTrend data is available (and toggle is on)
+    has_market_trend = show_market_trend and 'ticker_trend' in df.columns and df['ticker_trend'].notna().any()
 
     # Check if SPY data is available
     has_spy = 'spy_price' in df.columns and df['spy_price'].notna().any()
@@ -192,7 +194,7 @@ def create_trade_chart(df, trade_label, market_hours_only=False, show_ewo=True, 
     rsi_secondary = has_ewo
 
     # Determine number of subplot rows
-    has_indicators = has_ewo or has_rsi or has_market_bias
+    has_indicators = has_ewo or has_rsi or has_market_trend
 
     # Create subplots: main chart + indicators + SPY
     if has_indicators and has_spy:
@@ -702,40 +704,40 @@ def create_trade_chart(df, trade_label, market_hours_only=False, show_ewo=True, 
             row=2, col=1, secondary_y=rsi_secondary
         )
 
-    # Market bias on row 2 primary y-axis (color-coded step fill: green=bull, red=bear)
-    if has_market_bias and (has_ewo or has_rsi or has_market_bias):
-        bias_vals = df['market_bias'].copy()
+    # MarketTrend on row 2 primary y-axis (color-coded step fill: green=bull, red=bear)
+    if has_market_trend and (has_ewo or has_rsi or has_market_trend):
+        trend_vals = df['ticker_trend'].copy()
 
         # Bullish segments (+1) with green fill from 0 to +1
-        bias_bull = bias_vals.where(bias_vals >= 1)
-        if bias_bull.notna().any():
+        trend_bull = trend_vals.where(trend_vals >= 1)
+        if trend_bull.notna().any():
             fig.add_trace(
                 go.Scatter(
-                    x=df['time'], y=bias_bull,
-                    name='Bias (Bull)',
+                    x=df['time'], y=trend_bull,
+                    name='Trend (Bull)',
                     mode='lines',
                     line=dict(color='#00C853', width=2, shape='hv'),
                     fill='tozeroy',
                     fillcolor='rgba(0, 200, 83, 0.12)',
                     connectgaps=False,
-                    hovertemplate='Bias: +1 (Bull)<extra></extra>'
+                    hovertemplate='Trend: +1 (Bull)<extra></extra>'
                 ),
                 row=2, col=1
             )
 
         # Bearish segments (-1) with red fill from 0 to -1
-        bias_bear = bias_vals.where(bias_vals <= -1)
-        if bias_bear.notna().any():
+        trend_bear = trend_vals.where(trend_vals <= -1)
+        if trend_bear.notna().any():
             fig.add_trace(
                 go.Scatter(
-                    x=df['time'], y=bias_bear,
-                    name='Bias (Bear)',
+                    x=df['time'], y=trend_bear,
+                    name='Trend (Bear)',
                     mode='lines',
                     line=dict(color='#FF1744', width=2, shape='hv'),
                     fill='tozeroy',
                     fillcolor='rgba(255, 23, 68, 0.12)',
                     connectgaps=False,
-                    hovertemplate='Bias: -1 (Bear)<extra></extra>'
+                    hovertemplate='Trend: -1 (Bear)<extra></extra>'
                 ),
                 row=2, col=1
             )
@@ -825,7 +827,11 @@ def create_trade_chart(df, trade_label, market_hours_only=False, show_ewo=True, 
             gauge_text = gauge_parts[0].str.cat(gauge_parts[1:], sep=' ').str.strip()
         else:
             gauge_text = pd.Series('', index=df.index)
-        hover_texts = spy_price_text + '<br>' + gauge_text
+        # Add SPY trend label to hover
+        spy_trend_text = pd.Series('', index=df.index)
+        if 'spy_trend' in df.columns:
+            spy_trend_text = df['spy_trend'].map({1: 'SPY Trend: Bull', 0: 'SPY Trend: Side', -1: 'SPY Trend: Bear'}).fillna('')
+        hover_texts = spy_price_text + '<br>' + spy_trend_text + '<br>' + gauge_text
         fig.add_trace(
             go.Scatter(
                 x=df['time'],
@@ -873,11 +879,11 @@ def create_trade_chart(df, trade_label, market_hours_only=False, show_ewo=True, 
         fig.update_xaxes(title_text="Time", tickformat='%H:%M', row=2, col=1)
 
     if has_ewo:
-        ewo_title = "EWO / Bias" if has_market_bias else "EWO"
+        ewo_title = "EWO / Trend" if has_market_trend else "EWO"
         fig.update_yaxes(title_text=ewo_title, secondary_y=False, row=2, col=1)
-    elif has_market_bias and not has_rsi:
+    elif has_market_trend and not has_rsi:
         fig.update_yaxes(
-            title_text="Bias", secondary_y=False, row=2, col=1,
+            title_text="Trend", secondary_y=False, row=2, col=1,
             range=[-1.5, 1.5], tickvals=[-1, 0, 1], ticktext=['Bear', 'Side', 'Bull']
         )
 
@@ -930,13 +936,13 @@ def get_trade_summary(df):
     duration = df['minutes_held'].max() if 'minutes_held' in df.columns else 0
 
     # Compute holding_df once and reuse for all holding-period metrics
-    BIAS_LABELS = {1: 'Bullish', 0: 'Sideways', -1: 'Bearish'}
+    TREND_LABELS = {1: 'Bullish', 0: 'Sideways', -1: 'Bearish'}
     max_price = 0
     min_price = 0
     max_profit_pct = 0
     min_profit_pct = 0
     profit_min = 0
-    market_bias = 'N/A'
+    market_trend_label = 'N/A'
     risk = 'N/A'
     risk_reasons = ''
     risk_trend = ''
@@ -955,11 +961,11 @@ def get_trade_summary(df):
                 contracts = int(df['contracts'].iloc[0]) if 'contracts' in df.columns else 1
                 profit_min = (min_price - entry_price) * contracts * 100
 
-        # Market bias at exit
-        if 'market_bias' in holding_df.columns:
-            last_bias = holding_df['market_bias'].iloc[-1]
-            if pd.notna(last_bias):
-                market_bias = BIAS_LABELS.get(int(last_bias), 'N/A')
+        # MarketTrend at exit
+        if 'ticker_trend' in holding_df.columns:
+            last_trend = holding_df['ticker_trend'].iloc[-1]
+            if pd.notna(last_trend):
+                market_trend_label = TREND_LABELS.get(int(last_trend), 'N/A')
 
         # Risk level at entry
         if 'risk' in holding_df.columns:
@@ -992,7 +998,7 @@ def get_trade_summary(df):
         'max_profit_pct': max_profit_pct,
         'min_profit_pct': min_profit_pct,
         'profit_min': profit_min,
-        'market_bias': market_bias,
+        'market_trend': market_trend_label,
         'risk': risk,
         'risk_reasons': risk_reasons,
         'risk_trend': risk_trend,
@@ -1155,7 +1161,7 @@ def main():
         show_supertrend = st.toggle("Show Supertrend", value=False, help="Overlay Supertrend indicator on main chart")
         show_ichimoku = st.toggle("Show Ichimoku Cloud", value=False, help="Overlay Ichimoku Cloud (Tenkan, Kijun, Senkou spans) on main chart")
         show_atr_sl = st.toggle("Show ATR-SL", value=True, help="Overlay ATR Trailing Stoploss indicator on main chart")
-        show_market_bias = st.toggle("Show Market Bias", value=True, help="Market bias on indicator subplot: +1 Bull, 0 Side, -1 Bear")
+        show_market_trend = st.toggle("Show Market Trend", value=True, help="MarketTrend on indicator subplot: +1 Bull, 0 Side, -1 Bear")
         show_trade_summary = st.toggle("Show Trade Summary", value=False, help="Display trade summary details")
         show_stats_book = st.toggle("Show Stats Book", value=False, help="Display statistics book")
         show_data_book = st.toggle("Show Data Book", value=False, help="Display data book")
@@ -1176,7 +1182,7 @@ def main():
     df = matrices[pos_id]
 
     # Chart first (no summary above)
-    fig = create_trade_chart(df, trade_label, market_hours_only, show_ewo, show_rsi, show_supertrend, show_ichimoku, show_atr_sl, show_market_bias)
+    fig = create_trade_chart(df, trade_label, market_hours_only, show_ewo, show_rsi, show_supertrend, show_ichimoku, show_atr_sl, show_market_trend)
     if fig:
         st.plotly_chart(fig, use_container_width=True)
     else:
@@ -1192,7 +1198,7 @@ def main():
         row1[0].metric("Entry", f"${summary['entry']:.2f}")
         row1[1].metric("Exit", f"${summary['exit']:.2f}")
         row1[2].metric("P&L", f"{summary['pnl_pct']:+.1f}%")
-        row1[3].metric("Market", summary['market_bias'])
+        row1[3].metric("Trend", summary['market_trend'])
         row1[4].metric("Risk", summary['risk'])
         row1[5].metric("Risk Trend", summary['risk_trend'] or 'N/A')
         row1[6].metric("Profit[min]", f"${summary['profit_min']:+.2f}")
@@ -1358,8 +1364,10 @@ def main():
                 matrix_df.loc[mask, 'minutes_held'] = matrix_df.loc[mask, 'minutes_held'].astype(int).astype(str)
             matrix_df['minutes_held'] = matrix_df['minutes_held'].where(mask, '')
 
-        if 'market_bias' in matrix_df.columns:
-            matrix_df['market_bias'] = matrix_df['market_bias'].map({1: 'Bullish', 0: 'Sideways', -1: 'Bearish'}).fillna('')
+        if 'ticker_trend' in matrix_df.columns:
+            matrix_df['ticker_trend'] = matrix_df['ticker_trend'].map({1: 'Bullish', 0: 'Sideways', -1: 'Bearish'}).fillna('')
+        if 'spy_trend' in matrix_df.columns:
+            matrix_df['spy_trend'] = matrix_df['spy_trend'].map({1: 'Bullish', 0: 'Sideways', -1: 'Bearish'}).fillna('')
 
         # Format decimal columns using vectorized round + astype
         decimal_fmts = [('ewo', 3), ('ewo_15min_avg', 3), ('rsi', 1), ('rsi_10min_avg', 1)]

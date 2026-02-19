@@ -397,10 +397,31 @@ BACKTEST_CONFIG = {
         },
     },
 
-    # Bias sensitivity: Controls the sideways band width for market bias calculation.
+    # Bias sensitivity: Controls the sideways band width for market trend calculation.
     # Smaller = more sensitive (more bull/bear signals), Larger = wider band (more sideways).
     # Default was 0.10, reduced to 0.05 for higher sensitivity.
     'bias_sideways_band': 0.05,
+
+    # ==========================================================================
+    # MarketTrend: Trend-based exit system
+    # ==========================================================================
+    # Computes ticker_trend and spy_trend (-1/0/+1) using VWAP + sideways band.
+    # Evaluates whether the trade's trend aligns with overall SPY movement.
+    #
+    # Logic:
+    #   PUTs  - bearish region = hold, sideways = warning, bullish = sell (reversal)
+    #   CALLs - bullish region = hold, sideways = warning, bearish = sell (reversal)
+    #   Entering against the trend = high-risk, need quick reversal or exit.
+    #   SPY divergence: if both trending together and SPY turns, evaluate exit.
+    #
+    # exit_enabled=False → still computes signals but shows blue 'X' on dashboard
+    # instead of actually closing the position.
+    'market_trend': {
+        'enabled': True,
+        'exit_enabled': False,             # False = visual-only (blue X), True = close position
+        'high_risk_grace_bars': 10,        # Bars to wait for reversal on high-risk entry
+        'spy_diverge_profit_pct': 5,       # Min profit % to trigger SPY-divergence exit
+    },
 
     # ==========================================================================
     # Order Book / Book Imbalance (Webull Integration)
@@ -548,7 +569,11 @@ DATAFRAME_COLUMNS = {
         'option_price', 'volume', 'holding', 'entry_price',
         'pnl', 'pnl_pct', 'highest_price', 'lowest_price', 'minutes_held',
         'risk', 'risk_reasons', 'risk_trend',
-        'market_bias',
+        # MarketTrend columns
+        'ticker_trend',            # Ticker VWAP-based trend: -1 (bearish), 0 (sideways), +1 (bullish)
+        'spy_trend',               # SPY VWAP-based trend: -1 (bearish), 0 (sideways), +1 (bullish)
+        'market_trend',            # True = ticker & SPY trends match, False = diverging
+        'mt_state',                # MarketTrend detector state: Hold / Warning / Sell / HighRisk
         'spy_price', 'spy_since_open', 'spy_1m', 'spy_5m', 'spy_15m', 'spy_30m', 'spy_1h',
         'ticker_since_open', 'ticker_1m', 'ticker_5m', 'ticker_15m', 'ticker_30m', 'ticker_1h',
         'vwap', 'ema_10', 'ema_21', 'ema_50', 'ema_100', 'ema_200',
@@ -584,6 +609,7 @@ DATAFRAME_COLUMNS = {
         'exit_sig_ts',             # Time Stop exit triggered
         'exit_sig_vwap',           # VWAP Cross exit triggered
         'exit_sig_st',             # Supertrend Flip exit triggered
+        'exit_sig_mt',             # MarketTrend exit triggered (or flagged if exit_enabled=False)
     ],
 
     # Metadata columns appended to databook (Test.py)
@@ -600,7 +626,7 @@ DATAFRAME_COLUMNS = {
         'volume_sum', 'bar_count',
         'pnl_pct_start', 'pnl_pct_end', 'pnl_pct_max', 'pnl_pct_min',
         'rsi_avg', 'ewo_avg', 'vwap_avg',
-        'market_bias_mode',
+        'ticker_trend_mode',
         'exit_signals_fired',
         'signal_id',
     ],
@@ -617,39 +643,8 @@ DATAFRAME_COLUMNS = {
     ],
 
     # Dashboard databook display columns (Dashboard.py)
-    # Mirrors 'databook' columns so the dashboard table reflects the full databook.
-    'dashboard_databook': [
-        'timestamp', 'stock_price', 'stock_high', 'stock_low', 'true_price',
-        'option_price', 'volume', 'holding', 'entry_price',
-        'pnl', 'pnl_pct', 'highest_price', 'lowest_price', 'minutes_held',
-        'risk', 'risk_reasons', 'risk_trend',
-        'market_bias',
-        'spy_price', 'spy_since_open', 'spy_1m', 'spy_5m', 'spy_15m', 'spy_30m', 'spy_1h',
-        'ticker_since_open', 'ticker_1m', 'ticker_5m', 'ticker_15m', 'ticker_30m', 'ticker_1h',
-        'vwap', 'ema_10', 'ema_21', 'ema_50', 'ema_100', 'ema_200',
-        'vwap_ema_avg', 'emavwap', 'ewo', 'ewo_15min_avg', 'rsi', 'rsi_10min_avg',
-        'supertrend', 'supertrend_direction',
-        'ichimoku_tenkan', 'ichimoku_kijun', 'ichimoku_senkou_a', 'ichimoku_senkou_b',
-        'atr_sl',
-        # MACD indicator columns
-        'macd_line', 'macd_signal', 'macd_histogram',
-        # Price momentum (ROC)
-        'roc',
-        'ai_outlook_1m', 'ai_outlook_5m', 'ai_outlook_30m', 'ai_outlook_1h',
-        'ai_action', 'ai_reason',
-        # Options Exit System columns (SL = stop loss, TP = take profit)
-        'sl_trailing',
-        'sl_hard',
-        'tp_risk_outlook',
-        'tp_risk_reasons',
-        'tp_trend_30m',
-        'sl_ema_reversal',
-        'tp_confirmed',
-        # Exit signal flags (per-bar boolean: which signals would fire)
-        'exit_sig_sb', 'exit_sig_mp', 'exit_sig_ai',
-        'exit_sig_closure_peak',
-        'exit_sig_oe',
-    ],
+    # NOTE: Overwritten below by alias to 'databook'. Kept as documentation reference.
+    'dashboard_databook': [],
 }
 
 # Resolve alias: dashboard_databook uses the same columns as databook
