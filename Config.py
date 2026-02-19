@@ -451,12 +451,27 @@ BACKTEST_CONFIG = {
 
         # Continuous trailing SL scaling parameters (logarithmic curve)
         # trail_sl = base + scale * ln(1 + profit / norm)
-        # At 10% profit  → SL ~5%   (just above entry)
-        # At 50% profit  → SL ~35%
-        # At 100% profit → SL ~70%
-        # At 200% profit → SL ~115%
-        'trail_scale': 25.0,               # Controls slope of the trailing curve
-        'trail_norm': 30.0,                # Normalisation factor (higher = slower ramp)
+        # At 10% profit  → SL ~6%   (just above entry)
+        # At 50% profit  → SL ~21%
+        # At 100% profit → SL ~30%
+        # At 200% profit → SL ~42%
+        'trail_scale': 20.0,               # Controls slope of the trailing curve (gentler ramp)
+        'trail_norm': 40.0,                # Normalisation factor (higher = slower ramp)
+
+        # Adaptive buffer: uses Statsbook Median.Max(H-L) + entry delta to compute
+        # how much option pullback is normal noise for this stock.  Replaces the old
+        # fixed 2% buffer with a stock-specific, volatility-aware minimum gap.
+        #
+        # buffer = (|delta| * Median.Max(H-L) / option_price * 100 * bars)
+        #          / (1 + profit_pct / decay_norm)
+        #
+        # The buffer decays with profit so it's wide at low profits (let the trade
+        # breathe) and tighter at high profits (protect large gains).
+        'trail_buffer_adaptive': True,     # Enable statsbook-based adaptive buffer
+        'trail_buffer_bars': 1.5,          # Tolerate N bars of max noise
+        'trail_buffer_min_pct': 5.0,       # Minimum buffer floor (fallback / safety net)
+        'trail_buffer_max_pct': 25.0,      # Maximum buffer cap (prevent runaway looseness)
+        'trail_buffer_decay_norm': 50.0,   # Buffer shrinks as profit grows (higher = slower decay)
 
         # High-risk addon: extra % locked in when entry is flagged HIGH risk
         # addon = risk_addon_base + risk_addon_scale * ln(1 + profit / risk_addon_norm)
