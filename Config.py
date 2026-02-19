@@ -433,8 +433,8 @@ BACKTEST_CONFIG = {
     # Flow:
     #   1. At entry → set initial hard SL at -20 % of option price
     #   2. Assess entry favorability (30-min lookback, EMA positioning, ATR-SL)
-    #   3. Once profit >= trail_activation_pct → engage trailing SL
-    #   4. Trailing SL scales continuously with profit margin
+    #   3. Once profit >= trail_activation_pct → engage trailing TP
+    #   4. Trailing TP scales continuously with profit margin
     #   5. Monitor for reversals against our contract type
     'options_exit': {
         'enabled': True,
@@ -445,15 +445,15 @@ BACKTEST_CONFIG = {
                                             # E.g. entry=100, peak=105 → SL% shrinks 20→15%, hard SL 80→85
 
         # --- Trailing Stop Loss ---
-        'trail_activation_pct': 10,        # Engage trailing SL when profit margin >= X%
+        'trail_activation_pct': 10,        # Engage trailing TP when profit margin >= X%
         'trail_base_floor_pct': 5,         # At activation: lock in X% above entry as floor
         'trail_early_floor_minutes': 5,    # First N minutes: SL floor = 0% (breakeven) instead of base
 
-        # Continuous trailing SL scaling parameters (logarithmic curve)
-        # trail_sl = base + scale * ln(1 + profit / norm)
-        # At 10% profit  → SL ~6%   (just above entry)
-        # At 50% profit  → SL ~21%
-        # At 100% profit → SL ~30%
+        # Continuous trailing TP scaling parameters (logarithmic curve)
+        # trail_tp = base + scale * ln(1 + profit / norm)
+        # At 10% profit  → TP ~6%   (just above entry)
+        # At 50% profit  → TP ~21%
+        # At 100% profit → TP ~30%
         # At 200% profit → SL ~42%
         'trail_scale': 20.0,               # Controls slope of the trailing curve (gentler ramp)
         'trail_norm': 40.0,                # Normalisation factor (higher = slower ramp)
@@ -587,7 +587,7 @@ DATAFRAME_COLUMNS = {
         'ai_outlook_1m', 'ai_outlook_5m', 'ai_outlook_30m', 'ai_outlook_1h',
         'ai_action', 'ai_reason',
         # Options Exit System columns (SL = stop loss, TP = take profit)
-        'sl_trailing',             # Current trailing SL price level
+        'tp_trailing',             # Current trailing TP price level
         'sl_hard',                 # Hard stop loss price level
         'tp_risk_outlook',         # RiskOutlook score: LOW / MEDIUM / HIGH
         'tp_risk_reasons',         # Pipe-separated reasons
@@ -656,7 +656,7 @@ DATAFRAME_COLUMNS = {
         'ai_outlook_1m', 'ai_outlook_5m', 'ai_outlook_30m', 'ai_outlook_1h',
         'ai_action', 'ai_reason',
         # Options Exit System columns (SL = stop loss, TP = take profit)
-        'sl_trailing',
+        'tp_trailing',
         'sl_hard',
         'tp_risk_outlook',
         'tp_risk_reasons',

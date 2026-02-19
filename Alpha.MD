@@ -162,7 +162,7 @@ Config.py ───────────────────────�
 - Streamlit-based web dashboard
 - Dual-axis charts (stock price vs option price)
 - Entry/exit markers with annotations
-- Stop loss tracking visualization (trailing SL, hard SL lines)
+- Stop loss tracking visualization (trailing TP, hard SL lines)
 - Technical indicator overlays (EMAs, VWAP, Supertrend, Ichimoku)
 - EWO and RSI subplots
 - SPY and ticker gauge background shading
@@ -200,7 +200,7 @@ a Factory class creates per-position Detector instances that track state bar-by-
 
 | Priority | Strategy | Exit Reasons | Description |
 |----------|----------|-------------|-------------|
-| 1 | **Options Exit (Primary TP/SL)** | `OE-Hard-SL`, `OE-Trail-SL` | Hard stop loss + trailing stop loss on option contract price |
+| 1 | **Options Exit (Primary TP/SL)** | `OE-Hard-SL`, `OE-Trail-TP` | Hard stop loss + trailing take profit on option contract price |
 | 2 | **Risk Downtrend** | `DownTrend-SL` | HIGH-risk trades: 3 negative bars or -10% drop |
 | 3 | **StatsBook Exit** | `StatsBook - EWO Max`, `StatsBook - Range Max` | EWO or H-L range hits historical extreme |
 | 4 | **Momentum Peak** | `Momentum Peak` | RSI overbought reversal + EWO decline |
@@ -230,20 +230,20 @@ with reason `OE-Hard-SL`. This is the maximum acceptable loss per trade.
 |-----------|---------|-------------|
 | `initial_sl_pct` | 20 | Hard SL distance below entry (%) |
 
-#### Trailing Stop Loss
+#### Trailing Take Profit
 
-Once the option is profitable by `trail_activation_pct` (default 10%), a trailing SL
+Once the option is profitable by `trail_activation_pct` (default 10%), a trailing TP
 engages. It uses a **continuous logarithmic curve** rather than stepped milestones:
 
 ```
-trail_sl_pct = trail_base_floor + trail_scale * ln(1 + profit_pct / trail_norm)
+trail_tp_pct = trail_base_floor + trail_scale * ln(1 + profit_pct / trail_norm)
 ```
 
-The SL price is: `entry_price * (1 + trail_sl_pct / 100)`
+The TP price is: `entry_price * (1 + trail_tp_pct / 100)`
 
 It **only ratchets up** (locks in more profit), never moves down.
 
-**Example SL levels (standard risk):**
+**Example TP levels (standard risk):**
 
 | Profit | Trailing SL locks in | Net if hit |
 |--------|---------------------|------------|
@@ -260,12 +260,12 @@ buffer is added:
 addon = risk_addon_base + risk_addon_scale * ln(1 + profit_pct / risk_addon_norm)
 ```
 
-This tightens the trailing SL so we lock in more profit faster on risky entries.
+This tightens the trailing TP so we lock in more profit faster on risky entries.
 At 10% profit the addon is ~+2%, at 100% profit it's ~+15%.
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `trail_activation_pct` | 10 | Profit % required to activate trailing SL |
+| `trail_activation_pct` | 10 | Profit % required to activate trailing TP |
 | `trail_base_floor_pct` | 5 | Minimum % above entry once activated |
 | `trail_scale` | 25.0 | Controls slope of logarithmic curve |
 | `trail_norm` | 30.0 | Normalisation factor (higher = slower ramp) |
@@ -273,7 +273,7 @@ At 10% profit the addon is ~+2%, at 100% profit it's ~+15%.
 | `risk_addon_scale` | 5.0 | Slope of high-risk addon curve |
 | `risk_addon_norm` | 30.0 | Normalisation for high-risk addon |
 
-Exit reason: `OE-Trail-SL`
+Exit reason: `OE-Trail-TP`
 
 #### RiskOutlook (Entry Favorability Assessment)
 
@@ -292,14 +292,14 @@ Two time horizons for trend context:
 | 1b | ROC since-open | Session extended in wrong direction | +1 to +2 |
 | 2 | RSI overbought/oversold | Overbought for calls or oversold for puts = bad | +3 (bad) / -1 (good) |
 | 3 | EMA positioning | Price below EMAs for calls = reversal risk | +1 to +2 per EMA |
-| 4 | ATR-SL | Price below ATR trailing SL for calls = bearish | +2 |
+| 4 | ATR-SL | Price below ATR trailing stop for calls = bearish | +2 |
 | 5 | Supertrend | Direction opposes contract type | +2 |
 | 6 | MACD histogram | Negative for calls or positive for puts | +1 |
 | 7 | EWO momentum | Negative for calls or positive for puts | +1 |
 
 **Score thresholds:** LOW (0-2), MEDIUM (3-5), HIGH (6+)
 
-HIGH risk entries get the trailing SL addon and are eligible for risk downtrend monitoring.
+HIGH risk entries get the trailing TP addon and are eligible for risk downtrend monitoring.
 
 #### EMA Reversal Detection
 
@@ -329,7 +329,7 @@ Stored in `tp_confirmed` column.
 
 | Column | Prefix | Description |
 |--------|--------|-------------|
-| `sl_trailing` | SL | Current trailing SL price level (NaN until activated) |
+| `tp_trailing` | TP | Current trailing TP price level (NaN until activated) |
 | `sl_hard` | SL | Hard stop loss price level (constant) |
 | `tp_risk_outlook` | TP | RiskOutlook score: LOW / MEDIUM / HIGH |
 | `tp_risk_reasons` | TP | Pipe-separated reason flags |
