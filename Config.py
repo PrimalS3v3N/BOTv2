@@ -480,6 +480,24 @@ BACKTEST_CONFIG = {
         'risk_addon_scale': 5.0,
         'risk_addon_norm': 30.0,
 
+        # --- Velocity Deceleration Exit (Proactive Peak Detection) ---
+        # Tracks stock price velocity (close-to-close change per bar).  When the
+        # stock was running strongly and suddenly decelerates, it signals momentum
+        # exhaustion — the peak is near.  Exits proactively BEFORE the crash bar.
+        #
+        # Fires when ALL of these are true:
+        #   1. Stock was "running": avg velocity over window > velocity_min_move
+        #   2. Velocity suddenly dropped: current < decel_ratio × recent average
+        #   3. Sustained: deceleration lasted for confirm_bars consecutive bars
+        #   4. Profit is significant: profit_pct > min_profit_pct
+        #   5. Stock is extended: price > all short EMAs (10, 21)
+        'velocity_exit_enabled': True,
+        'velocity_window': 3,              # Bars to compute average velocity (shorter = focused on recent run)
+        'velocity_decel_ratio': 0.30,      # Exit if velocity < 30% of recent avg
+        'velocity_confirm_bars': 1,        # Deceleration bars needed (1 = immediate, 2 = more conservative)
+        'velocity_min_profit_pct': 30,     # Only at high profit levels (avoids premature exits)
+        'velocity_min_move': 0.0,          # Min avg velocity ($) to be "running" (auto-calibrated from statsbook if 0)
+
         # --- RiskOutlook (Entry Favorability Assessment) ---
         # Two time horizons:
         #   Primary: past 30 minutes (ROC over roc_period bars)

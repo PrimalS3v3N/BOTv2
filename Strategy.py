@@ -738,12 +738,34 @@ class OptionsExitDetector:
         # MACD
         self.macd_enabled = config.get('macd_enabled', True)
 
+        # Velocity deceleration exit
+        self.velocity_exit_enabled = config.get('velocity_exit_enabled', True)
+        self.velocity_window = config.get('velocity_window', 5)
+        self.velocity_decel_ratio = config.get('velocity_decel_ratio', 0.30)
+        self.velocity_confirm_bars = config.get('velocity_confirm_bars', 2)
+        self.velocity_min_profit_pct = config.get('velocity_min_profit_pct', 25)
+        self.velocity_min_move = config.get('velocity_min_move', 0.0)
+
+        # Auto-calibrate velocity_min_move from statsbook if set to 0
+        if self.velocity_min_move <= 0 and statsbook is not None:
+            try:
+                median_hl = float(statsbook.loc['Median(H-L)', '5m'])
+                if not np.isnan(median_hl) and median_hl > 0:
+                    # Expect a "run" to average at least 1x median bar range per bar
+                    self.velocity_min_move = median_hl
+            except (KeyError, TypeError, ValueError):
+                pass
+        if self.velocity_min_move <= 0:
+            self.velocity_min_move = 0.05  # Fallback: $0.05/bar minimum
+
         # State
         self.trailing_sl_price = None       # Current trailing SL price (None until activated)
         self.trailing_active = False
         self.highest_profit_pct = 0.0       # Watermark: best profit seen so far
         self.bar_count = 0
         self.is_high_risk = False
+        self._stock_prices = []             # Stock close history for velocity
+        self._decel_count = 0               # Consecutive bars of deceleration
 
         # Entry favorability assessment (computed once)
         self.favorability = None             # 'LOW' / 'MEDIUM' / 'HIGH' risk
@@ -808,6 +830,85 @@ class OptionsExitDetector:
             return self._adaptive_buffer_base / decay_factor
         # Fallback: use minimum buffer
         return self.trail_buffer_min_pct
+
+    # ------------------------------------------------------------------
+    # Velocity deceleration detection
+    # ------------------------------------------------------------------
+
+    def _check_velocity_exit(self, stock_price, profit_pct, ema_values):
+        """
+        Detect stock price velocity deceleration for proactive peak exit.
+
+        Tracks bar-to-bar stock price changes (velocity).  When the stock was
+        running strongly and velocity drops to a fraction of its recent average,
+        it signals momentum exhaustion — exit before the crash.
+
+        Returns:
+            bool: True if velocity deceleration exit should fire.
+        """
+        if not self.velocity_exit_enabled:
+            return False
+
+        self._stock_prices.append(stock_price)
+
+        # Need at least window + 1 bars to compute velocities
+        if len(self._stock_prices) < self.velocity_window + 2:
+            return False
+
+        # Minimum profit gate
+        if profit_pct < self.velocity_min_profit_pct:
+            self._decel_count = 0
+            return False
+
+        # Compute velocities: close[i] - close[i-1] for recent bars
+        prices = self._stock_prices
+        window = self.velocity_window
+
+        # Direction-aware: for calls, positive velocity = good; for puts, negative = good
+        if self.is_call:
+            velocities = [prices[-i] - prices[-i - 1] for i in range(1, window + 2)]
+        else:
+            velocities = [prices[-i - 1] - prices[-i] for i in range(1, window + 2)]
+        velocities.reverse()  # Oldest to newest
+
+        # Current velocity = last element; average = mean of previous N
+        current_velocity = velocities[-1]
+        avg_velocity = sum(velocities[:-1]) / len(velocities[:-1])
+
+        # Stock must have been "running" (avg velocity above minimum move)
+        if avg_velocity < self.velocity_min_move:
+            self._decel_count = 0
+            return False
+
+        # Deceleration = still moving in the right direction, just much slower.
+        # Negative velocity (actual reversal) is NOT deceleration — let trail-SL
+        # handle outright reversals.  This targets the "stall before the crash".
+        if current_velocity < 0:
+            self._decel_count = 0
+            return False
+
+        # Check for deceleration: current velocity < ratio × average
+        if current_velocity < self.velocity_decel_ratio * avg_velocity:
+            self._decel_count += 1
+        else:
+            self._decel_count = 0
+            return False
+
+        # Confirmation: deceleration must persist for N bars
+        if self._decel_count < self.velocity_confirm_bars:
+            return False
+
+        # Extended check: price should be above short EMAs (still in "run" territory)
+        if ema_values:
+            for period in [10, 21]:
+                ema_val = ema_values.get(period, np.nan)
+                if not np.isnan(ema_val):
+                    if self.is_call and stock_price < ema_val:
+                        return False  # Already reversed below EMA — let trail-SL handle
+                    elif not self.is_call and stock_price > ema_val:
+                        return False
+
+        return True
 
     # ------------------------------------------------------------------
     # Trailing SL math
@@ -1113,6 +1214,11 @@ class OptionsExitDetector:
             if option_price <= self.trailing_sl_price:
                 state = self._build_state(option_price, profit_pct)
                 return True, 'Trail-SL', state
+
+        # --- Velocity deceleration exit (proactive peak detection) ---
+        if self._check_velocity_exit(stock_price, profit_pct, ema_values):
+            state = self._build_state(option_price, profit_pct)
+            return True, 'Velocity-Peak', state
 
         state = self._build_state(option_price, profit_pct)
         return False, None, state
