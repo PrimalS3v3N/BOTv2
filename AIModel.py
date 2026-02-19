@@ -67,7 +67,7 @@ class DataSnapshot:
             bar_data: dict with keys matching the databook record format:
                 stock_price, stock_high, stock_low, true_price, volume,
                 option_price, pnl_pct, vwap, ema_21, ewo, ewo_15min_avg,
-                rsi, rsi_10min_avg, supertrend_direction, market_bias,
+                rsi, rsi_10min_avg, supertrend_direction, ticker_trend (market_bias),
                 ichimoku_tenkan, ichimoku_kijun, ichimoku_senkou_a, ichimoku_senkou_b
         """
         self.bars.append(bar_data)
@@ -184,7 +184,7 @@ class DataSnapshot:
             f"  Price: ${self._safe(current.get('stock_price'))} | True Price: ${self._safe(current.get('true_price'))}\n"
             f"  RSI: {self._safe(current.get('rsi'), '.1f')} | EWO: {self._safe(current.get('ewo'), '.3f')}\n"
             f"  VWAP: ${self._safe(current.get('vwap'))} | EMA: ${self._safe(current.get('ema_21'))}\n"
-            f"  Supertrend: {self._supertrend_summary(current)} | Bias: {self._safe(current.get('market_bias'), '.0f')}\n"
+            f"  Supertrend: {self._supertrend_summary(current)} | Trend: {self._safe(current.get('market_bias'), '.0f')}\n"
             f"\n"
             f"5-MINUTE VIEW ({len(bars_5m)} bars):\n"
             f"  Price Change: {self._safe(self._price_change_pct(bars_5m))}%\n"

@@ -650,6 +650,7 @@ class Databook:
                    stoch_k=np.nan, stoch_d=np.nan,
                    vpoc=np.nan, book_imbalance=np.nan,
                    risk=None, risk_reasons=None, risk_trend=None,
+                   ticker_trend=np.nan, spy_trend=np.nan, market_trend=None, mt_state=None,
                    spy_price=np.nan, spy_gauge=None, ticker_gauge=None,
                    ai_outlook_1m=None, ai_outlook_5m=None,
                    ai_outlook_30m=None, ai_outlook_1h=None,
@@ -660,7 +661,7 @@ class Databook:
                    exit_sig_closure_peak=None,
                    exit_sig_oe=None,
                    exit_sig_vc=None, exit_sig_ts=None, exit_sig_vwap=None,
-                   exit_sig_st=None):
+                   exit_sig_st=None, exit_sig_mt=None):
         """Add a tracking record."""
         pnl_pct = self.position.get_pnl_pct(option_price) if holding else np.nan
 
@@ -672,21 +673,6 @@ class Databook:
             self.day_high = max(self.day_high, stock_high)
         if not np.isnan(stock_low) and stock_low > 0:
             self.day_low = min(self.day_low, stock_low)
-
-        # Market bias: +1 (bullish), 0 (sideways), -1 (bearish)
-        # Sideways zone = VWAP +/- configurable % of today's high-low range
-        bias_band_pct = Config.BACKTEST_CONFIG.get('bias_sideways_band', 0.05)
-        if not np.isnan(vwap) and vwap > 0 and self.day_high > self.day_low:
-            day_range = self.day_high - self.day_low
-            sideways_band = bias_band_pct * day_range
-            if stock_price >= vwap + sideways_band:
-                market_bias = 1
-            elif stock_price <= vwap - sideways_band:
-                market_bias = -1
-            else:
-                market_bias = 0
-        else:
-            market_bias = np.nan
 
         # Unpack SPY gauge dict into individual columns
         spy_gauge = spy_gauge or {}
@@ -711,8 +697,11 @@ class Databook:
             'risk': risk,
             'risk_reasons': risk_reasons,
             'risk_trend': risk_trend,
-            # Market assessment
-            'market_bias': market_bias,
+            # MarketTrend
+            'ticker_trend': ticker_trend,
+            'spy_trend': spy_trend,
+            'market_trend': market_trend,
+            'mt_state': mt_state,
             # SPY gauge
             'spy_price': spy_price,
             'spy_since_open': spy_gauge.get('since_open'),
@@ -786,6 +775,7 @@ class Databook:
             'exit_sig_ts': exit_sig_ts,
             'exit_sig_vwap': exit_sig_vwap,
             'exit_sig_st': exit_sig_st,
+            'exit_sig_mt': exit_sig_mt,
         }
 
         self.records.append(record)
@@ -1003,12 +993,12 @@ class DataSummary:
         has_rsi = 'rsi' in df.columns
         has_ewo = 'ewo' in df.columns
         has_vwap = 'vwap' in df.columns
-        has_bias = 'market_bias' in df.columns
+        has_bias = 'ticker_trend' in df.columns
 
         exit_sig_cols = [c for c in ['exit_sig_sb', 'exit_sig_mp', 'exit_sig_ai',
                                       'exit_sig_closure_peak', 'exit_sig_oe',
                                       'exit_sig_vc', 'exit_sig_ts', 'exit_sig_vwap',
-                                      'exit_sig_st'] if c in df.columns]
+                                      'exit_sig_st', 'exit_sig_mt'] if c in df.columns]
 
         records = []
         for interval_start, idx_group in df.groupby(intervals).groups.items():
@@ -1041,7 +1031,7 @@ class DataSummary:
                 'rsi_avg': group['rsi'].mean() if has_rsi else np.nan,
                 'ewo_avg': group['ewo'].mean() if has_ewo else np.nan,
                 'vwap_avg': group['vwap'].mean() if has_vwap else np.nan,
-                'market_bias_mode': group['market_bias'].mode().iloc[0] if has_bias and not group['market_bias'].mode().empty else np.nan,
+                'ticker_trend_mode': group['ticker_trend'].mode().iloc[0] if has_bias and not group['ticker_trend'].mode().empty else np.nan,
                 'exit_signals_fired': '|'.join(exit_signals) if exit_signals else None,
                 'signal_id': signal_id,
             }
@@ -1315,6 +1305,89 @@ class SimulationEngine:
 
         return results
 
+    def precompute_trends(self, data, timestamps, vwap_col=None):
+        """
+        Pre-compute trend values (-1, 0, +1) for all timestamps.
+
+        Uses VWAP (or cumulative average as fallback) with a sideways band
+        based on running day high-low range. Same logic as the former
+        market_bias computation but vectorised across all bars.
+
+        Args:
+            data: DataFrame with 'close', 'high', 'low' columns and DatetimeIndex.
+                  Optionally 'vwap' and 'volume'.
+            timestamps: Array of timestamps to compute trends for.
+            vwap_col: Column name for VWAP. If None, computes from volume or
+                      falls back to cumulative average.
+
+        Returns:
+            list of trend values (-1, 0, +1, or np.nan), one per timestamp.
+        """
+        if data is None or data.empty:
+            return [np.nan] * len(timestamps)
+
+        bias_band_pct = self.config.get('bias_sideways_band', 0.05)
+
+        close_vals = data['close'].values
+        high_vals = data['high'].values if 'high' in data.columns else close_vals
+        low_vals = data['low'].values if 'low' in data.columns else close_vals
+        data_index = data.index
+
+        # Determine VWAP source
+        if vwap_col and vwap_col in data.columns:
+            vwap_vals = data[vwap_col].values
+        elif 'volume' in data.columns:
+            vol = data['volume'].values.astype(float)
+            cum_vol = np.cumsum(vol)
+            cum_pv = np.cumsum(close_vals * vol)
+            vwap_vals = np.where(cum_vol > 0, cum_pv / cum_vol, np.nan)
+        else:
+            # Fallback: cumulative average
+            vwap_vals = np.cumsum(close_vals) / np.arange(1, len(close_vals) + 1)
+
+        results = []
+        day_high = -np.inf
+        day_low = np.inf
+        current_day = None
+
+        for ts in timestamps:
+            pos = data_index.searchsorted(ts, side='right')
+            if pos == 0:
+                results.append(np.nan)
+                continue
+
+            idx = pos - 1
+            price = float(close_vals[idx])
+            high = float(high_vals[idx])
+            low = float(low_vals[idx])
+            vwap = float(vwap_vals[idx])
+
+            # Reset running high/low on new trading day
+            ts_date = ts.date() if hasattr(ts, 'date') else ts
+            if current_day != ts_date:
+                current_day = ts_date
+                day_high = -np.inf
+                day_low = np.inf
+
+            if not np.isnan(high):
+                day_high = max(day_high, high)
+            if not np.isnan(low) and low > 0:
+                day_low = min(day_low, low)
+
+            if not np.isnan(vwap) and vwap > 0 and day_high > day_low:
+                day_range = day_high - day_low
+                sideways_band = bias_band_pct * day_range
+                if price >= vwap + sideways_band:
+                    results.append(1)       # Bullish
+                elif price <= vwap - sideways_band:
+                    results.append(-1)      # Bearish
+                else:
+                    results.append(0)       # Sideways
+            else:
+                results.append(np.nan)
+
+        return results
+
     def assess_risk(self, rsi, rsi_avg, ewo_avg, statsbook, timestamp, signal_time):
         """
         Assess risk at entry time.
@@ -1493,6 +1566,10 @@ class SimulationEngine:
         _spy_gauges = self.precompute_gauges(spy_data, _all_timestamps)
         _ticker_gauges = self.precompute_gauges(stock_data, _all_timestamps)
 
+        # Pre-compute trend values (-1/0/+1) for ticker and SPY
+        _ticker_trends = self.precompute_trends(stock_data, _all_timestamps, vwap_col='vwap')
+        _spy_trends = self.precompute_trends(spy_data, _all_timestamps)
+
         # Create strategy detectors
         mp_strategy = Strategy.MomentumPeak(self.config.get('momentum_peak', {}))
         mp_detector = mp_strategy.create_detector(position.option_type)
@@ -1523,6 +1600,10 @@ class SimulationEngine:
 
         st_flip_strategy = Strategy.SupertrendFlipExit(self.config.get('supertrend_flip_exit', {}))
         st_flip_detector = st_flip_strategy.create_detector(position.option_type)
+
+        mt_strategy = Strategy.MarketTrend(self.config.get('market_trend', {}))
+        mt_detector = mt_strategy.create_detector(position.option_type)
+        mt_exit_enabled = self.config.get('market_trend', {}).get('exit_enabled', False)
 
         # Closure - Peak settings
         CP_config = self.config.get('closure_peak', {})
@@ -1652,6 +1733,16 @@ class SimulationEngine:
             spy_price, spy_gauge_data = _spy_gauges[i]
             _, ticker_gauge_data = _ticker_gauges[i]
 
+            # Use pre-computed trends
+            ticker_trend_val = _ticker_trends[i]
+            spy_trend_val = _spy_trends[i]
+
+            # Compute market_trend alignment (True = matching, False = diverging)
+            if np.isnan(ticker_trend_val) or np.isnan(spy_trend_val):
+                market_trend_val = None
+            else:
+                market_trend_val = (int(ticker_trend_val) == int(spy_trend_val))
+
             if holding:
                 position.update(timestamp, option_price, stock_price)
 
@@ -1761,7 +1852,7 @@ class SimulationEngine:
                         'rsi': rsi,
                         'rsi_10min_avg': rsi_10min_avg,
                         'supertrend_direction': st_direction,
-                        'market_bias': matrix.records[-1]['market_bias'] if matrix.records else np.nan,
+                        'market_bias': matrix.records[-1]['ticker_trend'] if matrix.records else np.nan,
                         'ichimoku_tenkan': ichi_tenkan,
                         'ichimoku_kijun': ichi_kijun,
                         'ichimoku_senkou_a': ichi_senkou_a,
@@ -1805,6 +1896,14 @@ class SimulationEngine:
                     st_flip_pnl = position.get_pnl_pct(option_price)
                     st_flip_exit, st_flip_reason = st_flip_detector.update(st_flip_pnl, st_direction)
 
+                # Update MarketTrend detector
+                mt_exit = False
+                mt_reason = None
+                mt_state = None
+                if mt_detector and not position.is_closed:
+                    mt_pnl = position.get_pnl_pct(option_price)
+                    mt_exit, mt_reason, mt_state = mt_detector.update(ticker_trend_val, spy_trend_val, mt_pnl)
+
                 # Compute Closure-Peak signal flag
                 cp_signal = False
                 if CP_enabled and not np.isnan(rsi_10min_avg) and timestamp.time() >= CP_start_time:
@@ -1836,6 +1935,8 @@ class SimulationEngine:
                     stoch_k=stoch_k_val, stoch_d=stoch_d_val,
                     vpoc=vpoc_val, book_imbalance=np.nan,
                     risk=risk_level, risk_reasons=risk_reasons, risk_trend=risk_trend,
+                    ticker_trend=ticker_trend_val, spy_trend=spy_trend_val,
+                    market_trend=market_trend_val, mt_state=mt_state,
                     spy_price=spy_price, spy_gauge=spy_gauge_data, ticker_gauge=ticker_gauge_data,
                     ai_outlook_1m=ai_signal_data.get('outlook_1m'),
                     ai_outlook_5m=ai_signal_data.get('outlook_5m'),
@@ -1848,6 +1949,7 @@ class SimulationEngine:
                     exit_sig_ai=ai_exit, exit_sig_closure_peak=cp_signal, exit_sig_oe=oe_exit,
                     exit_sig_vc=vc_exit, exit_sig_ts=ts_exit, exit_sig_vwap=vwap_exit,
                     exit_sig_st=st_flip_exit,
+                    exit_sig_mt=mt_exit or (mt_reason is not None),
                 )
 
                 # === EXIT PRIORITY CHAIN ===
@@ -1869,6 +1971,9 @@ class SimulationEngine:
                 elif st_flip_exit and not position.is_closed:
                     exit_price = option_price * (1 - self.slippage_pct)
                     position.close(exit_price, timestamp, st_flip_reason)
+                elif mt_exit and mt_exit_enabled and not position.is_closed:
+                    exit_price = option_price * (1 - self.slippage_pct)
+                    position.close(exit_price, timestamp, mt_reason)
                 elif ts_exit and not position.is_closed:
                     exit_price = option_price * (1 - self.slippage_pct)
                     position.close(exit_price, timestamp, ts_reason)
@@ -1908,6 +2013,8 @@ class SimulationEngine:
                     roc=roc_val,
                     stoch_k=stoch_k_val, stoch_d=stoch_d_val,
                     vpoc=vpoc_val, book_imbalance=np.nan,
+                    ticker_trend=ticker_trend_val, spy_trend=spy_trend_val,
+                    market_trend=market_trend_val,
                     spy_price=spy_price, spy_gauge=spy_gauge_data, ticker_gauge=ticker_gauge_data,
                 )
 
@@ -2776,6 +2883,10 @@ class LiveTest:
         st_flip_strategy = Strategy.SupertrendFlipExit(config.get('supertrend_flip_exit', {}))
         st_flip_detector = st_flip_strategy.create_detector(position.option_type)
 
+        mt_strategy = Strategy.MarketTrend(config.get('market_trend', {}))
+        mt_detector = mt_strategy.create_detector(position.option_type)
+        mt_exit_enabled = config.get('market_trend', {}).get('exit_enabled', False)
+
         # Risk assessment config
         risk_config = config.get('risk_assessment', {})
         CP_config = config.get('closure_peak', {})
@@ -2789,6 +2900,8 @@ class LiveTest:
             'ts_detector': ts_detector,
             'vwap_detector': vwap_detector,
             'st_flip_detector': st_flip_detector,
+            'mt_detector': mt_detector,
+            'mt_exit_enabled': mt_exit_enabled,
             'oe_favorability_assessed': False,
             'risk_assessed': False,
             'risk_level': None,
@@ -2977,7 +3090,7 @@ class LiveTest:
                 'vwap': vwap, 'ema_21': ema_21, 'ewo': ewo, 'ewo_15min_avg': ewo_15min_avg,
                 'rsi': rsi, 'rsi_10min_avg': rsi_10min_avg,
                 'supertrend_direction': st_direction,
-                'market_bias': matrix.records[-1]['market_bias'] if matrix.records else np.nan,
+                'market_bias': matrix.records[-1]['ticker_trend'] if matrix.records else np.nan,
                 'ichimoku_tenkan': ichi_tenkan, 'ichimoku_kijun': ichi_kijun,
                 'ichimoku_senkou_a': ichi_senkou_a, 'ichimoku_senkou_b': ichi_senkou_b,
             }
@@ -3017,6 +3130,57 @@ class LiveTest:
             st_flip_pnl = position.get_pnl_pct(option_price)
             st_flip_exit, st_flip_reason = st_flip_detector.update(st_flip_pnl, st_direction)
 
+        # Compute ticker/SPY trends for this bar (live single-bar calculation)
+        bias_band_pct = self.engine.config.get('bias_sideways_band', 0.05)
+        ticker_trend_val = np.nan
+        spy_trend_val = np.nan
+        market_trend_val = None
+
+        if not np.isnan(vwap) and vwap > 0 and matrix.day_high > matrix.day_low:
+            day_range = matrix.day_high - matrix.day_low
+            sideways_band = bias_band_pct * day_range
+            if stock_price >= vwap + sideways_band:
+                ticker_trend_val = 1
+            elif stock_price <= vwap - sideways_band:
+                ticker_trend_val = -1
+            else:
+                ticker_trend_val = 0
+
+        if spy_data is not None and not spy_data.empty and spy_price and not np.isnan(spy_price):
+            spy_avail = spy_data[spy_data.index <= timestamp]
+            if len(spy_avail) >= 2:
+                spy_high = spy_avail['high'].max() if 'high' in spy_avail.columns else spy_avail['close'].max()
+                spy_low = spy_avail['low'].min() if 'low' in spy_avail.columns else spy_avail['close'].min()
+                if spy_high > spy_low:
+                    # Use cumulative average as VWAP proxy for SPY
+                    if 'volume' in spy_avail.columns:
+                        vol = spy_avail['volume'].values.astype(float)
+                        cum_vol = vol.sum()
+                        if cum_vol > 0:
+                            spy_vwap = (spy_avail['close'].values * vol).sum() / cum_vol
+                        else:
+                            spy_vwap = spy_avail['close'].mean()
+                    else:
+                        spy_vwap = spy_avail['close'].mean()
+                    spy_range = spy_high - spy_low
+                    spy_band = bias_band_pct * spy_range
+                    if spy_price >= spy_vwap + spy_band:
+                        spy_trend_val = 1
+                    elif spy_price <= spy_vwap - spy_band:
+                        spy_trend_val = -1
+                    else:
+                        spy_trend_val = 0
+
+        if not np.isnan(ticker_trend_val) and not np.isnan(spy_trend_val):
+            market_trend_val = (int(ticker_trend_val) == int(spy_trend_val))
+
+        # Update MarketTrend detector
+        mt_exit, mt_reason, mt_state = False, None, None
+        mt_detector = state['mt_detector']
+        if mt_detector and not position.is_closed:
+            mt_pnl = position.get_pnl_pct(option_price)
+            mt_exit, mt_reason, mt_state = mt_detector.update(ticker_trend_val, spy_trend_val, mt_pnl)
+
         # Closure-Peak signal
         CP_enabled = state['CP_enabled']
         cp_signal = False
@@ -3043,6 +3207,8 @@ class LiveTest:
             stoch_k=stoch_k_val, stoch_d=stoch_d_val,
             vpoc=vpoc_val, book_imbalance=np.nan,
             risk=risk_level, risk_reasons=risk_reasons, risk_trend=risk_trend,
+            ticker_trend=ticker_trend_val, spy_trend=spy_trend_val,
+            market_trend=market_trend_val, mt_state=mt_state,
             spy_price=spy_price, spy_gauge=spy_gauge_data, ticker_gauge=ticker_gauge_data,
             ai_outlook_1m=ai_signal_data.get('outlook_1m'),
             ai_outlook_5m=ai_signal_data.get('outlook_5m'),
@@ -3055,6 +3221,7 @@ class LiveTest:
             exit_sig_ai=ai_exit, exit_sig_closure_peak=cp_signal, exit_sig_oe=oe_exit,
             exit_sig_vc=vc_exit, exit_sig_ts=ts_exit, exit_sig_vwap=vwap_exit,
             exit_sig_st=st_flip_exit,
+            exit_sig_mt=mt_exit or (mt_reason is not None),
         )
 
         # === EXIT PRIORITY CHAIN ===
@@ -3071,6 +3238,8 @@ class LiveTest:
             position.close(option_price * (1 - slippage), timestamp, vwap_reason)
         elif st_flip_exit and not position.is_closed:
             position.close(option_price * (1 - slippage), timestamp, st_flip_reason)
+        elif mt_exit and state['mt_exit_enabled'] and not position.is_closed:
+            position.close(option_price * (1 - slippage), timestamp, mt_reason)
         elif ts_exit and not position.is_closed:
             position.close(option_price * (1 - slippage), timestamp, ts_reason)
         elif ai_exit and not position.is_closed:
