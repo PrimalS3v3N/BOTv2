@@ -1509,7 +1509,32 @@ class SimulationEngine:
             )
 
         oe_strategy = Strategy.OptionsExit(self.config.get('options_exit', {}))
-        oe_detector = oe_strategy.create_detector(position.entry_price, position.option_type)
+        # Compute entry delta for adaptive trail-SL buffer
+        _oe_delta = None
+        _oe_statsbook = statsbooks.get(position.ticker) if statsbooks else None
+        try:
+            if signal.get('expiration') and signal.get('strike'):
+                _oe_dte = max(0.001, (dt.datetime.combine(
+                    signal['expiration'], dt.time(16, 0), tzinfo=EASTERN
+                ) - position.entry_time).total_seconds() / 86400)
+                _opts = self.config.get('options', {})
+                _oe_greeks = Analysis.calculate_greeks(
+                    S=entry_stock_price,
+                    K=signal['strike'],
+                    T=_oe_dte / 365.0,
+                    r=_opts.get('risk_free_rate', 0.05),
+                    sigma=_opts.get('default_volatility', 0.30),
+                    option_type=signal['option_type'],
+                )
+                _oe_delta = _oe_greeks.get('delta')
+        except Exception:
+            pass
+        oe_detector = oe_strategy.create_detector(
+            position.entry_price, position.option_type,
+            entry_stock_price=entry_stock_price,
+            entry_delta=_oe_delta,
+            statsbook=_oe_statsbook,
+        )
         oe_favorability_assessed = False
 
         vc_strategy = Strategy.VolumeClimaxExit(self.config.get('volume_climax_exit', {}))
@@ -2762,7 +2787,33 @@ class LiveTest:
             )
 
         oe_strategy = Strategy.OptionsExit(config.get('options_exit', {}))
-        oe_detector = oe_strategy.create_detector(position.entry_price, position.option_type)
+        # Compute entry delta for adaptive trail-SL buffer
+        _oe_delta = None
+        _oe_stock_price = stock_df.iloc[-1]['close'] if stock_df is not None and len(stock_df) > 0 else None
+        _oe_statsbook = self.statsbooks.get(position.ticker)
+        try:
+            if signal.get('expiration') and signal.get('strike') and _oe_stock_price:
+                _oe_dte = max(0.001, (dt.datetime.combine(
+                    signal['expiration'], dt.time(16, 0), tzinfo=EASTERN
+                ) - position.entry_time).total_seconds() / 86400)
+                _opts = config.get('options', {})
+                _oe_greeks = Analysis.calculate_greeks(
+                    S=_oe_stock_price,
+                    K=signal['strike'],
+                    T=_oe_dte / 365.0,
+                    r=_opts.get('risk_free_rate', 0.05),
+                    sigma=_opts.get('default_volatility', 0.30),
+                    option_type=signal['option_type'],
+                )
+                _oe_delta = _oe_greeks.get('delta')
+        except Exception:
+            pass
+        oe_detector = oe_strategy.create_detector(
+            position.entry_price, position.option_type,
+            entry_stock_price=_oe_stock_price,
+            entry_delta=_oe_delta,
+            statsbook=_oe_statsbook,
+        )
 
         vc_strategy = Strategy.VolumeClimaxExit(config.get('volume_climax_exit', {}))
         vc_detector = vc_strategy.create_detector(position.option_type)

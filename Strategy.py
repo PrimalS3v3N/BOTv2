@@ -644,20 +644,28 @@ class OptionsExit:
         self.enabled = oe_config.get('enabled', False)
         self.config = oe_config
 
-    def create_detector(self, entry_option_price, option_type):
+    def create_detector(self, entry_option_price, option_type,
+                         entry_stock_price=None, entry_delta=None,
+                         statsbook=None):
         """
         Create a new OptionsExitDetector for a position.
 
         Args:
             entry_option_price: Option price at entry
             option_type: 'CALL' or 'PUT'
+            entry_stock_price: Stock price at entry (for adaptive buffer)
+            entry_delta: Option delta at entry (for adaptive buffer)
+            statsbook: Statsbook DataFrame for this ticker (for adaptive buffer)
 
         Returns:
             OptionsExitDetector instance, or None if disabled.
         """
         if not self.enabled:
             return None
-        return OptionsExitDetector(self.config, entry_option_price, option_type)
+        return OptionsExitDetector(self.config, entry_option_price, option_type,
+                                   entry_stock_price=entry_stock_price,
+                                   entry_delta=entry_delta,
+                                   statsbook=statsbook)
 
 
 class OptionsExitDetector:
@@ -681,7 +689,8 @@ class OptionsExitDetector:
     It only moves up (for profit protection), never down.
     """
 
-    def __init__(self, config, entry_option_price, option_type):
+    def __init__(self, config, entry_option_price, option_type,
+                 entry_stock_price=None, entry_delta=None, statsbook=None):
         self.entry_option_price = entry_option_price
         self.is_call = option_type.upper() in ['CALL', 'CALLS', 'C']
 
@@ -694,8 +703,20 @@ class OptionsExitDetector:
         self.trail_activation_pct = config.get('trail_activation_pct', 10)
         self.trail_base_floor_pct = config.get('trail_base_floor_pct', 5)
         self.trail_early_floor_minutes = config.get('trail_early_floor_minutes', 5)
-        self.trail_scale = config.get('trail_scale', 25.0)
-        self.trail_norm = config.get('trail_norm', 30.0)
+        self.trail_scale = config.get('trail_scale', 20.0)
+        self.trail_norm = config.get('trail_norm', 40.0)
+
+        # Adaptive buffer parameters
+        self.trail_buffer_adaptive = config.get('trail_buffer_adaptive', True)
+        self.trail_buffer_bars = config.get('trail_buffer_bars', 1.5)
+        self.trail_buffer_min_pct = config.get('trail_buffer_min_pct', 5.0)
+        self.trail_buffer_max_pct = config.get('trail_buffer_max_pct', 25.0)
+        self.trail_buffer_decay_norm = config.get('trail_buffer_decay_norm', 50.0)
+
+        # Compute adaptive buffer base from statsbook + delta
+        self._adaptive_buffer_base = self._compute_adaptive_buffer_base(
+            entry_stock_price, entry_delta, statsbook
+        )
 
         # High-risk addon
         self.risk_addon_base = config.get('risk_addon_base', 2.0)
@@ -738,6 +759,57 @@ class OptionsExitDetector:
         self.ema_reversal = False
 
     # ------------------------------------------------------------------
+    # Adaptive buffer computation
+    # ------------------------------------------------------------------
+
+    def _compute_adaptive_buffer_base(self, entry_stock_price, entry_delta, statsbook):
+        """
+        Compute the base adaptive buffer from Statsbook volatility and entry delta.
+
+        Uses Median.Max(H-L) from the 5m timeframe to measure the typical peak
+        bar range for this stock, then converts to option-percentage terms via
+        delta.  This gives the expected per-bar option noise as a % of entry price.
+
+        Returns:
+            float: base buffer in option-% terms, or None if data unavailable.
+        """
+        if not self.trail_buffer_adaptive:
+            return None
+        if entry_stock_price is None or entry_delta is None or statsbook is None:
+            return None
+        try:
+            median_max_hl = float(statsbook.loc['Median.Max(H-L)', '5m'])
+        except (KeyError, TypeError, ValueError):
+            return None
+        if np.isnan(median_max_hl) or median_max_hl <= 0:
+            return None
+
+        # Per-bar option noise: how much the option moves (in % of entry price)
+        # for a typical max bar range in the stock
+        option_noise_pct = (abs(entry_delta) * median_max_hl
+                            / self.entry_option_price * 100)
+
+        # Scale by bar multiplier (tolerate N bars of max noise)
+        base_buffer = option_noise_pct * self.trail_buffer_bars
+
+        return max(self.trail_buffer_min_pct, min(base_buffer, self.trail_buffer_max_pct))
+
+    def _get_buffer(self, profit_pct):
+        """
+        Get the trailing SL buffer for the current profit level.
+
+        If adaptive buffer is available, it decays with profit so the trade
+        has room to breathe at low profits and tightens at high profits.
+        Falls back to trail_buffer_min_pct if no statsbook data.
+        """
+        if self._adaptive_buffer_base is not None:
+            # Decay: buffer shrinks as profit grows
+            decay_factor = 1 + profit_pct / self.trail_buffer_decay_norm
+            return self._adaptive_buffer_base / decay_factor
+        # Fallback: use minimum buffer
+        return self.trail_buffer_min_pct
+
+    # ------------------------------------------------------------------
     # Trailing SL math
     # ------------------------------------------------------------------
 
@@ -766,8 +838,9 @@ class OptionsExitDetector:
             )
             sl_pct += addon
 
-        # SL can never exceed current profit (leave at least 2% buffer)
-        sl_pct = min(sl_pct, profit_pct - 2.0)
+        # SL can never exceed current profit minus adaptive buffer
+        buffer = self._get_buffer(profit_pct)
+        sl_pct = min(sl_pct, profit_pct - buffer)
 
         return max(0.0, sl_pct)
 
