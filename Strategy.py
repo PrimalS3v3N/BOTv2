@@ -32,38 +32,14 @@ class MomentumPeak:
     """
     Factory for creating MomentumPeakDetector instances.
 
-    Detects momentum exhaustion peaks using RSI overbought/oversold reversal,
-    EWO decline/incline, Stochastic crossovers, and RSI-below/above-average
-    confirmation. Works for both CALLs and PUTs.
+    Detects momentum exhaustion peaks using graduated multi-signal scoring.
+    Works for both CALLs and PUTs.
 
-    CALLs: RSI overbought → dropping, EWO declining, Stochastic bearish crossover
-    PUTs:  RSI oversold → bouncing, EWO increasing, Stochastic bullish crossover
-
-    Hard gates (1-3): min profit, RSI extreme, RSI delta. Always required.
-    Scored conditions (4-9): each contributes weighted points. Exit fires
-    when total score >= score_threshold. Set any weight to 0 to disable.
-
-    Config: BACKTEST_CONFIG['momentum_peak']
-        {
-            'min_profit_pct': 15,          # [Hard] Minimum option profit %
-            'rsi_overbought': 80,          # [Hard] RSI overbought threshold (CALLs)
-            'rsi_oversold': 20,            # [Hard] RSI oversold threshold (PUTs)
-            'rsi_lookback': 5,             # [Hard] Bars to check for recent extreme
-            'rsi_drop_threshold': 10,      # [Hard] Min RSI change from extreme
-            'rsi_recovery_level': 30,      # [Scored] RSI zone exit level
-            'ewo_declining_bars': 3,       # [Scored] Consecutive EWO bars adverse
-            'stoch_overbought': 80,        # Stochastic overbought zone
-            'stoch_oversold': 20,          # Stochastic oversold zone
-            'spread_contraction_bars': 3,  # [Scored] Option price decline bars
-            'bar_range_contraction_bars': 3,  # [Scored] Candle range shrink bars
-            'score_rsi_recovery': 2,       # Weight: RSI exits extreme zone
-            'score_ewo_trend': 2,          # Weight: EWO adverse trend
-            'score_rsi_vs_avg': 1,         # Weight: RSI vs 10-min avg
-            'score_stochastic': 1,         # Weight: Stochastic crossover
-            'score_spread_contraction': 2, # Weight: Option price declining
-            'score_bar_range': 2,          # Weight: Candle range shrinking
-            'score_threshold': 8,          # Min score to exit (max 10)
-        }
+    Hard gates (1-3): min profit, RSI extreme, RSI delta — always required.
+    Scored conditions (4-9): graduated weights that scale with signal strength.
+      Each returns 0.0 (not met) to weight * 1.25 (very strong signal).
+    Bonus signals (10-11): velocity & acceleration — add confidence, never gate.
+    Exit fires when total score >= score_threshold.
     """
 
     def __init__(self, config=None):
@@ -87,13 +63,17 @@ class MomentumPeakDetector:
     2. RSI reached extreme zone within lookback window
     3. RSI moved away from extreme by >= rsi_drop_threshold
 
-    Scored conditions (contribute weighted points toward threshold):
-    4. RSI exits extreme zone (weight: score_rsi_recovery)
-    5. EWO adverse trend for N bars (weight: score_ewo_trend)
-    6. RSI vs 10-min average (weight: score_rsi_vs_avg)
-    7. Stochastic crossover in extreme zone (weight: score_stochastic)
-    8. Option price declining for N bars (weight: score_spread_contraction)
-    9. Bar range (high-low) shrinking for N bars (weight: score_bar_range)
+    Scored conditions (graduated — stronger signal → up to 1.25x weight):
+    4. RSI zone exit depth — deeper past threshold = higher score
+    5. EWO adverse trend — more consecutive bars = higher score
+    6. RSI vs 10-min avg — bigger gap = higher score
+    7. Stochastic crossover — bigger K/D divergence = higher score
+    8. Spread contraction — more consecutive declining bars = higher score
+    9. Bar range contraction — more consecutive shrinking bars = higher score
+
+    Bonus confidence signals (can only add, never gate):
+    10. RSI velocity — how fast RSI is leaving the extreme zone
+    11. EWO acceleration — adverse EWO trend getting steeper each bar
 
     Exit fires when: hard gates pass AND total score >= score_threshold.
     """
@@ -114,14 +94,17 @@ class MomentumPeakDetector:
         self.spread_contraction_bars = config.get('spread_contraction_bars', 3)
         self.bar_range_contraction_bars = config.get('bar_range_contraction_bars', 3)
 
-        # Scoring weights (0 = disabled)
+        # Scoring weights (0 = disabled) — graduated, scale with signal strength
         self.score_rsi_recovery = config.get('score_rsi_recovery', 2)
         self.score_ewo_trend = config.get('score_ewo_trend', 2)
         self.score_rsi_vs_avg = config.get('score_rsi_vs_avg', 1)
         self.score_stochastic = config.get('score_stochastic', 1)
         self.score_spread_contraction = config.get('score_spread_contraction', 2)
         self.score_bar_range = config.get('score_bar_range', 2)
-        self.score_threshold = config.get('score_threshold', 8)
+        # Bonus confidence signals
+        self.score_rsi_velocity = config.get('score_rsi_velocity', 1)
+        self.score_ewo_acceleration = config.get('score_ewo_acceleration', 1)
+        self.score_threshold = config.get('score_threshold', 7)
 
         # Determine position direction
         ot = (option_type or '').upper()
@@ -195,32 +178,16 @@ class MomentumPeakDetector:
         if rsi_drop < self.rsi_drop_threshold:
             return False, None
 
-        # --- Scored conditions 4-9 ---
-        score = 0
-
-        # 4. RSI exited overbought zone
-        if self.score_rsi_recovery > 0 and rsi <= (100 - self.rsi_recovery_level):
-            score += self.score_rsi_recovery
-
-        # 5. EWO declining for N consecutive bars
-        if self.score_ewo_trend > 0 and self._ewo_trending(declining=True):
-            score += self.score_ewo_trend
-
-        # 6. RSI below its 10-min average
-        if self.score_rsi_vs_avg > 0 and not np.isnan(rsi_avg) and rsi < rsi_avg:
-            score += self.score_rsi_vs_avg
-
-        # 7. Stochastic bearish crossover in overbought zone
-        if self.score_stochastic > 0 and self._stoch_crossover_bearish():
-            score += self.score_stochastic
-
-        # 8. Option price declining for N consecutive bars
-        if self.score_spread_contraction > 0 and self._spread_contracting():
-            score += self.score_spread_contraction
-
-        # 9. Stock candle range shrinking for N consecutive bars
-        if self.score_bar_range > 0 and self._bar_range_contracting():
-            score += self.score_bar_range
+        # --- Graduated scored conditions 4-9 + bonus signals ---
+        score = 0.0
+        score += self._score_rsi_recovery(rsi, is_call=True)
+        score += self._score_ewo_trend(declining=True)
+        score += self._score_rsi_vs_avg(rsi, rsi_avg, is_call=True)
+        score += self._score_stochastic(is_call=True)
+        score += self._score_spread_contraction()
+        score += self._score_bar_range()
+        score += self._score_rsi_velocity(is_call=True)
+        score += self._score_ewo_acceleration(declining=True)
 
         if score < self.score_threshold:
             return False, None
@@ -244,111 +211,208 @@ class MomentumPeakDetector:
         if rsi_bounce < self.rsi_drop_threshold:
             return False, None
 
-        # --- Scored conditions 4-9 ---
-        score = 0
-
-        # 4. RSI exited oversold zone
-        if self.score_rsi_recovery > 0 and rsi >= self.rsi_recovery_level:
-            score += self.score_rsi_recovery
-
-        # 5. EWO increasing for N consecutive bars (bullish reversal = bad for PUT)
-        if self.score_ewo_trend > 0 and self._ewo_trending(declining=False):
-            score += self.score_ewo_trend
-
-        # 6. RSI above its 10-min average
-        if self.score_rsi_vs_avg > 0 and not np.isnan(rsi_avg) and rsi > rsi_avg:
-            score += self.score_rsi_vs_avg
-
-        # 7. Stochastic bullish crossover in oversold zone
-        if self.score_stochastic > 0 and self._stoch_crossover_bullish():
-            score += self.score_stochastic
-
-        # 8. Option price declining for N consecutive bars
-        if self.score_spread_contraction > 0 and self._spread_contracting():
-            score += self.score_spread_contraction
-
-        # 9. Stock candle range shrinking for N consecutive bars
-        if self.score_bar_range > 0 and self._bar_range_contracting():
-            score += self.score_bar_range
+        # --- Graduated scored conditions 4-9 + bonus signals ---
+        score = 0.0
+        score += self._score_rsi_recovery(rsi, is_call=False)
+        score += self._score_ewo_trend(declining=False)
+        score += self._score_rsi_vs_avg(rsi, rsi_avg, is_call=False)
+        score += self._score_stochastic(is_call=False)
+        score += self._score_spread_contraction()
+        score += self._score_bar_range()
+        score += self._score_rsi_velocity(is_call=False)
+        score += self._score_ewo_acceleration(declining=False)
 
         if score < self.score_threshold:
             return False, None
 
         return True, 'Momentum Peak'
 
-    def _ewo_trending(self, declining=True):
-        """Check if EWO has been trending in the specified direction for N bars."""
-        ewo_check_len = self.ewo_declining_bars + 1
-        if len(self.ewo_history) < ewo_check_len:
-            return False
+    # ---- Graduated scoring methods ----
+    # Each returns 0.0 (not met) to weight * 1.25 (very strong signal).
+    # Stronger real-world signals earn proportionally more points.
 
-        recent_ewo = self.ewo_history[-ewo_check_len:]
-        for j in range(len(recent_ewo) - 1):
-            if np.isnan(recent_ewo[j]) or np.isnan(recent_ewo[j + 1]):
-                return False
-            if declining:
-                if recent_ewo[j + 1] >= recent_ewo[j]:
-                    return False
-            else:
-                if recent_ewo[j + 1] <= recent_ewo[j]:
-                    return False
-        return True
+    def _score_rsi_recovery(self, rsi, is_call):
+        """Score RSI zone exit depth. Deeper past the boundary = higher score."""
+        if self.score_rsi_recovery == 0:
+            return 0.0
+        if is_call:
+            zone_exit = 100 - self.rsi_recovery_level  # e.g. 70
+            if rsi >= zone_exit:
+                return 0.0
+            depth = zone_exit - rsi  # 0 at boundary, bigger = stronger
+        else:
+            zone_exit = self.rsi_recovery_level  # e.g. 30
+            if rsi <= zone_exit:
+                return 0.0
+            depth = rsi - zone_exit
+        # depth 0 → 0.5x, depth 20 → 1.0x, depth 30+ → 1.25x
+        strength = min(0.5 + depth / 40.0, 1.25)
+        return self.score_rsi_recovery * strength
 
-    def _stoch_crossover_bearish(self):
-        """Check if %K crossed below %D recently while in overbought zone."""
+    def _score_ewo_trend(self, declining):
+        """Score EWO adverse trend. More consecutive bars = higher score."""
+        if self.score_ewo_trend == 0:
+            return 0.0
+        count = self._count_consecutive_ewo(declining)
+        required = self.ewo_declining_bars
+        if count < required:
+            return 0.0
+        # At required bars → 0.75x, at 2x required → 1.0x, at 3x+ → 1.25x
+        extra = count - required
+        strength = min(0.75 + 0.25 * extra / max(required, 1), 1.25)
+        return self.score_ewo_trend * strength
+
+    def _score_rsi_vs_avg(self, rsi, rsi_avg, is_call):
+        """Score RSI vs 10-min average. Bigger gap = higher score."""
+        if self.score_rsi_vs_avg == 0 or np.isnan(rsi_avg):
+            return 0.0
+        gap = (rsi_avg - rsi) if is_call else (rsi - rsi_avg)
+        if gap <= 0:
+            return 0.0
+        # gap 2 → 0.5x, gap 10 → 1.0x, gap 20+ → 1.25x
+        strength = min(0.25 + gap / 13.0, 1.25)
+        return self.score_rsi_vs_avg * strength
+
+    def _score_stochastic(self, is_call):
+        """Score stochastic crossover. Bigger K/D divergence = higher score."""
+        if self.score_stochastic == 0:
+            return 0.0
         if len(self.stoch_k_history) < 2 or len(self.stoch_d_history) < 2:
-            return False
+            return 0.0
         prev_k = self.stoch_k_history[-2]
         curr_k = self.stoch_k_history[-1]
         prev_d = self.stoch_d_history[-2]
         curr_d = self.stoch_d_history[-1]
         if np.isnan(prev_k) or np.isnan(curr_k) or np.isnan(prev_d) or np.isnan(curr_d):
-            return False
-        # %K was above %D and now crossed below, while in overbought zone
-        return prev_k >= prev_d and curr_k < curr_d and prev_k >= self.stoch_overbought
+            return 0.0
+        if is_call:
+            # Bearish: %K crossed below %D in overbought zone
+            if not (prev_k >= prev_d and curr_k < curr_d and prev_k >= self.stoch_overbought):
+                return 0.0
+            divergence = curr_d - curr_k  # how far K fell below D
+        else:
+            # Bullish: %K crossed above %D in oversold zone
+            if not (prev_k <= prev_d and curr_k > curr_d and prev_k <= self.stoch_oversold):
+                return 0.0
+            divergence = curr_k - curr_d  # how far K rose above D
+        # divergence 0 → 0.75x, divergence 10 → 1.0x, divergence 25+ → 1.25x
+        strength = min(0.75 + divergence / 40.0, 1.25)
+        return self.score_stochastic * strength
 
-    def _stoch_crossover_bullish(self):
-        """Check if %K crossed above %D recently while in oversold zone."""
-        if len(self.stoch_k_history) < 2 or len(self.stoch_d_history) < 2:
-            return False
-        prev_k = self.stoch_k_history[-2]
-        curr_k = self.stoch_k_history[-1]
-        prev_d = self.stoch_d_history[-2]
-        curr_d = self.stoch_d_history[-1]
-        if np.isnan(prev_k) or np.isnan(curr_k) or np.isnan(prev_d) or np.isnan(curr_d):
-            return False
-        # %K was below %D and now crossed above, while in oversold zone
-        return prev_k <= prev_d and curr_k > curr_d and prev_k <= self.stoch_oversold
-
-    def _spread_contracting(self):
-        """Check if option price has been declining for N consecutive bars."""
+    def _score_spread_contraction(self):
+        """Score option price decline. More consecutive bars = higher score."""
+        if self.score_spread_contraction == 0:
+            return 0.0
         n = self.spread_contraction_bars
         if n <= 0:
-            return True  # disabled
-        if len(self.spread_history) < n + 1:
-            return False
-        recent = self.spread_history[-(n + 1):]
-        for i in range(len(recent) - 1):
-            if np.isnan(recent[i]) or np.isnan(recent[i + 1]):
-                return False
-            if recent[i + 1] >= recent[i]:  # not contracting
-                return False
-        return True
+            return self.score_spread_contraction  # disabled = auto-pass at base
+        count = self._count_consecutive_decline(self.spread_history, n)
+        if count < n:
+            return 0.0
+        extra = count - n
+        strength = min(0.75 + 0.25 * extra / max(n, 1), 1.25)
+        return self.score_spread_contraction * strength
 
-    def _bar_range_contracting(self):
-        """Check if stock candle range (high-low) has been shrinking for N consecutive bars."""
+    def _score_bar_range(self):
+        """Score candle range contraction. More consecutive bars = higher score."""
+        if self.score_bar_range == 0:
+            return 0.0
         n = self.bar_range_contraction_bars
         if n <= 0:
-            return True  # disabled
-        if len(self.bar_range_history) < n + 1:
-            return False
-        recent = self.bar_range_history[-(n + 1):]
-        for i in range(len(recent) - 1):
-            if np.isnan(recent[i]) or np.isnan(recent[i + 1]):
-                return False
-            if recent[i + 1] >= recent[i]:  # not shrinking
-                return False
-        return True
+            return self.score_bar_range  # disabled = auto-pass at base
+        count = self._count_consecutive_decline(self.bar_range_history, n)
+        if count < n:
+            return 0.0
+        extra = count - n
+        strength = min(0.75 + 0.25 * extra / max(n, 1), 1.25)
+        return self.score_bar_range * strength
+
+    def _score_rsi_velocity(self, is_call):
+        """Bonus: score RSI rate-of-change leaving the extreme zone."""
+        if self.score_rsi_velocity == 0:
+            return 0.0
+        if len(self.rsi_history) < 3:
+            return 0.0
+        recent = [r for r in self.rsi_history[-3:] if not np.isnan(r)]
+        if len(recent) < 2:
+            return 0.0
+        velocity = recent[-1] - recent[0]
+        if is_call:
+            # For calls, RSI should be falling (negative velocity)
+            if velocity >= 0:
+                return 0.0
+            speed = abs(velocity)
+        else:
+            # For puts, RSI should be rising (positive velocity)
+            if velocity <= 0:
+                return 0.0
+            speed = velocity
+        # speed < 5 → 0, speed 5 → 0.5x, speed 15 → 1.0x, speed 25+ → 1.25x
+        if speed < 5:
+            return 0.0
+        strength = min(0.5 + (speed - 5) / 20.0, 1.25)
+        return self.score_rsi_velocity * strength
+
+    def _score_ewo_acceleration(self, declining):
+        """Bonus: score whether the EWO adverse trend is accelerating (steeper)."""
+        if self.score_ewo_acceleration == 0:
+            return 0.0
+        if len(self.ewo_history) < 4:
+            return 0.0
+        recent = self.ewo_history[-4:]
+        if any(np.isnan(v) for v in recent):
+            return 0.0
+        # Compute bar-to-bar deltas
+        d1 = recent[1] - recent[0]
+        d2 = recent[2] - recent[1]
+        d3 = recent[3] - recent[2]
+        if declining:
+            # Deltas should be negative and getting more negative (accelerating decline)
+            if not (d1 < 0 and d2 < 0 and d3 < 0):
+                return 0.0
+            accelerating = abs(d3) > abs(d2) > abs(d1)
+        else:
+            # Deltas should be positive and getting more positive (accelerating rise)
+            if not (d1 > 0 and d2 > 0 and d3 > 0):
+                return 0.0
+            accelerating = d3 > d2 > d1
+        if not accelerating:
+            return 0.0
+        # Acceleration magnitude: ratio of latest delta to earliest
+        ratio = abs(d3) / abs(d1) if abs(d1) > 0 else 1.0
+        # ratio 1.0 → shouldn't happen (not accelerating), 1.5 → 0.75x, 2.0+ → 1.0x, 3.0+ → 1.25x
+        strength = min(0.5 + (ratio - 1.0) / 2.0, 1.25)
+        return self.score_ewo_acceleration * strength
+
+    # ---- Internal helpers ----
+
+    def _count_consecutive_ewo(self, declining):
+        """Count consecutive bars where EWO trends in the specified direction."""
+        count = 0
+        for i in range(len(self.ewo_history) - 1, 0, -1):
+            curr = self.ewo_history[i]
+            prev = self.ewo_history[i - 1]
+            if np.isnan(curr) or np.isnan(prev):
+                break
+            if declining and curr >= prev:
+                break
+            if not declining and curr <= prev:
+                break
+            count += 1
+        return count
+
+    def _count_consecutive_decline(self, history, min_required):
+        """Count consecutive bars where values are declining from the end."""
+        count = 0
+        for i in range(len(history) - 1, 0, -1):
+            curr = history[i]
+            prev = history[i - 1]
+            if np.isnan(curr) or np.isnan(prev):
+                break
+            if curr >= prev:
+                break
+            count += 1
+        return count
 
 
 # =============================================================================

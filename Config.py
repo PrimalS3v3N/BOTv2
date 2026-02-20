@@ -270,8 +270,9 @@ BACKTEST_CONFIG = {
 
     # Momentum Peak: Detect momentum exhaustion peaks for early exit
     # Hard gates (1-3): min profit, RSI hit extreme, RSI delta from extreme
-    # Scored conditions (4-9): each contributes weighted points toward threshold
-    # Designed to exit after confirmed momentum exhaustion, not minor bounces
+    # Scored conditions (4-9+): each contributes graduated weighted points
+    # Scores scale with signal strength (stronger signal → up to 1.25x weight)
+    # Bonus signals (velocity/acceleration) add confidence but are never required
     'momentum_peak': {
         'enabled': True,
         'min_profit_pct': 15,              # [Hard gate] Only consider when option profit >= this %
@@ -285,14 +286,18 @@ BACKTEST_CONFIG = {
         'stoch_oversold': 20,              # Stochastic oversold zone threshold
         'spread_contraction_bars': 3,      # [Scored] Option price declining for N bars (0=disabled)
         'bar_range_contraction_bars': 3,   # [Scored] Stock candle range shrinking for N bars (0=disabled)
-        # Scoring weights — set to 0 to disable a condition entirely
-        'score_rsi_recovery': 2,           # RSI exits the extreme zone
-        'score_ewo_trend': 2,              # EWO adverse trend for N bars
-        'score_rsi_vs_avg': 1,             # RSI crossed past its 10-min average
-        'score_stochastic': 1,             # Stochastic crossover in extreme zone
-        'score_spread_contraction': 2,     # Option price declining for N bars
-        'score_bar_range': 2,              # Stock candle range shrinking for N bars
-        'score_threshold': 8,              # Min score to trigger exit (max possible = 10)
+        # Scoring weights — graduated (stronger signal → up to 1.25x weight)
+        # Set any weight to 0 to fully disable that condition
+        'score_rsi_recovery': 2,           # RSI zone exit depth (RSI@30=1.0, RSI@50=2.0, RSI@60+=2.5)
+        'score_ewo_trend': 2,              # EWO adverse trend (3 bars=1.5, 6 bars=2.0, 9+=2.5)
+        'score_rsi_vs_avg': 1,             # RSI vs 10-min avg gap (gap@2=0.5, gap@10=1.0, gap@20+=1.25)
+        'score_stochastic': 1,             # Stochastic crossover + K/D divergence
+        'score_spread_contraction': 2,     # Option price decline (3 bars=1.5, 6 bars=2.0, 9+=2.5)
+        'score_bar_range': 2,              # Candle range shrinking (3 bars=1.5, 6 bars=2.0, 9+=2.5)
+        # Bonus confidence signals — add to score but never gate
+        'score_rsi_velocity': 1,           # RSI rate of change leaving extreme zone
+        'score_ewo_acceleration': 1,       # EWO adverse trend accelerating (steeper each bar)
+        'score_threshold': 7,              # Min score to trigger exit (max possible ≈ 14.5)
     },
 
     # StatsBook Exit: Exit based on historical statistical bounds
