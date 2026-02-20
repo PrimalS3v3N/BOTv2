@@ -379,6 +379,26 @@ BACKTEST_CONFIG = {
         'downtrend_monitor_bars': 3,       # If next N bars are all negative, sell
         'downtrend_drop_pct': 10,          # OR if option drops X% below entry, sell
         'downtrend_exit_reason': 'DownTrend-SL',  # Exit reason label for risk downtrend
+
+        # Delayed Entry: Delay purchases for signals in first 15 minutes of market open
+        # when buying into the initial momentum move (chasing).
+        #
+        # CALLs: If signal stock price > market open price → delay entry until:
+        #   1. Stock price pulls back below market open price (better entry), OR
+        #   2. Option price drops by half of initial_sl_pct below signal price (discount)
+        #
+        # PUTs (inverse): If signal stock price < market open price → delay entry until:
+        #   1. Stock price bounces above market open price (puts get cheaper), OR
+        #   2. Option price drops by half of initial_sl_pct below signal price (discount)
+        #
+        # The delay window extends up to delay_window_minutes after market open.
+        # If neither condition is met within the window, the trade is skipped.
+        'delayed_entry': {
+            'enabled': True,
+            'signal_window_minutes': 15,     # Signals arriving in first N minutes qualify
+            'delay_window_minutes': 30,      # Maximum delay window from market open
+            'sl_discount_factor': 0.5,       # Fraction of initial_sl_pct for option discount
+        },
     },
 
     # SPY Market Gauge: Use SPY as overall market health indicator
@@ -560,7 +580,7 @@ DATAFRAME_COLUMNS = {
         'entry_price', 'entry_time', 'exit_price', 'exit_time', 'exit_reason',
         'contracts', 'highest_price', 'lowest_price',
         'pnl', 'pnl_pct', 'minutes_held',
-        'max_price_to_eod',
+        'max_price_to_eod', 'delayed_entry',
     ],
 
     # Per-bar tracking data from Databook (Test.py)

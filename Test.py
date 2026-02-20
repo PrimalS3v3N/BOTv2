@@ -553,6 +553,9 @@ class Position:
         self.exit_reason = None
         self.is_closed = False
 
+        # Delayed entry tracking
+        self.delayed_entry_reason = None  # Set externally if entry was delayed
+
         # Max profit tracking (entry to end of market day)
         self.max_price_to_eod = entry_price  # Track max price from entry to end of day
 
@@ -618,6 +621,7 @@ class Position:
             'pnl_pct': self.get_pnl_pct(self.exit_price) if self.exit_price else None,
             'minutes_held': self.get_minutes_held(self.exit_time) if self.exit_time else None,
             'max_price_to_eod': self.max_price_to_eod,
+            'delayed_entry': self.delayed_entry_reason,
         }
 
 
@@ -1476,6 +1480,164 @@ class SimulationEngine:
         )
 
         return position, entry_option_price
+
+    def find_delayed_entry(self, signal, stock_data, entry_idx):
+        """
+        Check if a signal qualifies for delayed entry and find the optimal entry point.
+
+        Delayed entry applies when:
+        - Signal arrives in the first N minutes of market open (signal_window_minutes)
+        - CALLs: stock price at signal > market open price (chasing upward momentum)
+        - PUTs:  stock price at signal < market open price (chasing downward momentum)
+
+        If delayed, scans forward bars within the delay window looking for:
+        1. Stock price crossing back through market open price (primary - better entry)
+        2. Option price dropping by half of initial_sl_pct below signal price (fallback)
+
+        Returns:
+            None if no delay needed (use original entry)
+            dict with {entry_idx, entry_stock_price, entry_option_price, delay_reason}
+                if a delayed entry was found
+            False if delay needed but no valid entry found within the window (skip trade)
+        """
+        risk_config = self.config.get('risk_assessment', {})
+        delay_config = risk_config.get('delayed_entry', {})
+        if not delay_config.get('enabled', False):
+            return None
+
+        signal_window = delay_config.get('signal_window_minutes', 15)
+        delay_window = delay_config.get('delay_window_minutes', 30)
+        sl_discount_factor = delay_config.get('sl_discount_factor', 0.5)
+        initial_sl_pct = self.config.get('options_exit', {}).get('initial_sl_pct', 20)
+
+        signal_time = signal.get('signal_time')
+        if signal_time is None:
+            return None
+        if signal_time.tzinfo is None:
+            signal_time = signal_time.replace(tzinfo=EASTERN)
+
+        option_type = signal.get('option_type', '').upper()
+        is_call = option_type in ('CALL', 'CALLS', 'C')
+        is_put = option_type in ('PUT', 'PUTS', 'P')
+        if not is_call and not is_put:
+            return None
+
+        # Compute market open boundaries
+        market_open = signal_time.replace(hour=9, minute=30, second=0, microsecond=0)
+        signal_window_end = market_open + timedelta(minutes=signal_window)
+        delay_window_end = market_open + timedelta(minutes=delay_window)
+
+        # Only applies to signals in the first N minutes of market open
+        if signal_time < market_open or signal_time > signal_window_end:
+            return None
+
+        # Find market open price (first bar at or after 9:30)
+        market_open_bar_idx = stock_data.index.searchsorted(market_open)
+        if market_open_bar_idx >= len(stock_data):
+            return None
+        market_open_price = float(stock_data.iloc[market_open_bar_idx]['open'])
+
+        # Get stock price at signal time
+        if entry_idx >= len(stock_data):
+            return None
+        signal_stock_price = float(stock_data.iloc[entry_idx]['close'])
+
+        # Check if delay conditions apply
+        # CALLs: signal stock price > market open price (chasing up)
+        # PUTs:  signal stock price < market open price (chasing down)
+        needs_delay = False
+        if is_call and signal_stock_price > market_open_price:
+            needs_delay = True
+        elif is_put and signal_stock_price < market_open_price:
+            needs_delay = True
+
+        if not needs_delay:
+            return None
+
+        # Compute option price discount threshold
+        # "half of stop_loss amount" = signal_option_price * initial_sl_pct / 100 * sl_discount_factor
+        signal_option_price = signal.get('cost')
+        if signal_option_price and signal_option_price > 0:
+            sl_discount_amount = signal_option_price * (initial_sl_pct / 100) * sl_discount_factor
+            option_target_price = signal_option_price - sl_discount_amount
+        else:
+            option_target_price = None
+
+        # Prepare BS estimation parameters for option price tracking during scan
+        expiry_dt = None
+        signal_days_to_expiry = None
+        if signal.get('expiration'):
+            expiry_dt = dt.datetime.combine(
+                signal['expiration'], dt.time(16, 0), tzinfo=EASTERN
+            )
+            signal_days_to_expiry = max(0, (expiry_dt - signal_time).total_seconds() / 86400)
+
+        # Scan forward from entry_idx+1 through the delay window
+        print(f"    DELAY: {'CALL' if is_call else 'PUT'} signal during open window, "
+              f"stock ${signal_stock_price:.2f} {'>' if is_call else '<'} open ${market_open_price:.2f}")
+
+        for i in range(entry_idx + 1, len(stock_data)):
+            bar_time = stock_data.index[i]
+
+            # Stop scanning past the delay window
+            if bar_time > delay_window_end:
+                break
+
+            bar_stock_price = float(stock_data.iloc[i]['close'])
+
+            # Condition 1: Stock price crosses back through market open price
+            if is_call and bar_stock_price <= market_open_price:
+                print(f"    DELAY: Entry found — stock ${bar_stock_price:.2f} <= "
+                      f"open ${market_open_price:.2f} at {bar_time.strftime('%H:%M')}")
+                return {
+                    'entry_idx': i,
+                    'entry_stock_price': bar_stock_price,
+                    'entry_option_price': None,  # Let create_position estimate via BS
+                    'delay_reason': f'Delay-Open(stock<={market_open_price:.2f})',
+                }
+            elif is_put and bar_stock_price >= market_open_price:
+                print(f"    DELAY: Entry found — stock ${bar_stock_price:.2f} >= "
+                      f"open ${market_open_price:.2f} at {bar_time.strftime('%H:%M')}")
+                return {
+                    'entry_idx': i,
+                    'entry_stock_price': bar_stock_price,
+                    'entry_option_price': None,
+                    'delay_reason': f'Delay-Open(stock>={market_open_price:.2f})',
+                }
+
+            # Condition 2: Option price drops by half of stop_loss below signal price
+            if option_target_price is not None and signal_option_price and signal_option_price > 0:
+                # Estimate option price at this bar using BS calibrated to signal
+                if expiry_dt and signal_days_to_expiry is not None:
+                    current_dte = max(0, (expiry_dt - bar_time).total_seconds() / 86400)
+                    try:
+                        bar_option_price = Analysis.estimate_option_price_bs(
+                            stock_price=bar_stock_price,
+                            strike=signal['strike'],
+                            option_type=signal['option_type'],
+                            days_to_expiry=current_dte,
+                            entry_price=signal_option_price,
+                            entry_stock_price=signal_stock_price,
+                            entry_days_to_expiry=signal_days_to_expiry,
+                        )
+                    except Exception:
+                        bar_option_price = None
+
+                    if bar_option_price is not None and bar_option_price <= option_target_price:
+                        discount_pct = ((signal_option_price - bar_option_price) / signal_option_price) * 100
+                        print(f"    DELAY: Entry found — option ${bar_option_price:.2f} <= "
+                              f"target ${option_target_price:.2f} ({discount_pct:.1f}% discount) "
+                              f"at {bar_time.strftime('%H:%M')}")
+                        return {
+                            'entry_idx': i,
+                            'entry_stock_price': bar_stock_price,
+                            'entry_option_price': bar_option_price,
+                            'delay_reason': f'Delay-Open(option<={option_target_price:.2f})',
+                        }
+
+        # No valid entry found within the delay window — skip this trade
+        print(f"    DELAY: No valid entry within {delay_window}min window — skipping signal")
+        return False
 
     def simulate_position(self, position, matrix, stock_data, signal, entry_idx, entry_stock_price,
                           statsbooks=None, spy_data=None):
@@ -2379,12 +2541,32 @@ class Backtest:
         entry_time = stock_data.index[entry_idx]
         entry_stock_price = entry_bar['close']
 
+        # Check for delayed entry (market open signal delay)
+        delay_result = self.engine.find_delayed_entry(signal, stock_data, entry_idx)
+        delayed_entry_reason = None
+        if delay_result is False:
+            # Delay needed but no valid entry found — skip trade
+            return None, None
+        elif delay_result is not None:
+            # Delayed entry found — use new entry point
+            entry_idx = delay_result['entry_idx']
+            entry_bar = stock_data.iloc[entry_idx]
+            entry_time = stock_data.index[entry_idx]
+            entry_stock_price = delay_result['entry_stock_price']
+            delayed_entry_reason = delay_result['delay_reason']
+
         # Create position via engine
+        entry_option_price_override = delay_result.get('entry_option_price') if delay_result and delay_result is not False else None
         position, entry_option_price = self.engine.create_position(
             signal=signal,
             entry_stock_price=entry_stock_price,
-            entry_time=entry_time
+            entry_time=entry_time,
+            entry_option_price=entry_option_price_override,
         )
+
+        # Store delay info on position for tracking
+        if delayed_entry_reason:
+            position.delayed_entry_reason = delayed_entry_reason
 
         # Create tracking matrix
         matrix = Databook(position)
@@ -2610,6 +2792,9 @@ class LiveTest:
         self._signal_detectors = {}  # signal_id -> dict of detectors and state
         self._signal_last_bar = {}   # signal_id -> last processed bar index
 
+        # Delayed entry: signals waiting for better entry conditions
+        self._pending_delays = {}    # signal_id -> delay state dict
+
         # Three output dataframes
         self.data_book = DataSummary(interval_minutes=1)    # Full 1-min data (uses DataSummary container but 1-min interval)
         self.data_summary = DataSummary(interval_minutes=self.summary_interval)
@@ -2813,16 +2998,67 @@ class LiveTest:
             if signal_id not in self.positions:
                 entry_price = signal.get('cost', option_price)
                 if entry_price and entry_price > 0:
-                    position, _ = self.engine.create_position(
-                        signal=signal,
-                        entry_stock_price=stock_price,
-                        entry_time=timestamp,
-                        entry_option_price=entry_price
-                    )
-                    self.positions[signal_id] = position
-                    self.databooks[signal_id] = Databook(position)
-                    self._signal_last_bar[signal_id] = -1  # No bars processed yet
-                    print(f"    Position opened: {signal_id} @ ${entry_price:.2f}")
+                    # Check if this signal needs delayed entry
+                    if signal_id in self._pending_delays:
+                        # Already pending — check delay conditions
+                        delay_state = self._pending_delays[signal_id]
+                        if timestamp > delay_state['delay_window_end']:
+                            # Delay window expired — skip this signal
+                            print(f"    DELAY: Window expired for {signal_id} — skipping")
+                            del self._pending_delays[signal_id]
+                            continue
+
+                        # Check condition 1: stock price crosses market open
+                        is_call = delay_state['is_call']
+                        mkt_open = delay_state['market_open_price']
+                        enter_now = False
+                        delay_reason = None
+
+                        if is_call and stock_price <= mkt_open:
+                            enter_now = True
+                            delay_reason = f'Delay-Open(stock<={mkt_open:.2f})'
+                        elif not is_call and stock_price >= mkt_open:
+                            enter_now = True
+                            delay_reason = f'Delay-Open(stock>={mkt_open:.2f})'
+
+                        # Check condition 2: option price discount
+                        if not enter_now and option_price <= delay_state['option_target_price']:
+                            enter_now = True
+                            delay_reason = f'Delay-Open(option<={delay_state["option_target_price"]:.2f})'
+
+                        if not enter_now:
+                            continue  # Still waiting
+
+                        # Delay conditions met — create position
+                        del self._pending_delays[signal_id]
+                        print(f"    DELAY: {delay_reason} — entering {signal_id} @ ${option_price:.2f}")
+                        position, _ = self.engine.create_position(
+                            signal=signal,
+                            entry_stock_price=stock_price,
+                            entry_time=timestamp,
+                            entry_option_price=option_price,
+                        )
+                        position.delayed_entry_reason = delay_reason
+                        self.positions[signal_id] = position
+                        self.databooks[signal_id] = Databook(position)
+                        self._signal_last_bar[signal_id] = -1
+                        print(f"    Position opened (delayed): {signal_id} @ ${option_price:.2f}")
+
+                    elif self._should_delay_live_entry(signal, stock_price, timestamp):
+                        # New signal that needs delay — register as pending
+                        pass  # _should_delay_live_entry already registered it
+                    else:
+                        # Normal entry — no delay needed
+                        position, _ = self.engine.create_position(
+                            signal=signal,
+                            entry_stock_price=stock_price,
+                            entry_time=timestamp,
+                            entry_option_price=entry_price
+                        )
+                        self.positions[signal_id] = position
+                        self.databooks[signal_id] = Databook(position)
+                        self._signal_last_bar[signal_id] = -1
+                        print(f"    Position opened: {signal_id} @ ${entry_price:.2f}")
 
             # Update position if open
             position = self.positions.get(signal_id)
@@ -2974,6 +3210,88 @@ class LiveTest:
         }
         state = self._signal_detectors[signal_id]
         state['entry_days_to_expiry'] = max(0, (state['expiry_dt'] - position.entry_time).total_seconds() / 86400)
+
+    def _should_delay_live_entry(self, signal, stock_price, timestamp):
+        """
+        Check if a live signal should be delayed and register it in _pending_delays.
+
+        Returns True if the signal should be delayed (entry deferred), False otherwise.
+        """
+        risk_config = self.config.get('risk_assessment', {})
+        delay_config = risk_config.get('delayed_entry', {})
+        if not delay_config.get('enabled', False):
+            return False
+
+        signal_window = delay_config.get('signal_window_minutes', 15)
+        delay_window = delay_config.get('delay_window_minutes', 30)
+        sl_discount_factor = delay_config.get('sl_discount_factor', 0.5)
+        initial_sl_pct = self.config.get('options_exit', {}).get('initial_sl_pct', 20)
+
+        signal_time = signal.get('signal_time')
+        if signal_time is None:
+            return False
+        if signal_time.tzinfo is None:
+            signal_time = signal_time.replace(tzinfo=EASTERN)
+
+        option_type = signal.get('option_type', '').upper()
+        is_call = option_type in ('CALL', 'CALLS', 'C')
+        is_put = option_type in ('PUT', 'PUTS', 'P')
+        if not is_call and not is_put:
+            return False
+
+        market_open = signal_time.replace(hour=9, minute=30, second=0, microsecond=0)
+        signal_window_end = market_open + timedelta(minutes=signal_window)
+        delay_window_end = market_open + timedelta(minutes=delay_window)
+
+        # Only applies to signals in the first N minutes of market open
+        if signal_time < market_open or signal_time > signal_window_end:
+            return False
+
+        # Get market open price from accumulated stock bars
+        ticker = signal.get('ticker')
+        market_open_price = None
+        if ticker in self._stock_bars:
+            for bar in self._stock_bars[ticker]:
+                bar_ts = bar['timestamp']
+                if bar_ts >= market_open:
+                    market_open_price = bar['open']
+                    break
+        if market_open_price is None:
+            market_open_price = stock_price  # Fallback
+
+        # Check delay conditions
+        needs_delay = False
+        if is_call and stock_price > market_open_price:
+            needs_delay = True
+        elif is_put and stock_price < market_open_price:
+            needs_delay = True
+
+        if not needs_delay:
+            return False
+
+        # Compute option price target
+        signal_option_price = signal.get('cost', 0)
+        if signal_option_price and signal_option_price > 0:
+            sl_amount = signal_option_price * (initial_sl_pct / 100) * sl_discount_factor
+            option_target = signal_option_price - sl_amount
+        else:
+            option_target = 0
+
+        signal_id = signal.get('signal_id')
+        self._pending_delays[signal_id] = {
+            'signal': signal,
+            'is_call': is_call,
+            'market_open_price': market_open_price,
+            'signal_stock_price': stock_price,
+            'signal_option_price': signal_option_price,
+            'option_target_price': option_target,
+            'delay_window_end': delay_window_end,
+        }
+
+        print(f"    DELAY: {'CALL' if is_call else 'PUT'} signal during open window, "
+              f"stock ${stock_price:.2f} {'>' if is_call else '<'} open ${market_open_price:.2f} "
+              f"— waiting for better entry")
+        return True
 
     def _process_new_bar(self, signal_id, signal, position, matrix, stock_df, bar_idx,
                          option_price, spy_data):
@@ -3613,8 +3931,9 @@ class LiveRerun:
                 continue
 
             # Create position
-            entry_stock_price = stock_df.iloc[0]['close']
-            entry_time = stock_df.index[0]
+            entry_idx = 0
+            entry_stock_price = stock_df.iloc[entry_idx]['close']
+            entry_time = stock_df.index[entry_idx]
 
             # Use recorded option price if available
             option_bars = self._live_data.get('option_bars', {}).get(signal_id, [])
@@ -3622,12 +3941,27 @@ class LiveRerun:
             if option_bars:
                 entry_option_price = option_bars[0].get('mark_price')
 
+            # Check for delayed entry
+            delay_result = self.engine.find_delayed_entry(signal, stock_df, entry_idx)
+            delayed_entry_reason = None
+            if delay_result is False:
+                print(f"    Skipped: delayed entry — no valid entry in window")
+                continue
+            elif delay_result is not None:
+                entry_idx = delay_result['entry_idx']
+                entry_stock_price = delay_result['entry_stock_price']
+                entry_time = stock_df.index[entry_idx]
+                delayed_entry_reason = delay_result['delay_reason']
+                entry_option_price = delay_result.get('entry_option_price') or entry_option_price
+
             position, _ = self.engine.create_position(
                 signal=signal,
                 entry_stock_price=entry_stock_price,
                 entry_time=entry_time,
                 entry_option_price=entry_option_price
             )
+            if delayed_entry_reason:
+                position.delayed_entry_reason = delayed_entry_reason
 
             matrix = Databook(position)
 
@@ -3637,7 +3971,7 @@ class LiveRerun:
                 matrix=matrix,
                 stock_data=stock_df,
                 signal=signal,
-                entry_idx=0,
+                entry_idx=entry_idx,
                 entry_stock_price=entry_stock_price,
                 statsbooks=self.statsbooks,
                 spy_data=spy_data,
