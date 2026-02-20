@@ -2010,7 +2010,7 @@ class SimulationEngine:
                 mp_reason = None
                 if mp_detector and not position.is_closed:
                     mp_pnl = position.get_pnl_pct(option_price)
-                    mp_exit, mp_reason = mp_detector.update(mp_pnl, rsi, rsi_10min_avg, ewo, stoch_k_val, stoch_d_val)
+                    mp_exit, mp_reason = mp_detector.update(mp_pnl, rsi, rsi_10min_avg, ewo, stoch_k_val, stoch_d_val, option_price)
 
                 # Update StatsBook detector
                 sb_exit = False
@@ -3439,7 +3439,7 @@ class LiveTest:
         mp_detector = state['mp_detector']
         if mp_detector and not position.is_closed:
             mp_pnl = position.get_pnl_pct(option_price)
-            mp_exit, mp_reason = mp_detector.update(mp_pnl, rsi, rsi_10min_avg, ewo, stoch_k_val, stoch_d_val)
+            mp_exit, mp_reason = mp_detector.update(mp_pnl, rsi, rsi_10min_avg, ewo, stoch_k_val, stoch_d_val, option_price)
 
         sb_exit, sb_reason = False, None
         sb_detector = state['sb_detector']
