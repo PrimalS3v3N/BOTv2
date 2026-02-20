@@ -269,24 +269,30 @@ BACKTEST_CONFIG = {
     },
 
     # Momentum Peak: Detect momentum exhaustion peaks for early exit
-    # CALLs: RSI overbought→dropping + EWO declining + Stochastic bearish crossover
-    # PUTs:  RSI oversold→bouncing + EWO increasing + Stochastic bullish crossover
+    # Hard gates (1-3): min profit, RSI hit extreme, RSI delta from extreme
+    # Scored conditions (4-9): each contributes weighted points toward threshold
     # Designed to exit after confirmed momentum exhaustion, not minor bounces
     'momentum_peak': {
         'enabled': True,
-        'min_profit_pct': 15,              # Only consider when option profit >= this %
-        'rsi_overbought': 80,              # RSI must have reached this recently (CALLs)
-        'rsi_oversold': 20,                # RSI must have reached this recently (PUTs)
-        'rsi_lookback': 5,                 # Bars back to check for RSI extreme
-        'rsi_drop_threshold': 10,          # RSI must change by >= this from extreme
-        'rsi_recovery_level': 30,          # RSI must exit extreme zone past this level (PUTs: >, CALLs: < 100-this)
-        'ewo_declining_bars': 3,           # EWO must trend adversely for N consecutive bars
-        'require_rsi_below_avg': True,     # Require RSI vs RSI_10min_avg confirmation
+        'min_profit_pct': 15,              # [Hard gate] Only consider when option profit >= this %
+        'rsi_overbought': 80,              # [Hard gate] RSI must have reached this recently (CALLs)
+        'rsi_oversold': 20,                # [Hard gate] RSI must have reached this recently (PUTs)
+        'rsi_lookback': 5,                 # [Hard gate] Bars back to check for RSI extreme
+        'rsi_drop_threshold': 10,          # [Hard gate] RSI must change by >= this from extreme
+        'rsi_recovery_level': 30,          # [Scored] RSI must exit extreme zone past this level
+        'ewo_declining_bars': 3,           # [Scored] EWO must trend adversely for N consecutive bars
         'stoch_overbought': 80,            # Stochastic overbought zone threshold
         'stoch_oversold': 20,              # Stochastic oversold zone threshold
-        'use_stochastic': True,            # Enable stochastic crossover confirmation
-        'spread_contraction_bars': 3,      # Option price must decline for N consecutive bars before exit (0=disabled)
-        'bar_range_contraction_bars': 3,   # Stock candle range (high-low) must shrink for N consecutive bars (0=disabled)
+        'spread_contraction_bars': 3,      # [Scored] Option price declining for N bars (0=disabled)
+        'bar_range_contraction_bars': 3,   # [Scored] Stock candle range shrinking for N bars (0=disabled)
+        # Scoring weights — set to 0 to disable a condition entirely
+        'score_rsi_recovery': 2,           # RSI exits the extreme zone
+        'score_ewo_trend': 2,              # EWO adverse trend for N bars
+        'score_rsi_vs_avg': 1,             # RSI crossed past its 10-min average
+        'score_stochastic': 1,             # Stochastic crossover in extreme zone
+        'score_spread_contraction': 2,     # Option price declining for N bars
+        'score_bar_range': 2,              # Stock candle range shrinking for N bars
+        'score_threshold': 8,              # Min score to trigger exit (max possible = 10)
     },
 
     # StatsBook Exit: Exit based on historical statistical bounds

@@ -39,22 +39,30 @@ class MomentumPeak:
     CALLs: RSI overbought → dropping, EWO declining, Stochastic bearish crossover
     PUTs:  RSI oversold → bouncing, EWO increasing, Stochastic bullish crossover
 
+    Hard gates (1-3): min profit, RSI extreme, RSI delta. Always required.
+    Scored conditions (4-9): each contributes weighted points. Exit fires
+    when total score >= score_threshold. Set any weight to 0 to disable.
+
     Config: BACKTEST_CONFIG['momentum_peak']
         {
-            'enabled': True,
-            'min_profit_pct': 15,          # Minimum option profit %
-            'rsi_overbought': 80,          # RSI overbought threshold (CALLs)
-            'rsi_oversold': 20,            # RSI oversold threshold (PUTs)
-            'rsi_lookback': 5,             # Bars to check for recent extreme
-            'rsi_drop_threshold': 10,      # Min RSI change from extreme
-            'rsi_recovery_level': 30,      # RSI must exit extreme zone past this
-            'ewo_declining_bars': 3,       # Consecutive EWO bars in adverse direction
-            'require_rsi_below_avg': True, # RSI vs RSI_10min_avg confirmation
+            'min_profit_pct': 15,          # [Hard] Minimum option profit %
+            'rsi_overbought': 80,          # [Hard] RSI overbought threshold (CALLs)
+            'rsi_oversold': 20,            # [Hard] RSI oversold threshold (PUTs)
+            'rsi_lookback': 5,             # [Hard] Bars to check for recent extreme
+            'rsi_drop_threshold': 10,      # [Hard] Min RSI change from extreme
+            'rsi_recovery_level': 30,      # [Scored] RSI zone exit level
+            'ewo_declining_bars': 3,       # [Scored] Consecutive EWO bars adverse
             'stoch_overbought': 80,        # Stochastic overbought zone
             'stoch_oversold': 20,          # Stochastic oversold zone
-            'use_stochastic': True,        # Enable stochastic crossover confirmation
-            'spread_contraction_bars': 3,  # Option price must decline N bars
-            'bar_range_contraction_bars': 3,  # Stock candle range must shrink N bars
+            'spread_contraction_bars': 3,  # [Scored] Option price decline bars
+            'bar_range_contraction_bars': 3,  # [Scored] Candle range shrink bars
+            'score_rsi_recovery': 2,       # Weight: RSI exits extreme zone
+            'score_ewo_trend': 2,          # Weight: EWO adverse trend
+            'score_rsi_vs_avg': 1,         # Weight: RSI vs 10-min avg
+            'score_stochastic': 1,         # Weight: Stochastic crossover
+            'score_spread_contraction': 2, # Weight: Option price declining
+            'score_bar_range': 2,          # Weight: Candle range shrinking
+            'score_threshold': 8,          # Min score to exit (max 10)
         }
     """
 
@@ -74,43 +82,46 @@ class MomentumPeakDetector:
     """
     Tracks momentum state for a single position and detects peaks.
 
-    For CALLs (stock topped out → sell call):
+    Hard gates (always required):
     1. Option profit >= min_profit_pct
-    2. RSI reached overbought (>80) within lookback window
-    3. RSI dropped by >= rsi_drop_threshold from peak
-    4. RSI has dropped below (100 - rsi_recovery_level) to confirm exit from overbought
-    5. EWO declining for N consecutive bars
-    6. RSI crossed below RSI_10min_avg (optional)
-    7. Stochastic %K crossed below %D in overbought zone (optional)
-    8. Option price declining for N consecutive bars (spread contraction)
-    9. Stock candle range (high-low) shrinking for N consecutive bars
+    2. RSI reached extreme zone within lookback window
+    3. RSI moved away from extreme by >= rsi_drop_threshold
 
-    For PUTs (stock bottomed out → sell put):
-    1. Option profit >= min_profit_pct
-    2. RSI reached oversold (<20) within lookback window
-    3. RSI bounced up by >= rsi_drop_threshold from trough
-    4. RSI has risen above rsi_recovery_level to confirm exit from oversold
-    5. EWO increasing for N consecutive bars
-    6. RSI crossed above RSI_10min_avg (optional)
-    7. Stochastic %K crossed above %D in oversold zone (optional)
-    8. Option price declining for N consecutive bars (spread contraction)
-    9. Stock candle range (high-low) shrinking for N consecutive bars
+    Scored conditions (contribute weighted points toward threshold):
+    4. RSI exits extreme zone (weight: score_rsi_recovery)
+    5. EWO adverse trend for N bars (weight: score_ewo_trend)
+    6. RSI vs 10-min average (weight: score_rsi_vs_avg)
+    7. Stochastic crossover in extreme zone (weight: score_stochastic)
+    8. Option price declining for N bars (weight: score_spread_contraction)
+    9. Bar range (high-low) shrinking for N bars (weight: score_bar_range)
+
+    Exit fires when: hard gates pass AND total score >= score_threshold.
     """
 
     def __init__(self, config, option_type=None):
+        # Hard gate parameters
         self.min_profit_pct = config.get('min_profit_pct', 15)
         self.rsi_overbought = config.get('rsi_overbought', 80)
         self.rsi_oversold = config.get('rsi_oversold', 20)
         self.rsi_lookback = config.get('rsi_lookback', 5)
         self.rsi_drop_threshold = config.get('rsi_drop_threshold', 10)
+
+        # Scored condition parameters
         self.rsi_recovery_level = config.get('rsi_recovery_level', 30)
         self.ewo_declining_bars = config.get('ewo_declining_bars', 3)
-        self.require_rsi_below_avg = config.get('require_rsi_below_avg', True)
         self.stoch_overbought = config.get('stoch_overbought', 80)
         self.stoch_oversold = config.get('stoch_oversold', 20)
-        self.use_stochastic = config.get('use_stochastic', True)
         self.spread_contraction_bars = config.get('spread_contraction_bars', 3)
         self.bar_range_contraction_bars = config.get('bar_range_contraction_bars', 3)
+
+        # Scoring weights (0 = disabled)
+        self.score_rsi_recovery = config.get('score_rsi_recovery', 2)
+        self.score_ewo_trend = config.get('score_ewo_trend', 2)
+        self.score_rsi_vs_avg = config.get('score_rsi_vs_avg', 1)
+        self.score_stochastic = config.get('score_stochastic', 1)
+        self.score_spread_contraction = config.get('score_spread_contraction', 2)
+        self.score_bar_range = config.get('score_bar_range', 2)
+        self.score_threshold = config.get('score_threshold', 8)
 
         # Determine position direction
         ot = (option_type or '').upper()
@@ -169,90 +180,98 @@ class MomentumPeakDetector:
 
     def _check_call_peak(self, rsi, rsi_avg, ewo, stoch_k, stoch_d):
         """CALL peak: stock topped out, RSI overbought→dropping, EWO declining."""
-        # 2. RSI was overbought recently (within lookback window)
+        # --- Hard gate 2: RSI was overbought recently ---
         lookback = min(self.rsi_lookback, len(self.rsi_history))
         recent_rsi = self.rsi_history[-lookback:]
         valid_recent = [r for r in recent_rsi if not np.isnan(r)]
         if not valid_recent:
             return False, None
         rsi_peak = max(valid_recent)
-
         if rsi_peak < self.rsi_overbought:
             return False, None
 
-        # 3. RSI has dropped significantly from recent peak
+        # --- Hard gate 3: RSI dropped significantly from peak ---
         rsi_drop = rsi_peak - rsi
         if rsi_drop < self.rsi_drop_threshold:
             return False, None
 
-        # 4. RSI has actually exited the overbought zone (not just a minor dip within it)
-        if rsi > (100 - self.rsi_recovery_level):
-            return False, None
+        # --- Scored conditions 4-9 ---
+        score = 0
 
-        # 5. EWO is declining for N consecutive bars
-        if not self._ewo_trending(declining=True):
-            return False, None
+        # 4. RSI exited overbought zone
+        if self.score_rsi_recovery > 0 and rsi <= (100 - self.rsi_recovery_level):
+            score += self.score_rsi_recovery
 
-        # 6. RSI below its 10-min average (optional confirmation)
-        if self.require_rsi_below_avg and not np.isnan(rsi_avg):
-            if rsi >= rsi_avg:
-                return False, None
+        # 5. EWO declining for N consecutive bars
+        if self.score_ewo_trend > 0 and self._ewo_trending(declining=True):
+            score += self.score_ewo_trend
 
-        # 7. Stochastic bearish crossover in overbought zone (optional)
-        if self.use_stochastic and not self._stoch_crossover_bearish():
-            return False, None
+        # 6. RSI below its 10-min average
+        if self.score_rsi_vs_avg > 0 and not np.isnan(rsi_avg) and rsi < rsi_avg:
+            score += self.score_rsi_vs_avg
 
-        # 8. Option price declining for N consecutive bars (spread contraction)
-        if not self._spread_contracting():
-            return False, None
+        # 7. Stochastic bearish crossover in overbought zone
+        if self.score_stochastic > 0 and self._stoch_crossover_bearish():
+            score += self.score_stochastic
 
-        # 9. Stock candle range (high-low) shrinking for N consecutive bars
-        if not self._bar_range_contracting():
+        # 8. Option price declining for N consecutive bars
+        if self.score_spread_contraction > 0 and self._spread_contracting():
+            score += self.score_spread_contraction
+
+        # 9. Stock candle range shrinking for N consecutive bars
+        if self.score_bar_range > 0 and self._bar_range_contracting():
+            score += self.score_bar_range
+
+        if score < self.score_threshold:
             return False, None
 
         return True, 'Momentum Peak'
 
     def _check_put_peak(self, rsi, rsi_avg, ewo, stoch_k, stoch_d):
         """PUT peak: stock bottomed out, RSI oversold→bouncing, EWO increasing."""
-        # 2. RSI was oversold recently (within lookback window)
+        # --- Hard gate 2: RSI was oversold recently ---
         lookback = min(self.rsi_lookback, len(self.rsi_history))
         recent_rsi = self.rsi_history[-lookback:]
         valid_recent = [r for r in recent_rsi if not np.isnan(r)]
         if not valid_recent:
             return False, None
         rsi_trough = min(valid_recent)
-
         if rsi_trough > self.rsi_oversold:
             return False, None
 
-        # 3. RSI has bounced up significantly from trough
+        # --- Hard gate 3: RSI bounced significantly from trough ---
         rsi_bounce = rsi - rsi_trough
         if rsi_bounce < self.rsi_drop_threshold:
             return False, None
 
-        # 4. RSI has actually exited the oversold zone (not just a minor bounce within it)
-        if rsi < self.rsi_recovery_level:
-            return False, None
+        # --- Scored conditions 4-9 ---
+        score = 0
 
-        # 5. EWO is increasing for N consecutive bars (bullish reversal = bad for PUT)
-        if not self._ewo_trending(declining=False):
-            return False, None
+        # 4. RSI exited oversold zone
+        if self.score_rsi_recovery > 0 and rsi >= self.rsi_recovery_level:
+            score += self.score_rsi_recovery
 
-        # 6. RSI above its 10-min average (optional confirmation — inverse of CALL)
-        if self.require_rsi_below_avg and not np.isnan(rsi_avg):
-            if rsi <= rsi_avg:
-                return False, None
+        # 5. EWO increasing for N consecutive bars (bullish reversal = bad for PUT)
+        if self.score_ewo_trend > 0 and self._ewo_trending(declining=False):
+            score += self.score_ewo_trend
 
-        # 7. Stochastic bullish crossover in oversold zone (optional)
-        if self.use_stochastic and not self._stoch_crossover_bullish():
-            return False, None
+        # 6. RSI above its 10-min average
+        if self.score_rsi_vs_avg > 0 and not np.isnan(rsi_avg) and rsi > rsi_avg:
+            score += self.score_rsi_vs_avg
 
-        # 8. Option price declining for N consecutive bars (spread contraction)
-        if not self._spread_contracting():
-            return False, None
+        # 7. Stochastic bullish crossover in oversold zone
+        if self.score_stochastic > 0 and self._stoch_crossover_bullish():
+            score += self.score_stochastic
 
-        # 9. Stock candle range (high-low) shrinking for N consecutive bars
-        if not self._bar_range_contracting():
+        # 8. Option price declining for N consecutive bars
+        if self.score_spread_contraction > 0 and self._spread_contracting():
+            score += self.score_spread_contraction
+
+        # 9. Stock candle range shrinking for N consecutive bars
+        if self.score_bar_range > 0 and self._bar_range_contracting():
+            score += self.score_bar_range
+
+        if score < self.score_threshold:
             return False, None
 
         return True, 'Momentum Peak'
