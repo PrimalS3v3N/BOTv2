@@ -15,15 +15,268 @@ import numpy as np
 import Config
 
 # Export for use by other modules
-__all__ = ['MomentumPeak', 'MomentumPeakDetector', 'StatsBookExit', 'StatsBookDetector',
+__all__ = ['DeferredEntry', 'DeferredEntryFilter',
+           'MomentumPeak', 'MomentumPeakDetector', 'StatsBookExit', 'StatsBookDetector',
            'AIExitSignal', 'AIExitSignalDetector', 'OptionsExit', 'OptionsExitDetector',
            'VolumeClimaxExit', 'VolumeClimaxDetector',
            'TimeStop', 'TimeStopDetector',
            'VWAPCrossExit', 'VWAPCrossDetector',
            'SupertrendFlipExit', 'SupertrendFlipDetector',
-           'MarketTrend', 'MarketTrendDetector',
-           'DeferredEntry', 'DeferredEntryFilter']
+           'MarketTrend', 'MarketTrendDetector']
 
+
+# =============================================================================
+#                           ENTRY STRATEGIES
+# =============================================================================
+
+# =============================================================================
+# INTERNAL - Deferred Entry Filter
+# =============================================================================
+
+class DeferredEntry:
+    """
+    Factory for creating DeferredEntryFilter instances.
+
+    When entry RiskOutlook is HIGH, the system defers the actual entry
+    until an exhaustion confirmation signal fires — timing the entry
+    closer to the price extreme (peak for PUTs, trough for CALLs).
+
+    Three independent exhaustion filters run in parallel. The first one
+    to trigger causes entry:
+
+    1. Stochastic Overbought/Oversold Crossover
+       - Wait for Stoch %K to enter extreme zone (>90 for PUTs, <10 for CALLs)
+       - Then enter when %K crosses back through %D (reversal confirmed)
+
+    2. Volume Climax
+       - Wait for a volume bar >= volume_multiplier * rolling average
+       - Enter on the next bar (exhaustion spike followed by reversal)
+
+    3. Indicator Saturation (Contrarian)
+       - Count how many sub-indicators agree with the adverse direction
+       - When saturation_threshold+ are aligned, the extreme is likely near
+       - Enter when at least one flips back (consensus breaking)
+
+    If none fire within max_defer_bars, the original entry executes
+    (timeout fallback to avoid missing the trade entirely).
+
+    Config: BACKTEST_CONFIG['deferred_entry']
+    """
+
+    def __init__(self, config=None):
+        de_config = config or Config.get_setting('backtest', 'deferred_entry', {})
+        self.enabled = de_config.get('enabled', True)
+        self.config = de_config
+
+    def create_filter(self, option_type):
+        """Create a new DeferredEntryFilter for a position. Returns None if disabled."""
+        if not self.enabled:
+            return None
+        return DeferredEntryFilter(self.config, option_type)
+
+
+class DeferredEntryFilter:
+    """
+    Scans bar-by-bar for exhaustion confirmation before allowing entry.
+
+    For PUTs: waits for the underlying to reach an overbought extreme
+    and show signs of reversal (ideal put entry = underlying peak).
+
+    For CALLs: waits for the underlying to reach an oversold extreme
+    and show signs of reversal (ideal call entry = underlying trough).
+
+    Call update() each bar during the deferral window. When it returns
+    True, the entry should execute at that bar's price.
+    """
+
+    def __init__(self, config, option_type):
+        self.is_call = option_type.upper() in ['CALL', 'CALLS', 'C']
+        self.is_put = not self.is_call
+
+        # Stochastic crossover filter
+        self.stoch_enabled = config.get('stoch_enabled', True)
+        self.stoch_extreme_threshold = config.get('stoch_extreme_threshold', 90)
+        self.stoch_extreme_threshold_low = config.get('stoch_extreme_threshold_low', 10)
+        self.stoch_reached_extreme = False
+
+        # Volume climax filter
+        self.volume_enabled = config.get('volume_enabled', True)
+        self.volume_lookback = config.get('volume_lookback', 10)
+        self.volume_multiplier = config.get('volume_multiplier', 1.5)
+        self.volume_history = []
+        self.volume_climax_fired = False
+
+        # Indicator saturation filter
+        self.saturation_enabled = config.get('saturation_enabled', True)
+        self.saturation_threshold = config.get('saturation_threshold', 10)
+        self.peak_saturation_count = 0
+        self.saturation_reached = False
+
+        # Timeout
+        self.max_defer_bars = config.get('max_defer_bars', 10)
+        self.bar_count = 0
+
+        # Track which filter triggered
+        self.trigger_reason = None
+
+    def update(self, stoch_k, stoch_d, volume, rsi,
+               supertrend_direction, macd_histogram, roc,
+               ema_values, stock_price, atr_sl_value, ewo):
+        """
+        Evaluate whether exhaustion confirmation has occurred.
+
+        Args:
+            stoch_k: Stochastic %K value
+            stoch_d: Stochastic %D value
+            volume: Current bar volume
+            rsi: Current RSI value
+            supertrend_direction: Supertrend direction (+1/-1)
+            macd_histogram: MACD histogram value
+            roc: Rate of Change (30-bar)
+            ema_values: dict of {period: value} for EMAs
+            stock_price: Current stock close price
+            atr_sl_value: ATR-based stop loss level
+            ewo: Elliott Wave Oscillator value
+
+        Returns:
+            bool: True if entry should execute now
+        """
+        self.bar_count += 1
+
+        # --- Timeout: enter regardless after max_defer_bars ---
+        if self.bar_count >= self.max_defer_bars:
+            self.trigger_reason = 'Deferred-Timeout'
+            return True
+
+        triggered = False
+
+        # --- Filter 1: Stochastic Overbought/Oversold Crossover ---
+        if self.stoch_enabled and not np.isnan(stoch_k) and not np.isnan(stoch_d):
+            if self.is_put:
+                # For PUTs: wait for stoch to go overbought, then cross down
+                if stoch_k >= self.stoch_extreme_threshold:
+                    self.stoch_reached_extreme = True
+                if self.stoch_reached_extreme and stoch_k < stoch_d:
+                    self.trigger_reason = 'Deferred-StochCrossover'
+                    triggered = True
+            else:
+                # For CALLs: wait for stoch to go oversold, then cross up
+                if stoch_k <= self.stoch_extreme_threshold_low:
+                    self.stoch_reached_extreme = True
+                if self.stoch_reached_extreme and stoch_k > stoch_d:
+                    self.trigger_reason = 'Deferred-StochCrossover'
+                    triggered = True
+
+        # --- Filter 2: Volume Climax ---
+        if self.volume_enabled and not np.isnan(volume):
+            self.volume_history.append(volume)
+            if len(self.volume_history) > self.volume_lookback:
+                self.volume_history.pop(0)
+
+            if len(self.volume_history) >= 2:
+                avg_volume = sum(self.volume_history[:-1]) / len(self.volume_history[:-1])
+                if avg_volume > 0 and volume >= self.volume_multiplier * avg_volume:
+                    self.volume_climax_fired = True
+
+                # Enter on the bar AFTER the climax
+                if self.volume_climax_fired and volume < self.volume_multiplier * avg_volume:
+                    if not triggered:
+                        self.trigger_reason = 'Deferred-VolumeClimax'
+                    triggered = True
+
+        # --- Filter 3: Indicator Saturation (Contrarian) ---
+        if self.saturation_enabled:
+            adverse_count = self._count_adverse_indicators(
+                rsi, supertrend_direction, macd_histogram, roc,
+                ema_values, stock_price, atr_sl_value, ewo
+            )
+
+            if adverse_count > self.peak_saturation_count:
+                self.peak_saturation_count = adverse_count
+
+            if self.peak_saturation_count >= self.saturation_threshold:
+                self.saturation_reached = True
+
+            # Enter when consensus starts breaking (at least 2 fewer than peak)
+            if self.saturation_reached and adverse_count <= self.peak_saturation_count - 2:
+                if not triggered:
+                    self.trigger_reason = 'Deferred-Saturation'
+                triggered = True
+
+        return triggered
+
+    def _count_adverse_indicators(self, rsi, supertrend_direction,
+                                   macd_histogram, roc,
+                                   ema_values, stock_price,
+                                   atr_sl_value, ewo):
+        """
+        Count how many indicators are aligned AGAINST the position direction.
+
+        For PUTs, "adverse" means indicators are bullish (price going up).
+        For CALLs, "adverse" means indicators are bearish (price going down).
+
+        Returns:
+            int: count of adverse indicators (0-12 range)
+        """
+        count = 0
+
+        # RSI direction
+        if not np.isnan(rsi):
+            if self.is_put and rsi > 60:
+                count += 1
+            elif self.is_call and rsi < 40:
+                count += 1
+
+        # Supertrend direction
+        if not np.isnan(supertrend_direction):
+            if self.is_put and supertrend_direction > 0:
+                count += 1
+            elif self.is_call and supertrend_direction < 0:
+                count += 1
+
+        # MACD histogram
+        if not np.isnan(macd_histogram):
+            if self.is_put and macd_histogram > 0:
+                count += 1
+            elif self.is_call and macd_histogram < 0:
+                count += 1
+
+        # ROC direction
+        if not np.isnan(roc):
+            if self.is_put and roc > 0:
+                count += 1
+            elif self.is_call and roc < 0:
+                count += 1
+
+        # EWO direction
+        if not np.isnan(ewo):
+            if self.is_put and ewo > 0:
+                count += 1
+            elif self.is_call and ewo < 0:
+                count += 1
+
+        # EMA positioning (price vs each EMA)
+        for period, ema_val in (ema_values or {}).items():
+            if np.isnan(ema_val):
+                continue
+            if self.is_put and stock_price > ema_val:
+                count += 1
+            elif self.is_call and stock_price < ema_val:
+                count += 1
+
+        # ATR-SL positioning
+        if not np.isnan(atr_sl_value):
+            if self.is_put and stock_price > atr_sl_value:
+                count += 1
+            elif self.is_call and stock_price < atr_sl_value:
+                count += 1
+
+        return count
+
+
+# =============================================================================
+#                           EXIT STRATEGIES
+# =============================================================================
 
 # =============================================================================
 # INTERNAL - Momentum Peak Detection Strategy
@@ -1926,248 +2179,3 @@ class MarketTrendDetector:
 
         self.prev_spy_trend = spy_trend
         return False, None, self.state
-
-
-# =============================================================================
-# INTERNAL - Deferred Entry Filter
-# =============================================================================
-
-class DeferredEntry:
-    """
-    Factory for creating DeferredEntryFilter instances.
-
-    When entry RiskOutlook is HIGH, the system defers the actual entry
-    until an exhaustion confirmation signal fires — timing the entry
-    closer to the price extreme (peak for PUTs, trough for CALLs).
-
-    Three independent exhaustion filters run in parallel. The first one
-    to trigger causes entry:
-
-    1. Stochastic Overbought/Oversold Crossover
-       - Wait for Stoch %K to enter extreme zone (>90 for PUTs, <10 for CALLs)
-       - Then enter when %K crosses back through %D (reversal confirmed)
-
-    2. Volume Climax
-       - Wait for a volume bar >= volume_multiplier * rolling average
-       - Enter on the next bar (exhaustion spike followed by reversal)
-
-    3. Indicator Saturation (Contrarian)
-       - Count how many sub-indicators agree with the adverse direction
-       - When saturation_threshold+ are aligned, the extreme is likely near
-       - Enter when at least one flips back (consensus breaking)
-
-    If none fire within max_defer_bars, the original entry executes
-    (timeout fallback to avoid missing the trade entirely).
-
-    Config: BACKTEST_CONFIG['deferred_entry']
-    """
-
-    def __init__(self, config=None):
-        de_config = config or Config.get_setting('backtest', 'deferred_entry', {})
-        self.enabled = de_config.get('enabled', True)
-        self.config = de_config
-
-    def create_filter(self, option_type):
-        """Create a new DeferredEntryFilter for a position. Returns None if disabled."""
-        if not self.enabled:
-            return None
-        return DeferredEntryFilter(self.config, option_type)
-
-
-class DeferredEntryFilter:
-    """
-    Scans bar-by-bar for exhaustion confirmation before allowing entry.
-
-    For PUTs: waits for the underlying to reach an overbought extreme
-    and show signs of reversal (ideal put entry = underlying peak).
-
-    For CALLs: waits for the underlying to reach an oversold extreme
-    and show signs of reversal (ideal call entry = underlying trough).
-
-    Call update() each bar during the deferral window. When it returns
-    True, the entry should execute at that bar's price.
-    """
-
-    def __init__(self, config, option_type):
-        self.is_call = option_type.upper() in ['CALL', 'CALLS', 'C']
-        self.is_put = not self.is_call
-
-        # Stochastic crossover filter
-        self.stoch_enabled = config.get('stoch_enabled', True)
-        self.stoch_extreme_threshold = config.get('stoch_extreme_threshold', 90)
-        self.stoch_extreme_threshold_low = config.get('stoch_extreme_threshold_low', 10)
-        self.stoch_reached_extreme = False
-
-        # Volume climax filter
-        self.volume_enabled = config.get('volume_enabled', True)
-        self.volume_lookback = config.get('volume_lookback', 10)
-        self.volume_multiplier = config.get('volume_multiplier', 1.5)
-        self.volume_history = []
-        self.volume_climax_fired = False
-
-        # Indicator saturation filter
-        self.saturation_enabled = config.get('saturation_enabled', True)
-        self.saturation_threshold = config.get('saturation_threshold', 10)
-        self.peak_saturation_count = 0
-        self.saturation_reached = False
-
-        # Timeout
-        self.max_defer_bars = config.get('max_defer_bars', 10)
-        self.bar_count = 0
-
-        # Track which filter triggered
-        self.trigger_reason = None
-
-    def update(self, stoch_k, stoch_d, volume, rsi,
-               supertrend_direction, macd_histogram, roc,
-               ema_values, stock_price, atr_sl_value, ewo):
-        """
-        Evaluate whether exhaustion confirmation has occurred.
-
-        Args:
-            stoch_k: Stochastic %K value
-            stoch_d: Stochastic %D value
-            volume: Current bar volume
-            rsi: Current RSI value
-            supertrend_direction: Supertrend direction (+1/-1)
-            macd_histogram: MACD histogram value
-            roc: Rate of Change (30-bar)
-            ema_values: dict of {period: value} for EMAs
-            stock_price: Current stock close price
-            atr_sl_value: ATR-based stop loss level
-            ewo: Elliott Wave Oscillator value
-
-        Returns:
-            bool: True if entry should execute now
-        """
-        self.bar_count += 1
-
-        # --- Timeout: enter regardless after max_defer_bars ---
-        if self.bar_count >= self.max_defer_bars:
-            self.trigger_reason = 'Deferred-Timeout'
-            return True
-
-        triggered = False
-
-        # --- Filter 1: Stochastic Overbought/Oversold Crossover ---
-        if self.stoch_enabled and not np.isnan(stoch_k) and not np.isnan(stoch_d):
-            if self.is_put:
-                # For PUTs: wait for stoch to go overbought, then cross down
-                if stoch_k >= self.stoch_extreme_threshold:
-                    self.stoch_reached_extreme = True
-                if self.stoch_reached_extreme and stoch_k < stoch_d:
-                    self.trigger_reason = 'Deferred-StochCrossover'
-                    triggered = True
-            else:
-                # For CALLs: wait for stoch to go oversold, then cross up
-                if stoch_k <= self.stoch_extreme_threshold_low:
-                    self.stoch_reached_extreme = True
-                if self.stoch_reached_extreme and stoch_k > stoch_d:
-                    self.trigger_reason = 'Deferred-StochCrossover'
-                    triggered = True
-
-        # --- Filter 2: Volume Climax ---
-        if self.volume_enabled and not np.isnan(volume):
-            self.volume_history.append(volume)
-            if len(self.volume_history) > self.volume_lookback:
-                self.volume_history.pop(0)
-
-            if len(self.volume_history) >= 2:
-                avg_volume = sum(self.volume_history[:-1]) / len(self.volume_history[:-1])
-                if avg_volume > 0 and volume >= self.volume_multiplier * avg_volume:
-                    self.volume_climax_fired = True
-
-                # Enter on the bar AFTER the climax
-                if self.volume_climax_fired and volume < self.volume_multiplier * avg_volume:
-                    if not triggered:
-                        self.trigger_reason = 'Deferred-VolumeClimax'
-                    triggered = True
-
-        # --- Filter 3: Indicator Saturation (Contrarian) ---
-        if self.saturation_enabled:
-            adverse_count = self._count_adverse_indicators(
-                rsi, supertrend_direction, macd_histogram, roc,
-                ema_values, stock_price, atr_sl_value, ewo
-            )
-
-            if adverse_count > self.peak_saturation_count:
-                self.peak_saturation_count = adverse_count
-
-            if self.peak_saturation_count >= self.saturation_threshold:
-                self.saturation_reached = True
-
-            # Enter when consensus starts breaking (at least 2 fewer than peak)
-            if self.saturation_reached and adverse_count <= self.peak_saturation_count - 2:
-                if not triggered:
-                    self.trigger_reason = 'Deferred-Saturation'
-                triggered = True
-
-        return triggered
-
-    def _count_adverse_indicators(self, rsi, supertrend_direction,
-                                   macd_histogram, roc,
-                                   ema_values, stock_price,
-                                   atr_sl_value, ewo):
-        """
-        Count how many indicators are aligned AGAINST the position direction.
-
-        For PUTs, "adverse" means indicators are bullish (price going up).
-        For CALLs, "adverse" means indicators are bearish (price going down).
-
-        Returns:
-            int: count of adverse indicators (0-12 range)
-        """
-        count = 0
-
-        # RSI direction
-        if not np.isnan(rsi):
-            if self.is_put and rsi > 60:
-                count += 1
-            elif self.is_call and rsi < 40:
-                count += 1
-
-        # Supertrend direction
-        if not np.isnan(supertrend_direction):
-            if self.is_put and supertrend_direction > 0:
-                count += 1
-            elif self.is_call and supertrend_direction < 0:
-                count += 1
-
-        # MACD histogram
-        if not np.isnan(macd_histogram):
-            if self.is_put and macd_histogram > 0:
-                count += 1
-            elif self.is_call and macd_histogram < 0:
-                count += 1
-
-        # ROC direction
-        if not np.isnan(roc):
-            if self.is_put and roc > 0:
-                count += 1
-            elif self.is_call and roc < 0:
-                count += 1
-
-        # EWO direction
-        if not np.isnan(ewo):
-            if self.is_put and ewo > 0:
-                count += 1
-            elif self.is_call and ewo < 0:
-                count += 1
-
-        # EMA positioning (price vs each EMA)
-        for period, ema_val in (ema_values or {}).items():
-            if np.isnan(ema_val):
-                continue
-            if self.is_put and stock_price > ema_val:
-                count += 1
-            elif self.is_call and stock_price < ema_val:
-                count += 1
-
-        # ATR-SL positioning
-        if not np.isnan(atr_sl_value):
-            if self.is_put and stock_price > atr_sl_value:
-                count += 1
-            elif self.is_call and stock_price < atr_sl_value:
-                count += 1
-
-        return count
