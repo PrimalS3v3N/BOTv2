@@ -763,7 +763,7 @@ class Databook:
             'ai_action': ai_action,
             'ai_reason': ai_reason,
             # Options Exit System columns (SL = stop loss, TP = take profit)
-            'sl_trailing': (oe_state or {}).get('sl_trailing', np.nan),
+            'tp_trailing': (oe_state or {}).get('tp_trailing', np.nan),
             'sl_hard': (oe_state or {}).get('sl_hard', np.nan),
             'tp_risk_outlook': (oe_state or {}).get('tp_risk_outlook'),
             'tp_risk_reasons': (oe_state or {}).get('tp_risk_reasons'),

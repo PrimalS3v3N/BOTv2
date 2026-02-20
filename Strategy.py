@@ -714,21 +714,21 @@ class OptionsExit:
 
 class OptionsExitDetector:
     """
-    Per-position detector that tracks trailing SL, hard SL, entry favorability,
+    Per-position detector that tracks trailing TP, hard SL, entry favorability,
     and reversal detection.
 
-    Trailing SL uses a continuous logarithmic scaling function so the stop
+    Trailing TP uses a continuous logarithmic scaling function so the stop
     ratchets smoothly with profit instead of jumping at fixed milestones:
 
-        trail_sl_pct = base_floor + scale * ln(1 + profit_pct / norm)
+        trail_tp_pct = base_floor + scale * ln(1 + profit_pct / norm)
 
     For high-risk entries an addon is layered on top:
 
         addon = addon_base + addon_scale * ln(1 + profit_pct / addon_norm)
 
-    The trailing SL price is:
+    The trailing TP price is:
 
-        sl_price = entry_price * (1 + trail_sl_pct / 100)
+        tp_price = entry_price * (1 + trail_tp_pct / 100)
 
     It only moves up (for profit protection), never down.
     """
@@ -782,12 +782,34 @@ class OptionsExitDetector:
         # MACD
         self.macd_enabled = config.get('macd_enabled', True)
 
+        # Velocity deceleration exit
+        self.velocity_exit_enabled = config.get('velocity_exit_enabled', True)
+        self.velocity_window = config.get('velocity_window', 5)
+        self.velocity_decel_ratio = config.get('velocity_decel_ratio', 0.30)
+        self.velocity_confirm_bars = config.get('velocity_confirm_bars', 2)
+        self.velocity_min_profit_pct = config.get('velocity_min_profit_pct', 25)
+        self.velocity_min_move = config.get('velocity_min_move', 0.0)
+
+        # Auto-calibrate velocity_min_move from statsbook if set to 0
+        if self.velocity_min_move <= 0 and statsbook is not None:
+            try:
+                median_hl = float(statsbook.loc['Median(H-L)', '5m'])
+                if not np.isnan(median_hl) and median_hl > 0:
+                    # Expect a "run" to average at least 1x median bar range per bar
+                    self.velocity_min_move = median_hl
+            except (KeyError, TypeError, ValueError):
+                pass
+        if self.velocity_min_move <= 0:
+            self.velocity_min_move = 0.05  # Fallback: $0.05/bar minimum
+
         # State
-        self.trailing_sl_price = None       # Current trailing SL price (None until activated)
+        self.trailing_tp_price = None       # Current trailing TP price (None until activated)
         self.trailing_active = False
         self.highest_profit_pct = 0.0       # Watermark: best profit seen so far
         self.bar_count = 0
         self.is_high_risk = False
+        self._stock_prices = []             # Stock close history for velocity
+        self._decel_count = 0               # Consecutive bars of deceleration
 
         # Entry favorability assessment (computed once)
         self.favorability = None             # 'LOW' / 'MEDIUM' / 'HIGH' risk
@@ -840,7 +862,7 @@ class OptionsExitDetector:
 
     def _get_buffer(self, profit_pct):
         """
-        Get the trailing SL buffer for the current profit level.
+        Get the trailing TP buffer for the current profit level.
 
         If adaptive buffer is available, it decays with profit so the trade
         has room to breathe at low profits and tightens at high profits.
@@ -854,12 +876,91 @@ class OptionsExitDetector:
         return self.trail_buffer_min_pct
 
     # ------------------------------------------------------------------
+    # Velocity deceleration detection
+    # ------------------------------------------------------------------
+
+    def _check_velocity_exit(self, stock_price, profit_pct, ema_values):
+        """
+        Detect stock price velocity deceleration for proactive peak exit.
+
+        Tracks bar-to-bar stock price changes (velocity).  When the stock was
+        running strongly and velocity drops to a fraction of its recent average,
+        it signals momentum exhaustion — exit before the crash.
+
+        Returns:
+            bool: True if velocity deceleration exit should fire.
+        """
+        if not self.velocity_exit_enabled:
+            return False
+
+        self._stock_prices.append(stock_price)
+
+        # Need at least window + 1 bars to compute velocities
+        if len(self._stock_prices) < self.velocity_window + 2:
+            return False
+
+        # Minimum profit gate
+        if profit_pct < self.velocity_min_profit_pct:
+            self._decel_count = 0
+            return False
+
+        # Compute velocities: close[i] - close[i-1] for recent bars
+        prices = self._stock_prices
+        window = self.velocity_window
+
+        # Direction-aware: for calls, positive velocity = good; for puts, negative = good
+        if self.is_call:
+            velocities = [prices[-i] - prices[-i - 1] for i in range(1, window + 2)]
+        else:
+            velocities = [prices[-i - 1] - prices[-i] for i in range(1, window + 2)]
+        velocities.reverse()  # Oldest to newest
+
+        # Current velocity = last element; average = mean of previous N
+        current_velocity = velocities[-1]
+        avg_velocity = sum(velocities[:-1]) / len(velocities[:-1])
+
+        # Stock must have been "running" (avg velocity above minimum move)
+        if avg_velocity < self.velocity_min_move:
+            self._decel_count = 0
+            return False
+
+        # Deceleration = still moving in the right direction, just much slower.
+        # Negative velocity (actual reversal) is NOT deceleration — let trail-TP
+        # handle outright reversals.  This targets the "stall before the crash".
+        if current_velocity < 0:
+            self._decel_count = 0
+            return False
+
+        # Check for deceleration: current velocity < ratio × average
+        if current_velocity < self.velocity_decel_ratio * avg_velocity:
+            self._decel_count += 1
+        else:
+            self._decel_count = 0
+            return False
+
+        # Confirmation: deceleration must persist for N bars
+        if self._decel_count < self.velocity_confirm_bars:
+            return False
+
+        # Extended check: price should be above short EMAs (still in "run" territory)
+        if ema_values:
+            for period in [10, 21]:
+                ema_val = ema_values.get(period, np.nan)
+                if not np.isnan(ema_val):
+                    if self.is_call and stock_price < ema_val:
+                        return False  # Already reversed below EMA — let trail-TP handle
+                    elif not self.is_call and stock_price > ema_val:
+                        return False
+
+        return True
+
+    # ------------------------------------------------------------------
     # Trailing SL math
     # ------------------------------------------------------------------
 
-    def _calculate_trail_sl_pct(self, profit_pct):
+    def _calculate_trail_tp_pct(self, profit_pct):
         """
-        Continuous trailing SL as a percentage *above entry* to lock in.
+        Continuous trailing TP as a percentage *above entry* to lock in.
 
         Returns the % of entry price that the SL should sit at.
         E.g. if entry = $2.00 and this returns 35, SL = $2.00 * 1.35 = $2.70.
@@ -1076,7 +1177,7 @@ class OptionsExitDetector:
 
     def update(self, option_price, stock_price, ema_values=None):
         """
-        Per-bar update: check hard SL, update trailing SL, check EMA reversal.
+        Per-bar update: check hard SL, update trailing TP, check EMA reversal.
 
         Args:
             option_price: Current estimated option price
@@ -1114,7 +1215,7 @@ class OptionsExitDetector:
         if profit_pct > self.highest_profit_pct:
             self.highest_profit_pct = profit_pct
 
-        # --- Hard stop loss (dynamic tightening before trailing SL activates) ---
+        # --- Hard stop loss (dynamic tightening before trailing TP activates) ---
         # If the option price hasn't yet hit the trailing activation threshold,
         # tighten the hard SL based on the peak gain seen so far.
         # Peak gain scales up to just under trail_activation_pct (9.99%).
@@ -1142,21 +1243,26 @@ class OptionsExitDetector:
 
         # --- Trailing stop loss ---
 
-        # Calculate where trailing SL should be based on watermark profit
-        trail_sl_pct = self._calculate_trail_sl_pct(self.highest_profit_pct)
+        # Calculate where trailing TP should be based on watermark profit
+        trail_tp_pct = self._calculate_trail_tp_pct(self.highest_profit_pct)
 
-        if trail_sl_pct > 0:
+        if trail_tp_pct > 0:
             self.trailing_active = True
-            new_trailing_sl = self.entry_option_price * (1 + trail_sl_pct / 100)
+            new_trailing_tp = self.entry_option_price * (1 + trail_tp_pct / 100)
 
             # Ratchet: only move SL up, never down
-            if self.trailing_sl_price is None or new_trailing_sl > self.trailing_sl_price:
-                self.trailing_sl_price = new_trailing_sl
+            if self.trailing_tp_price is None or new_trailing_tp > self.trailing_tp_price:
+                self.trailing_tp_price = new_trailing_tp
 
-            # Check if price hit trailing SL
-            if option_price <= self.trailing_sl_price:
+            # Check if price hit trailing TP
+            if option_price <= self.trailing_tp_price:
                 state = self._build_state(option_price, profit_pct)
-                return True, 'Trail-SL', state
+                return True, 'Trail-TP', state
+
+        # --- Velocity deceleration exit (proactive peak detection) ---
+        if self._check_velocity_exit(stock_price, profit_pct, ema_values):
+            state = self._build_state(option_price, profit_pct)
+            return True, 'Velocity-Peak', state
 
         state = self._build_state(option_price, profit_pct)
         return False, None, state
@@ -1200,7 +1306,7 @@ class OptionsExitDetector:
     def _build_state(self, option_price, profit_pct):
         """Build state dict for databook recording."""
         return {
-            'sl_trailing': self.trailing_sl_price if self.trailing_sl_price else np.nan,
+            'tp_trailing': self.trailing_tp_price if self.trailing_tp_price else np.nan,
             'sl_hard': self.hard_sl_price,
             'tp_risk_outlook': self.favorability,
             'tp_risk_reasons': self.favorability_reasons,
@@ -1384,7 +1490,7 @@ class TimeStopDetector:
     Exit condition: minutes_held >= max_minutes AND pnl_pct < min_profit_pct.
 
     A position that has moved well beyond min_profit_pct is clearly
-    working and should be managed by trailing SL, not time-stopped.
+    working and should be managed by trailing TP, not time-stopped.
     """
 
     def __init__(self, config):
