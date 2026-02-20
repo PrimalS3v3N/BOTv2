@@ -54,6 +54,7 @@ class MomentumPeak:
             'stoch_oversold': 20,          # Stochastic oversold zone
             'use_stochastic': True,        # Enable stochastic crossover confirmation
             'spread_contraction_bars': 3,  # Option price must decline N bars
+            'bar_range_contraction_bars': 3,  # Stock candle range must shrink N bars
         }
     """
 
@@ -82,6 +83,7 @@ class MomentumPeakDetector:
     6. RSI crossed below RSI_10min_avg (optional)
     7. Stochastic %K crossed below %D in overbought zone (optional)
     8. Option price declining for N consecutive bars (spread contraction)
+    9. Stock candle range (high-low) shrinking for N consecutive bars
 
     For PUTs (stock bottomed out → sell put):
     1. Option profit >= min_profit_pct
@@ -92,6 +94,7 @@ class MomentumPeakDetector:
     6. RSI crossed above RSI_10min_avg (optional)
     7. Stochastic %K crossed above %D in oversold zone (optional)
     8. Option price declining for N consecutive bars (spread contraction)
+    9. Stock candle range (high-low) shrinking for N consecutive bars
     """
 
     def __init__(self, config, option_type=None):
@@ -107,6 +110,7 @@ class MomentumPeakDetector:
         self.stoch_oversold = config.get('stoch_oversold', 20)
         self.use_stochastic = config.get('use_stochastic', True)
         self.spread_contraction_bars = config.get('spread_contraction_bars', 3)
+        self.bar_range_contraction_bars = config.get('bar_range_contraction_bars', 3)
 
         # Determine position direction
         ot = (option_type or '').upper()
@@ -117,8 +121,10 @@ class MomentumPeakDetector:
         self.stoch_k_history = []
         self.stoch_d_history = []
         self.spread_history = []
+        self.bar_range_history = []
 
-    def update(self, pnl_pct, rsi, rsi_avg, ewo, stoch_k=np.nan, stoch_d=np.nan, option_price=np.nan):
+    def update(self, pnl_pct, rsi, rsi_avg, ewo, stoch_k=np.nan, stoch_d=np.nan,
+               option_price=np.nan, stock_high=np.nan, stock_low=np.nan):
         """
         Check for momentum peak exit signal.
 
@@ -130,6 +136,8 @@ class MomentumPeakDetector:
             stoch_k: Current Stochastic %K value
             stoch_d: Current Stochastic %D value
             option_price: Current option price for spread contraction check
+            stock_high: Current bar high price for bar range contraction check
+            stock_low: Current bar low price for bar range contraction check
 
         Returns:
             (should_exit, exit_reason): Tuple. exit_reason is None if no exit.
@@ -139,6 +147,8 @@ class MomentumPeakDetector:
         self.stoch_k_history.append(stoch_k)
         self.stoch_d_history.append(stoch_d)
         self.spread_history.append(option_price)
+        bar_range = stock_high - stock_low if not (np.isnan(stock_high) or np.isnan(stock_low)) else np.nan
+        self.bar_range_history.append(bar_range)
 
         # Need at least 2 bars of history
         if len(self.rsi_history) < 2 or len(self.ewo_history) < 2:
@@ -196,6 +206,10 @@ class MomentumPeakDetector:
         if not self._spread_contracting():
             return False, None
 
+        # 9. Stock candle range (high-low) shrinking for N consecutive bars
+        if not self._bar_range_contracting():
+            return False, None
+
         return True, 'Momentum Peak'
 
     def _check_put_peak(self, rsi, rsi_avg, ewo, stoch_k, stoch_d):
@@ -235,6 +249,10 @@ class MomentumPeakDetector:
 
         # 8. Option price declining for N consecutive bars (spread contraction)
         if not self._spread_contracting():
+            return False, None
+
+        # 9. Stock candle range (high-low) shrinking for N consecutive bars
+        if not self._bar_range_contracting():
             return False, None
 
         return True, 'Momentum Peak'
@@ -295,6 +313,21 @@ class MomentumPeakDetector:
             if np.isnan(recent[i]) or np.isnan(recent[i + 1]):
                 return False
             if recent[i + 1] >= recent[i]:  # not contracting
+                return False
+        return True
+
+    def _bar_range_contracting(self):
+        """Check if stock candle range (high-low) has been shrinking for N consecutive bars."""
+        n = self.bar_range_contraction_bars
+        if n <= 0:
+            return True  # disabled
+        if len(self.bar_range_history) < n + 1:
+            return False
+        recent = self.bar_range_history[-(n + 1):]
+        for i in range(len(recent) - 1):
+            if np.isnan(recent[i]) or np.isnan(recent[i + 1]):
+                return False
+            if recent[i + 1] >= recent[i]:  # not shrinking
                 return False
         return True
 

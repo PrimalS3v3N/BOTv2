@@ -286,6 +286,7 @@ BACKTEST_CONFIG = {
         'stoch_oversold': 20,              # Stochastic oversold zone threshold
         'use_stochastic': True,            # Enable stochastic crossover confirmation
         'spread_contraction_bars': 3,      # Option price must decline for N consecutive bars before exit (0=disabled)
+        'bar_range_contraction_bars': 3,   # Stock candle range (high-low) must shrink for N consecutive bars (0=disabled)
     },
 
     # StatsBook Exit: Exit based on historical statistical bounds
