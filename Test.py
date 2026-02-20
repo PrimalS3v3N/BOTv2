@@ -553,6 +553,9 @@ class Position:
         self.exit_reason = None
         self.is_closed = False
 
+        # Delayed entry tracking
+        self.delayed_entry_reason = None  # Set externally if entry was delayed
+
         # Max profit tracking (entry to end of market day)
         self.max_price_to_eod = entry_price  # Track max price from entry to end of day
 
@@ -618,6 +621,7 @@ class Position:
             'pnl_pct': self.get_pnl_pct(self.exit_price) if self.exit_price else None,
             'minutes_held': self.get_minutes_held(self.exit_time) if self.exit_time else None,
             'max_price_to_eod': self.max_price_to_eod,
+            'delayed_entry': self.delayed_entry_reason,
         }
 
 
@@ -650,6 +654,7 @@ class Databook:
                    stoch_k=np.nan, stoch_d=np.nan,
                    vpoc=np.nan, book_imbalance=np.nan,
                    risk=None, risk_reasons=None, risk_trend=None,
+                   ticker_trend=np.nan, spy_trend=np.nan, market_trend=None, mt_state=None,
                    spy_price=np.nan, spy_gauge=None, ticker_gauge=None,
                    ai_outlook_1m=None, ai_outlook_5m=None,
                    ai_outlook_30m=None, ai_outlook_1h=None,
@@ -660,7 +665,8 @@ class Databook:
                    exit_sig_closure_peak=None,
                    exit_sig_oe=None,
                    exit_sig_vc=None, exit_sig_ts=None, exit_sig_vwap=None,
-                   exit_sig_st=None):
+                   exit_sig_st=None, exit_sig_mt=None,
+                   deferred_active=False, deferred_trigger=None):
         """Add a tracking record."""
         pnl_pct = self.position.get_pnl_pct(option_price) if holding else np.nan
 
@@ -672,21 +678,6 @@ class Databook:
             self.day_high = max(self.day_high, stock_high)
         if not np.isnan(stock_low) and stock_low > 0:
             self.day_low = min(self.day_low, stock_low)
-
-        # Market bias: +1 (bullish), 0 (sideways), -1 (bearish)
-        # Sideways zone = VWAP +/- configurable % of today's high-low range
-        bias_band_pct = Config.BACKTEST_CONFIG.get('bias_sideways_band', 0.05)
-        if not np.isnan(vwap) and vwap > 0 and self.day_high > self.day_low:
-            day_range = self.day_high - self.day_low
-            sideways_band = bias_band_pct * day_range
-            if stock_price >= vwap + sideways_band:
-                market_bias = 1
-            elif stock_price <= vwap - sideways_band:
-                market_bias = -1
-            else:
-                market_bias = 0
-        else:
-            market_bias = np.nan
 
         # Unpack SPY gauge dict into individual columns
         spy_gauge = spy_gauge or {}
@@ -711,8 +702,11 @@ class Databook:
             'risk': risk,
             'risk_reasons': risk_reasons,
             'risk_trend': risk_trend,
-            # Market assessment
-            'market_bias': market_bias,
+            # MarketTrend
+            'ticker_trend': ticker_trend,
+            'spy_trend': spy_trend,
+            'market_trend': market_trend,
+            'mt_state': mt_state,
             # SPY gauge
             'spy_price': spy_price,
             'spy_since_open': spy_gauge.get('since_open'),
@@ -786,6 +780,10 @@ class Databook:
             'exit_sig_ts': exit_sig_ts,
             'exit_sig_vwap': exit_sig_vwap,
             'exit_sig_st': exit_sig_st,
+            'exit_sig_mt': exit_sig_mt,
+            # Deferred entry columns
+            'deferred_active': deferred_active,
+            'deferred_trigger': deferred_trigger,
         }
 
         self.records.append(record)
@@ -1003,12 +1001,12 @@ class DataSummary:
         has_rsi = 'rsi' in df.columns
         has_ewo = 'ewo' in df.columns
         has_vwap = 'vwap' in df.columns
-        has_bias = 'market_bias' in df.columns
+        has_bias = 'ticker_trend' in df.columns
 
         exit_sig_cols = [c for c in ['exit_sig_sb', 'exit_sig_mp', 'exit_sig_ai',
                                       'exit_sig_closure_peak', 'exit_sig_oe',
                                       'exit_sig_vc', 'exit_sig_ts', 'exit_sig_vwap',
-                                      'exit_sig_st'] if c in df.columns]
+                                      'exit_sig_st', 'exit_sig_mt'] if c in df.columns]
 
         records = []
         for interval_start, idx_group in df.groupby(intervals).groups.items():
@@ -1041,7 +1039,7 @@ class DataSummary:
                 'rsi_avg': group['rsi'].mean() if has_rsi else np.nan,
                 'ewo_avg': group['ewo'].mean() if has_ewo else np.nan,
                 'vwap_avg': group['vwap'].mean() if has_vwap else np.nan,
-                'market_bias_mode': group['market_bias'].mode().iloc[0] if has_bias and not group['market_bias'].mode().empty else np.nan,
+                'ticker_trend_mode': group['ticker_trend'].mode().iloc[0] if has_bias and not group['ticker_trend'].mode().empty else np.nan,
                 'exit_signals_fired': '|'.join(exit_signals) if exit_signals else None,
                 'signal_id': signal_id,
             }
@@ -1315,6 +1313,89 @@ class SimulationEngine:
 
         return results
 
+    def precompute_trends(self, data, timestamps, vwap_col=None):
+        """
+        Pre-compute trend values (-1, 0, +1) for all timestamps.
+
+        Uses VWAP (or cumulative average as fallback) with a sideways band
+        based on running day high-low range. Same logic as the former
+        market_bias computation but vectorised across all bars.
+
+        Args:
+            data: DataFrame with 'close', 'high', 'low' columns and DatetimeIndex.
+                  Optionally 'vwap' and 'volume'.
+            timestamps: Array of timestamps to compute trends for.
+            vwap_col: Column name for VWAP. If None, computes from volume or
+                      falls back to cumulative average.
+
+        Returns:
+            list of trend values (-1, 0, +1, or np.nan), one per timestamp.
+        """
+        if data is None or data.empty:
+            return [np.nan] * len(timestamps)
+
+        bias_band_pct = self.config.get('bias_sideways_band', 0.05)
+
+        close_vals = data['close'].values
+        high_vals = data['high'].values if 'high' in data.columns else close_vals
+        low_vals = data['low'].values if 'low' in data.columns else close_vals
+        data_index = data.index
+
+        # Determine VWAP source
+        if vwap_col and vwap_col in data.columns:
+            vwap_vals = data[vwap_col].values
+        elif 'volume' in data.columns:
+            vol = data['volume'].values.astype(float)
+            cum_vol = np.cumsum(vol)
+            cum_pv = np.cumsum(close_vals * vol)
+            vwap_vals = np.where(cum_vol > 0, cum_pv / cum_vol, np.nan)
+        else:
+            # Fallback: cumulative average
+            vwap_vals = np.cumsum(close_vals) / np.arange(1, len(close_vals) + 1)
+
+        results = []
+        day_high = -np.inf
+        day_low = np.inf
+        current_day = None
+
+        for ts in timestamps:
+            pos = data_index.searchsorted(ts, side='right')
+            if pos == 0:
+                results.append(np.nan)
+                continue
+
+            idx = pos - 1
+            price = float(close_vals[idx])
+            high = float(high_vals[idx])
+            low = float(low_vals[idx])
+            vwap = float(vwap_vals[idx])
+
+            # Reset running high/low on new trading day
+            ts_date = ts.date() if hasattr(ts, 'date') else ts
+            if current_day != ts_date:
+                current_day = ts_date
+                day_high = -np.inf
+                day_low = np.inf
+
+            if not np.isnan(high):
+                day_high = max(day_high, high)
+            if not np.isnan(low) and low > 0:
+                day_low = min(day_low, low)
+
+            if not np.isnan(vwap) and vwap > 0 and day_high > day_low:
+                day_range = day_high - day_low
+                sideways_band = bias_band_pct * day_range
+                if price >= vwap + sideways_band:
+                    results.append(1)       # Bullish
+                elif price <= vwap - sideways_band:
+                    results.append(-1)      # Bearish
+                else:
+                    results.append(0)       # Sideways
+            else:
+                results.append(np.nan)
+
+        return results
+
     def assess_risk(self, rsi, rsi_avg, ewo_avg, statsbook, timestamp, signal_time):
         """
         Assess risk at entry time.
@@ -1403,6 +1484,164 @@ class SimulationEngine:
         )
 
         return position, entry_option_price
+
+    def find_delayed_entry(self, signal, stock_data, entry_idx):
+        """
+        Check if a signal qualifies for delayed entry and find the optimal entry point.
+
+        Delayed entry applies when:
+        - Signal arrives in the first N minutes of market open (signal_window_minutes)
+        - CALLs: stock price at signal > market open price (chasing upward momentum)
+        - PUTs:  stock price at signal < market open price (chasing downward momentum)
+
+        If delayed, scans forward bars within the delay window looking for:
+        1. Stock price crossing back through market open price (primary - better entry)
+        2. Option price dropping by half of initial_sl_pct below signal price (fallback)
+
+        Returns:
+            None if no delay needed (use original entry)
+            dict with {entry_idx, entry_stock_price, entry_option_price, delay_reason}
+                if a delayed entry was found
+            False if delay needed but no valid entry found within the window (skip trade)
+        """
+        risk_config = self.config.get('risk_assessment', {})
+        delay_config = risk_config.get('delayed_entry', {})
+        if not delay_config.get('enabled', False):
+            return None
+
+        signal_window = delay_config.get('signal_window_minutes', 15)
+        delay_window = delay_config.get('delay_window_minutes', 30)
+        sl_discount_factor = delay_config.get('sl_discount_factor', 0.5)
+        initial_sl_pct = self.config.get('options_exit', {}).get('initial_sl_pct', 20)
+
+        signal_time = signal.get('signal_time')
+        if signal_time is None:
+            return None
+        if signal_time.tzinfo is None:
+            signal_time = signal_time.replace(tzinfo=EASTERN)
+
+        option_type = signal.get('option_type', '').upper()
+        is_call = option_type in ('CALL', 'CALLS', 'C')
+        is_put = option_type in ('PUT', 'PUTS', 'P')
+        if not is_call and not is_put:
+            return None
+
+        # Compute market open boundaries
+        market_open = signal_time.replace(hour=9, minute=30, second=0, microsecond=0)
+        signal_window_end = market_open + timedelta(minutes=signal_window)
+        delay_window_end = market_open + timedelta(minutes=delay_window)
+
+        # Only applies to signals in the first N minutes of market open
+        if signal_time < market_open or signal_time > signal_window_end:
+            return None
+
+        # Find market open price (first bar at or after 9:30)
+        market_open_bar_idx = stock_data.index.searchsorted(market_open)
+        if market_open_bar_idx >= len(stock_data):
+            return None
+        market_open_price = float(stock_data.iloc[market_open_bar_idx]['open'])
+
+        # Get stock price at signal time
+        if entry_idx >= len(stock_data):
+            return None
+        signal_stock_price = float(stock_data.iloc[entry_idx]['close'])
+
+        # Check if delay conditions apply
+        # CALLs: signal stock price > market open price (chasing up)
+        # PUTs:  signal stock price < market open price (chasing down)
+        needs_delay = False
+        if is_call and signal_stock_price > market_open_price:
+            needs_delay = True
+        elif is_put and signal_stock_price < market_open_price:
+            needs_delay = True
+
+        if not needs_delay:
+            return None
+
+        # Compute option price discount threshold
+        # "half of stop_loss amount" = signal_option_price * initial_sl_pct / 100 * sl_discount_factor
+        signal_option_price = signal.get('cost')
+        if signal_option_price and signal_option_price > 0:
+            sl_discount_amount = signal_option_price * (initial_sl_pct / 100) * sl_discount_factor
+            option_target_price = signal_option_price - sl_discount_amount
+        else:
+            option_target_price = None
+
+        # Prepare BS estimation parameters for option price tracking during scan
+        expiry_dt = None
+        signal_days_to_expiry = None
+        if signal.get('expiration'):
+            expiry_dt = dt.datetime.combine(
+                signal['expiration'], dt.time(16, 0), tzinfo=EASTERN
+            )
+            signal_days_to_expiry = max(0, (expiry_dt - signal_time).total_seconds() / 86400)
+
+        # Scan forward from entry_idx+1 through the delay window
+        print(f"    DELAY: {'CALL' if is_call else 'PUT'} signal during open window, "
+              f"stock ${signal_stock_price:.2f} {'>' if is_call else '<'} open ${market_open_price:.2f}")
+
+        for i in range(entry_idx + 1, len(stock_data)):
+            bar_time = stock_data.index[i]
+
+            # Stop scanning past the delay window
+            if bar_time > delay_window_end:
+                break
+
+            bar_stock_price = float(stock_data.iloc[i]['close'])
+
+            # Condition 1: Stock price crosses back through market open price
+            if is_call and bar_stock_price <= market_open_price:
+                print(f"    DELAY: Entry found — stock ${bar_stock_price:.2f} <= "
+                      f"open ${market_open_price:.2f} at {bar_time.strftime('%H:%M')}")
+                return {
+                    'entry_idx': i,
+                    'entry_stock_price': bar_stock_price,
+                    'entry_option_price': None,  # Let create_position estimate via BS
+                    'delay_reason': f'Delay-Open(stock<={market_open_price:.2f})',
+                }
+            elif is_put and bar_stock_price >= market_open_price:
+                print(f"    DELAY: Entry found — stock ${bar_stock_price:.2f} >= "
+                      f"open ${market_open_price:.2f} at {bar_time.strftime('%H:%M')}")
+                return {
+                    'entry_idx': i,
+                    'entry_stock_price': bar_stock_price,
+                    'entry_option_price': None,
+                    'delay_reason': f'Delay-Open(stock>={market_open_price:.2f})',
+                }
+
+            # Condition 2: Option price drops by half of stop_loss below signal price
+            if option_target_price is not None and signal_option_price and signal_option_price > 0:
+                # Estimate option price at this bar using BS calibrated to signal
+                if expiry_dt and signal_days_to_expiry is not None:
+                    current_dte = max(0, (expiry_dt - bar_time).total_seconds() / 86400)
+                    try:
+                        bar_option_price = Analysis.estimate_option_price_bs(
+                            stock_price=bar_stock_price,
+                            strike=signal['strike'],
+                            option_type=signal['option_type'],
+                            days_to_expiry=current_dte,
+                            entry_price=signal_option_price,
+                            entry_stock_price=signal_stock_price,
+                            entry_days_to_expiry=signal_days_to_expiry,
+                        )
+                    except Exception:
+                        bar_option_price = None
+
+                    if bar_option_price is not None and bar_option_price <= option_target_price:
+                        discount_pct = ((signal_option_price - bar_option_price) / signal_option_price) * 100
+                        print(f"    DELAY: Entry found — option ${bar_option_price:.2f} <= "
+                              f"target ${option_target_price:.2f} ({discount_pct:.1f}% discount) "
+                              f"at {bar_time.strftime('%H:%M')}")
+                        return {
+                            'entry_idx': i,
+                            'entry_stock_price': bar_stock_price,
+                            'entry_option_price': bar_option_price,
+                            'delay_reason': f'Delay-Open(option<={option_target_price:.2f})',
+                        }
+
+        # No valid entry found within the delay window — skip this trade
+        print(f"    DELAY: No valid entry within {delay_window}min window — skipping signal")
+        return False
 
     def simulate_position(self, position, matrix, stock_data, signal, entry_idx, entry_stock_price,
                           statsbooks=None, spy_data=None):
@@ -1493,6 +1732,10 @@ class SimulationEngine:
         _spy_gauges = self.precompute_gauges(spy_data, _all_timestamps)
         _ticker_gauges = self.precompute_gauges(stock_data, _all_timestamps)
 
+        # Pre-compute trend values (-1/0/+1) for ticker and SPY
+        _ticker_trends = self.precompute_trends(stock_data, _all_timestamps, vwap_col='vwap')
+        _spy_trends = self.precompute_trends(spy_data, _all_timestamps)
+
         # Create strategy detectors
         mp_strategy = Strategy.MomentumPeak(self.config.get('momentum_peak', {}))
         mp_detector = mp_strategy.create_detector(position.option_type)
@@ -1548,6 +1791,18 @@ class SimulationEngine:
 
         st_flip_strategy = Strategy.SupertrendFlipExit(self.config.get('supertrend_flip_exit', {}))
         st_flip_detector = st_flip_strategy.create_detector(position.option_type)
+
+        # Deferred entry filter (for HIGH risk entries)
+        de_strategy = Strategy.DeferredEntry(self.config.get('deferred_entry', {}))
+        de_filter = de_strategy.create_filter(position.option_type)
+        de_active = False           # True when deferring entry
+        de_triggered = False        # True once deferred entry fires
+        de_trigger_reason = None    # Which filter triggered entry
+        de_new_entry_idx = None     # Actual entry bar index (after deferral)
+
+        mt_strategy = Strategy.MarketTrend(self.config.get('market_trend', {}))
+        mt_detector = mt_strategy.create_detector(position.option_type)
+        mt_exit_enabled = self.config.get('market_trend', {}).get('exit_enabled', False)
 
         # Closure - Peak settings
         CP_config = self.config.get('closure_peak', {})
@@ -1677,10 +1932,111 @@ class SimulationEngine:
             spy_price, spy_gauge_data = _spy_gauges[i]
             _, ticker_gauge_data = _ticker_gauges[i]
 
+            # --- Deferred Entry: RiskOutlook assessment at signal bar ---
+            # On the signal bar, assess risk FIRST. If HIGH and deferred entry
+            # is enabled, switch to deferral mode instead of entering immediately.
+            if i == entry_idx and not oe_favorability_assessed:
+                oe_favorability_assessed = True
+                ema_vals = {10: ema_10, 21: ema_21, 50: ema_50, 100: ema_100, 200: ema_200}
+                open_price = stock_data.iloc[0]['close']
+                roc_day = ((stock_price - open_price) / open_price) * 100 if open_price > 0 else np.nan
+                fav_level, fav_reasons = oe_detector.RiskOutlook(
+                    rsi=rsi,
+                    rsi_avg=rsi_10min_avg,
+                    ema_values=ema_vals,
+                    stock_price=stock_price,
+                    atr_sl_value=atr_sl_value,
+                    macd_histogram=macd_histogram_val,
+                    roc_30m=roc_val,
+                    roc_day=roc_day,
+                    supertrend_direction=st_direction,
+                    ewo=ewo,
+                    ewo_avg=ewo_15min_avg,
+                    stoch_k=stoch_k_val,
+                    stoch_d=stoch_d_val,
+                )
+
+                # Risk Assessment (also once at entry)
+                if not risk_assessed and risk_enabled:
+                    risk_assessed = True
+                    risk_level, risk_reasons = self.assess_risk(
+                        rsi, rsi_10min_avg, ewo_15min_avg,
+                        statsbooks.get(position.ticker),
+                        timestamp, signal['signal_time']
+                    )
+                    if risk_level == 'HIGH':
+                        print(f"    RISK: HIGH [{risk_reasons}]")
+                        oe_detector.is_high_risk = True
+
+                if fav_level == 'HIGH':
+                    print(f"    RISK OUTLOOK: HIGH [{fav_reasons}]")
+
+                # Activate deferred entry if risk is HIGH and filter available
+                if fav_level == 'HIGH' and de_filter is not None:
+                    de_active = True
+                    holding = False  # Don't enter yet — wait for exhaustion
+                    print(f"    DEFERRED ENTRY: Waiting for exhaustion confirmation (max {de_filter.max_defer_bars} bars)")
+
+            # --- Deferred Entry: Scan for exhaustion confirmation ---
+            if de_active and not de_triggered and i > entry_idx:
+                ema_vals = {10: ema_10, 21: ema_21, 50: ema_50, 100: ema_100, 200: ema_200}
+                should_enter = de_filter.update(
+                    stoch_k=stoch_k_val,
+                    stoch_d=stoch_d_val,
+                    volume=volume,
+                    rsi=rsi,
+                    supertrend_direction=st_direction,
+                    macd_histogram=macd_histogram_val,
+                    roc=roc_val,
+                    ema_values=ema_vals,
+                    stock_price=stock_price,
+                    atr_sl_value=atr_sl_value,
+                    ewo=ewo,
+                )
+                if should_enter:
+                    de_triggered = True
+                    de_active = False
+                    de_trigger_reason = de_filter.trigger_reason
+                    de_new_entry_idx = i
+
+                    # Re-enter at the current bar's price
+                    new_entry_option_price = option_price * (1 + self.slippage_pct)
+                    position.entry_price = new_entry_option_price
+                    position.entry_time = timestamp
+                    position.current_price = new_entry_option_price
+                    position.highest_price = new_entry_option_price
+                    position.lowest_price = new_entry_option_price
+
+                    # Reset the OptionsExit detector with new entry price
+                    oe_detector.entry_option_price = new_entry_option_price
+                    oe_detector.hard_sl_price = new_entry_option_price * (1 - oe_detector.initial_sl_pct / 100)
+                    oe_detector.trailing_sl_price = None
+                    oe_detector.trailing_active = False
+                    oe_detector.highest_profit_pct = 0.0
+                    oe_detector.bar_count = 0
+                    oe_detector._confirmation_bars = []
+                    oe_detector.confirmed = 'Pending'
+
+                    holding = True
+                    entry_stock_price = stock_price
+                    print(f"    DEFERRED ENTRY TRIGGERED: {de_trigger_reason} at bar {de_filter.bar_count} (${stock_price:.2f})")
+                else:
+                    holding = False  # Still waiting
+
+            # Use pre-computed trends
+            ticker_trend_val = _ticker_trends[i]
+            spy_trend_val = _spy_trends[i]
+
+            # Compute market_trend alignment (True = matching, False = diverging)
+            if np.isnan(ticker_trend_val) or np.isnan(spy_trend_val):
+                market_trend_val = None
+            else:
+                market_trend_val = (int(ticker_trend_val) == int(spy_trend_val))
+
             if holding:
                 position.update(timestamp, option_price, stock_price)
 
-                # --- Risk Assessment (once at entry) ---
+                # --- Risk Assessment (once at entry, if not already done above) ---
                 if not risk_assessed and risk_enabled:
                     risk_assessed = True
                     risk_level, risk_reasons = self.assess_risk(
@@ -1695,30 +2051,6 @@ class SimulationEngine:
                 oe_state = {}
                 oe_exit = False
                 oe_reason = None
-                if oe_detector and not oe_favorability_assessed:
-                    oe_favorability_assessed = True
-                    ema_vals = {10: ema_10, 21: ema_21, 50: ema_50, 100: ema_100, 200: ema_200}
-                    open_price = stock_data.iloc[0]['close']
-                    roc_day = ((stock_price - open_price) / open_price) * 100 if open_price > 0 else np.nan
-                    fav_level, fav_reasons = oe_detector.RiskOutlook(
-                        rsi=rsi,
-                        rsi_avg=rsi_10min_avg,
-                        ema_values=ema_vals,
-                        stock_price=stock_price,
-                        atr_sl_value=atr_sl_value,
-                        macd_histogram=macd_histogram_val,
-                        roc_30m=roc_val,
-                        roc_day=roc_day,
-                        supertrend_direction=st_direction,
-                        ewo=ewo,
-                        ewo_avg=ewo_15min_avg,
-                        stoch_k=stoch_k_val,
-                        stoch_d=stoch_d_val,
-                    )
-                    if risk_level == 'HIGH':
-                        oe_detector.is_high_risk = True
-                    if fav_level == 'HIGH':
-                        print(f"    RISK OUTLOOK: HIGH [{fav_reasons}]")
 
                 # --- Options Exit: Per-bar update ---
                 if oe_detector and not position.is_closed:
@@ -1757,7 +2089,7 @@ class SimulationEngine:
                 mp_reason = None
                 if mp_detector and not position.is_closed:
                     mp_pnl = position.get_pnl_pct(option_price)
-                    mp_exit, mp_reason = mp_detector.update(mp_pnl, rsi, rsi_10min_avg, ewo, stoch_k_val, stoch_d_val)
+                    mp_exit, mp_reason = mp_detector.update(mp_pnl, rsi, rsi_10min_avg, ewo, stoch_k_val, stoch_d_val, option_price)
 
                 # Update StatsBook detector
                 sb_exit = False
@@ -1786,7 +2118,7 @@ class SimulationEngine:
                         'rsi': rsi,
                         'rsi_10min_avg': rsi_10min_avg,
                         'supertrend_direction': st_direction,
-                        'market_bias': matrix.records[-1]['market_bias'] if matrix.records else np.nan,
+                        'market_bias': matrix.records[-1]['ticker_trend'] if matrix.records else np.nan,
                         'ichimoku_tenkan': ichi_tenkan,
                         'ichimoku_kijun': ichi_kijun,
                         'ichimoku_senkou_a': ichi_senkou_a,
@@ -1830,6 +2162,14 @@ class SimulationEngine:
                     st_flip_pnl = position.get_pnl_pct(option_price)
                     st_flip_exit, st_flip_reason = st_flip_detector.update(st_flip_pnl, st_direction)
 
+                # Update MarketTrend detector
+                mt_exit = False
+                mt_reason = None
+                mt_state = None
+                if mt_detector and not position.is_closed:
+                    mt_pnl = position.get_pnl_pct(option_price)
+                    mt_exit, mt_reason, mt_state = mt_detector.update(ticker_trend_val, spy_trend_val, mt_pnl)
+
                 # Compute Closure-Peak signal flag
                 cp_signal = False
                 if CP_enabled and not np.isnan(rsi_10min_avg) and timestamp.time() >= CP_start_time:
@@ -1861,6 +2201,8 @@ class SimulationEngine:
                     stoch_k=stoch_k_val, stoch_d=stoch_d_val,
                     vpoc=vpoc_val, book_imbalance=np.nan,
                     risk=risk_level, risk_reasons=risk_reasons, risk_trend=risk_trend,
+                    ticker_trend=ticker_trend_val, spy_trend=spy_trend_val,
+                    market_trend=market_trend_val, mt_state=mt_state,
                     spy_price=spy_price, spy_gauge=spy_gauge_data, ticker_gauge=ticker_gauge_data,
                     ai_outlook_1m=ai_signal_data.get('outlook_1m'),
                     ai_outlook_5m=ai_signal_data.get('outlook_5m'),
@@ -1873,6 +2215,9 @@ class SimulationEngine:
                     exit_sig_ai=ai_exit, exit_sig_closure_peak=cp_signal, exit_sig_oe=oe_exit,
                     exit_sig_vc=vc_exit, exit_sig_ts=ts_exit, exit_sig_vwap=vwap_exit,
                     exit_sig_st=st_flip_exit,
+                    exit_sig_mt=mt_exit or (mt_reason is not None),
+                    deferred_active=de_active,
+                    deferred_trigger=de_trigger_reason if (de_triggered and i == de_new_entry_idx) else None,
                 )
 
                 # === EXIT PRIORITY CHAIN ===
@@ -1894,6 +2239,9 @@ class SimulationEngine:
                 elif st_flip_exit and not position.is_closed:
                     exit_price = option_price * (1 - self.slippage_pct)
                     position.close(exit_price, timestamp, st_flip_reason)
+                elif mt_exit and mt_exit_enabled and not position.is_closed:
+                    exit_price = option_price * (1 - self.slippage_pct)
+                    position.close(exit_price, timestamp, mt_reason)
                 elif ts_exit and not position.is_closed:
                     exit_price = option_price * (1 - self.slippage_pct)
                     position.close(exit_price, timestamp, ts_reason)
@@ -1933,7 +2281,11 @@ class SimulationEngine:
                     roc=roc_val,
                     stoch_k=stoch_k_val, stoch_d=stoch_d_val,
                     vpoc=vpoc_val, book_imbalance=np.nan,
+                    ticker_trend=ticker_trend_val, spy_trend=spy_trend_val,
+                    market_trend=market_trend_val,
                     spy_price=spy_price, spy_gauge=spy_gauge_data, ticker_gauge=ticker_gauge_data,
+                    deferred_active=de_active,
+                    deferred_trigger=de_trigger_reason if (de_triggered and i == de_new_entry_idx) else None,
                 )
 
         # Close at end of data if still open
@@ -2272,12 +2624,32 @@ class Backtest:
         entry_time = stock_data.index[entry_idx]
         entry_stock_price = entry_bar['close']
 
+        # Check for delayed entry (market open signal delay)
+        delay_result = self.engine.find_delayed_entry(signal, stock_data, entry_idx)
+        delayed_entry_reason = None
+        if delay_result is False:
+            # Delay needed but no valid entry found — skip trade
+            return None, None
+        elif delay_result is not None:
+            # Delayed entry found — use new entry point
+            entry_idx = delay_result['entry_idx']
+            entry_bar = stock_data.iloc[entry_idx]
+            entry_time = stock_data.index[entry_idx]
+            entry_stock_price = delay_result['entry_stock_price']
+            delayed_entry_reason = delay_result['delay_reason']
+
         # Create position via engine
+        entry_option_price_override = delay_result.get('entry_option_price') if delay_result and delay_result is not False else None
         position, entry_option_price = self.engine.create_position(
             signal=signal,
             entry_stock_price=entry_stock_price,
-            entry_time=entry_time
+            entry_time=entry_time,
+            entry_option_price=entry_option_price_override,
         )
+
+        # Store delay info on position for tracking
+        if delayed_entry_reason:
+            position.delayed_entry_reason = delayed_entry_reason
 
         # Create tracking matrix
         matrix = Databook(position)
@@ -2503,6 +2875,9 @@ class LiveTest:
         self._signal_detectors = {}  # signal_id -> dict of detectors and state
         self._signal_last_bar = {}   # signal_id -> last processed bar index
 
+        # Delayed entry: signals waiting for better entry conditions
+        self._pending_delays = {}    # signal_id -> delay state dict
+
         # Three output dataframes
         self.data_book = DataSummary(interval_minutes=1)    # Full 1-min data (uses DataSummary container but 1-min interval)
         self.data_summary = DataSummary(interval_minutes=self.summary_interval)
@@ -2706,16 +3081,67 @@ class LiveTest:
             if signal_id not in self.positions:
                 entry_price = signal.get('cost', option_price)
                 if entry_price and entry_price > 0:
-                    position, _ = self.engine.create_position(
-                        signal=signal,
-                        entry_stock_price=stock_price,
-                        entry_time=timestamp,
-                        entry_option_price=entry_price
-                    )
-                    self.positions[signal_id] = position
-                    self.databooks[signal_id] = Databook(position)
-                    self._signal_last_bar[signal_id] = -1  # No bars processed yet
-                    print(f"    Position opened: {signal_id} @ ${entry_price:.2f}")
+                    # Check if this signal needs delayed entry
+                    if signal_id in self._pending_delays:
+                        # Already pending — check delay conditions
+                        delay_state = self._pending_delays[signal_id]
+                        if timestamp > delay_state['delay_window_end']:
+                            # Delay window expired — skip this signal
+                            print(f"    DELAY: Window expired for {signal_id} — skipping")
+                            del self._pending_delays[signal_id]
+                            continue
+
+                        # Check condition 1: stock price crosses market open
+                        is_call = delay_state['is_call']
+                        mkt_open = delay_state['market_open_price']
+                        enter_now = False
+                        delay_reason = None
+
+                        if is_call and stock_price <= mkt_open:
+                            enter_now = True
+                            delay_reason = f'Delay-Open(stock<={mkt_open:.2f})'
+                        elif not is_call and stock_price >= mkt_open:
+                            enter_now = True
+                            delay_reason = f'Delay-Open(stock>={mkt_open:.2f})'
+
+                        # Check condition 2: option price discount
+                        if not enter_now and option_price <= delay_state['option_target_price']:
+                            enter_now = True
+                            delay_reason = f'Delay-Open(option<={delay_state["option_target_price"]:.2f})'
+
+                        if not enter_now:
+                            continue  # Still waiting
+
+                        # Delay conditions met — create position
+                        del self._pending_delays[signal_id]
+                        print(f"    DELAY: {delay_reason} — entering {signal_id} @ ${option_price:.2f}")
+                        position, _ = self.engine.create_position(
+                            signal=signal,
+                            entry_stock_price=stock_price,
+                            entry_time=timestamp,
+                            entry_option_price=option_price,
+                        )
+                        position.delayed_entry_reason = delay_reason
+                        self.positions[signal_id] = position
+                        self.databooks[signal_id] = Databook(position)
+                        self._signal_last_bar[signal_id] = -1
+                        print(f"    Position opened (delayed): {signal_id} @ ${option_price:.2f}")
+
+                    elif self._should_delay_live_entry(signal, stock_price, timestamp):
+                        # New signal that needs delay — register as pending
+                        pass  # _should_delay_live_entry already registered it
+                    else:
+                        # Normal entry — no delay needed
+                        position, _ = self.engine.create_position(
+                            signal=signal,
+                            entry_stock_price=stock_price,
+                            entry_time=timestamp,
+                            entry_option_price=entry_price
+                        )
+                        self.positions[signal_id] = position
+                        self.databooks[signal_id] = Databook(position)
+                        self._signal_last_bar[signal_id] = -1
+                        print(f"    Position opened: {signal_id} @ ${entry_price:.2f}")
 
             # Update position if open
             position = self.positions.get(signal_id)
@@ -2827,6 +3253,10 @@ class LiveTest:
         st_flip_strategy = Strategy.SupertrendFlipExit(config.get('supertrend_flip_exit', {}))
         st_flip_detector = st_flip_strategy.create_detector(position.option_type)
 
+        mt_strategy = Strategy.MarketTrend(config.get('market_trend', {}))
+        mt_detector = mt_strategy.create_detector(position.option_type)
+        mt_exit_enabled = config.get('market_trend', {}).get('exit_enabled', False)
+
         # Risk assessment config
         risk_config = config.get('risk_assessment', {})
         CP_config = config.get('closure_peak', {})
@@ -2840,6 +3270,8 @@ class LiveTest:
             'ts_detector': ts_detector,
             'vwap_detector': vwap_detector,
             'st_flip_detector': st_flip_detector,
+            'mt_detector': mt_detector,
+            'mt_exit_enabled': mt_exit_enabled,
             'oe_favorability_assessed': False,
             'risk_assessed': False,
             'risk_level': None,
@@ -2861,6 +3293,88 @@ class LiveTest:
         }
         state = self._signal_detectors[signal_id]
         state['entry_days_to_expiry'] = max(0, (state['expiry_dt'] - position.entry_time).total_seconds() / 86400)
+
+    def _should_delay_live_entry(self, signal, stock_price, timestamp):
+        """
+        Check if a live signal should be delayed and register it in _pending_delays.
+
+        Returns True if the signal should be delayed (entry deferred), False otherwise.
+        """
+        risk_config = self.config.get('risk_assessment', {})
+        delay_config = risk_config.get('delayed_entry', {})
+        if not delay_config.get('enabled', False):
+            return False
+
+        signal_window = delay_config.get('signal_window_minutes', 15)
+        delay_window = delay_config.get('delay_window_minutes', 30)
+        sl_discount_factor = delay_config.get('sl_discount_factor', 0.5)
+        initial_sl_pct = self.config.get('options_exit', {}).get('initial_sl_pct', 20)
+
+        signal_time = signal.get('signal_time')
+        if signal_time is None:
+            return False
+        if signal_time.tzinfo is None:
+            signal_time = signal_time.replace(tzinfo=EASTERN)
+
+        option_type = signal.get('option_type', '').upper()
+        is_call = option_type in ('CALL', 'CALLS', 'C')
+        is_put = option_type in ('PUT', 'PUTS', 'P')
+        if not is_call and not is_put:
+            return False
+
+        market_open = signal_time.replace(hour=9, minute=30, second=0, microsecond=0)
+        signal_window_end = market_open + timedelta(minutes=signal_window)
+        delay_window_end = market_open + timedelta(minutes=delay_window)
+
+        # Only applies to signals in the first N minutes of market open
+        if signal_time < market_open or signal_time > signal_window_end:
+            return False
+
+        # Get market open price from accumulated stock bars
+        ticker = signal.get('ticker')
+        market_open_price = None
+        if ticker in self._stock_bars:
+            for bar in self._stock_bars[ticker]:
+                bar_ts = bar['timestamp']
+                if bar_ts >= market_open:
+                    market_open_price = bar['open']
+                    break
+        if market_open_price is None:
+            market_open_price = stock_price  # Fallback
+
+        # Check delay conditions
+        needs_delay = False
+        if is_call and stock_price > market_open_price:
+            needs_delay = True
+        elif is_put and stock_price < market_open_price:
+            needs_delay = True
+
+        if not needs_delay:
+            return False
+
+        # Compute option price target
+        signal_option_price = signal.get('cost', 0)
+        if signal_option_price and signal_option_price > 0:
+            sl_amount = signal_option_price * (initial_sl_pct / 100) * sl_discount_factor
+            option_target = signal_option_price - sl_amount
+        else:
+            option_target = 0
+
+        signal_id = signal.get('signal_id')
+        self._pending_delays[signal_id] = {
+            'signal': signal,
+            'is_call': is_call,
+            'market_open_price': market_open_price,
+            'signal_stock_price': stock_price,
+            'signal_option_price': signal_option_price,
+            'option_target_price': option_target,
+            'delay_window_end': delay_window_end,
+        }
+
+        print(f"    DELAY: {'CALL' if is_call else 'PUT'} signal during open window, "
+              f"stock ${stock_price:.2f} {'>' if is_call else '<'} open ${market_open_price:.2f} "
+              f"— waiting for better entry")
+        return True
 
     def _process_new_bar(self, signal_id, signal, position, matrix, stock_df, bar_idx,
                          option_price, spy_data):
@@ -3008,7 +3522,7 @@ class LiveTest:
         mp_detector = state['mp_detector']
         if mp_detector and not position.is_closed:
             mp_pnl = position.get_pnl_pct(option_price)
-            mp_exit, mp_reason = mp_detector.update(mp_pnl, rsi, rsi_10min_avg, ewo, stoch_k_val, stoch_d_val)
+            mp_exit, mp_reason = mp_detector.update(mp_pnl, rsi, rsi_10min_avg, ewo, stoch_k_val, stoch_d_val, option_price)
 
         sb_exit, sb_reason = False, None
         sb_detector = state['sb_detector']
@@ -3028,7 +3542,7 @@ class LiveTest:
                 'vwap': vwap, 'ema_21': ema_21, 'ewo': ewo, 'ewo_15min_avg': ewo_15min_avg,
                 'rsi': rsi, 'rsi_10min_avg': rsi_10min_avg,
                 'supertrend_direction': st_direction,
-                'market_bias': matrix.records[-1]['market_bias'] if matrix.records else np.nan,
+                'market_bias': matrix.records[-1]['ticker_trend'] if matrix.records else np.nan,
                 'ichimoku_tenkan': ichi_tenkan, 'ichimoku_kijun': ichi_kijun,
                 'ichimoku_senkou_a': ichi_senkou_a, 'ichimoku_senkou_b': ichi_senkou_b,
             }
@@ -3068,6 +3582,57 @@ class LiveTest:
             st_flip_pnl = position.get_pnl_pct(option_price)
             st_flip_exit, st_flip_reason = st_flip_detector.update(st_flip_pnl, st_direction)
 
+        # Compute ticker/SPY trends for this bar (live single-bar calculation)
+        bias_band_pct = self.engine.config.get('bias_sideways_band', 0.05)
+        ticker_trend_val = np.nan
+        spy_trend_val = np.nan
+        market_trend_val = None
+
+        if not np.isnan(vwap) and vwap > 0 and matrix.day_high > matrix.day_low:
+            day_range = matrix.day_high - matrix.day_low
+            sideways_band = bias_band_pct * day_range
+            if stock_price >= vwap + sideways_band:
+                ticker_trend_val = 1
+            elif stock_price <= vwap - sideways_band:
+                ticker_trend_val = -1
+            else:
+                ticker_trend_val = 0
+
+        if spy_data is not None and not spy_data.empty and spy_price and not np.isnan(spy_price):
+            spy_avail = spy_data[spy_data.index <= timestamp]
+            if len(spy_avail) >= 2:
+                spy_high = spy_avail['high'].max() if 'high' in spy_avail.columns else spy_avail['close'].max()
+                spy_low = spy_avail['low'].min() if 'low' in spy_avail.columns else spy_avail['close'].min()
+                if spy_high > spy_low:
+                    # Use cumulative average as VWAP proxy for SPY
+                    if 'volume' in spy_avail.columns:
+                        vol = spy_avail['volume'].values.astype(float)
+                        cum_vol = vol.sum()
+                        if cum_vol > 0:
+                            spy_vwap = (spy_avail['close'].values * vol).sum() / cum_vol
+                        else:
+                            spy_vwap = spy_avail['close'].mean()
+                    else:
+                        spy_vwap = spy_avail['close'].mean()
+                    spy_range = spy_high - spy_low
+                    spy_band = bias_band_pct * spy_range
+                    if spy_price >= spy_vwap + spy_band:
+                        spy_trend_val = 1
+                    elif spy_price <= spy_vwap - spy_band:
+                        spy_trend_val = -1
+                    else:
+                        spy_trend_val = 0
+
+        if not np.isnan(ticker_trend_val) and not np.isnan(spy_trend_val):
+            market_trend_val = (int(ticker_trend_val) == int(spy_trend_val))
+
+        # Update MarketTrend detector
+        mt_exit, mt_reason, mt_state = False, None, None
+        mt_detector = state['mt_detector']
+        if mt_detector and not position.is_closed:
+            mt_pnl = position.get_pnl_pct(option_price)
+            mt_exit, mt_reason, mt_state = mt_detector.update(ticker_trend_val, spy_trend_val, mt_pnl)
+
         # Closure-Peak signal
         CP_enabled = state['CP_enabled']
         cp_signal = False
@@ -3094,6 +3659,8 @@ class LiveTest:
             stoch_k=stoch_k_val, stoch_d=stoch_d_val,
             vpoc=vpoc_val, book_imbalance=np.nan,
             risk=risk_level, risk_reasons=risk_reasons, risk_trend=risk_trend,
+            ticker_trend=ticker_trend_val, spy_trend=spy_trend_val,
+            market_trend=market_trend_val, mt_state=mt_state,
             spy_price=spy_price, spy_gauge=spy_gauge_data, ticker_gauge=ticker_gauge_data,
             ai_outlook_1m=ai_signal_data.get('outlook_1m'),
             ai_outlook_5m=ai_signal_data.get('outlook_5m'),
@@ -3106,6 +3673,7 @@ class LiveTest:
             exit_sig_ai=ai_exit, exit_sig_closure_peak=cp_signal, exit_sig_oe=oe_exit,
             exit_sig_vc=vc_exit, exit_sig_ts=ts_exit, exit_sig_vwap=vwap_exit,
             exit_sig_st=st_flip_exit,
+            exit_sig_mt=mt_exit or (mt_reason is not None),
         )
 
         # === EXIT PRIORITY CHAIN ===
@@ -3122,6 +3690,8 @@ class LiveTest:
             position.close(option_price * (1 - slippage), timestamp, vwap_reason)
         elif st_flip_exit and not position.is_closed:
             position.close(option_price * (1 - slippage), timestamp, st_flip_reason)
+        elif mt_exit and state['mt_exit_enabled'] and not position.is_closed:
+            position.close(option_price * (1 - slippage), timestamp, mt_reason)
         elif ts_exit and not position.is_closed:
             position.close(option_price * (1 - slippage), timestamp, ts_reason)
         elif ai_exit and not position.is_closed:
@@ -3444,8 +4014,9 @@ class LiveRerun:
                 continue
 
             # Create position
-            entry_stock_price = stock_df.iloc[0]['close']
-            entry_time = stock_df.index[0]
+            entry_idx = 0
+            entry_stock_price = stock_df.iloc[entry_idx]['close']
+            entry_time = stock_df.index[entry_idx]
 
             # Use recorded option price if available
             option_bars = self._live_data.get('option_bars', {}).get(signal_id, [])
@@ -3453,12 +4024,27 @@ class LiveRerun:
             if option_bars:
                 entry_option_price = option_bars[0].get('mark_price')
 
+            # Check for delayed entry
+            delay_result = self.engine.find_delayed_entry(signal, stock_df, entry_idx)
+            delayed_entry_reason = None
+            if delay_result is False:
+                print(f"    Skipped: delayed entry — no valid entry in window")
+                continue
+            elif delay_result is not None:
+                entry_idx = delay_result['entry_idx']
+                entry_stock_price = delay_result['entry_stock_price']
+                entry_time = stock_df.index[entry_idx]
+                delayed_entry_reason = delay_result['delay_reason']
+                entry_option_price = delay_result.get('entry_option_price') or entry_option_price
+
             position, _ = self.engine.create_position(
                 signal=signal,
                 entry_stock_price=entry_stock_price,
                 entry_time=entry_time,
                 entry_option_price=entry_option_price
             )
+            if delayed_entry_reason:
+                position.delayed_entry_reason = delayed_entry_reason
 
             matrix = Databook(position)
 
@@ -3468,7 +4054,7 @@ class LiveRerun:
                 matrix=matrix,
                 stock_data=stock_df,
                 signal=signal,
-                entry_idx=0,
+                entry_idx=entry_idx,
                 entry_stock_price=entry_stock_price,
                 statsbooks=self.statsbooks,
                 spy_data=spy_data,

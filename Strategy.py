@@ -20,7 +20,9 @@ __all__ = ['MomentumPeak', 'MomentumPeakDetector', 'StatsBookExit', 'StatsBookDe
            'VolumeClimaxExit', 'VolumeClimaxDetector',
            'TimeStop', 'TimeStopDetector',
            'VWAPCrossExit', 'VWAPCrossDetector',
-           'SupertrendFlipExit', 'SupertrendFlipDetector']
+           'SupertrendFlipExit', 'SupertrendFlipDetector',
+           'MarketTrend', 'MarketTrendDetector',
+           'DeferredEntry', 'DeferredEntryFilter']
 
 
 # =============================================================================
@@ -46,11 +48,13 @@ class MomentumPeak:
             'rsi_oversold': 20,            # RSI oversold threshold (PUTs)
             'rsi_lookback': 5,             # Bars to check for recent extreme
             'rsi_drop_threshold': 10,      # Min RSI change from extreme
-            'ewo_declining_bars': 1,       # Consecutive EWO bars in adverse direction
+            'rsi_recovery_level': 30,      # RSI must exit extreme zone past this
+            'ewo_declining_bars': 3,       # Consecutive EWO bars in adverse direction
             'require_rsi_below_avg': True, # RSI vs RSI_10min_avg confirmation
             'stoch_overbought': 80,        # Stochastic overbought zone
             'stoch_oversold': 20,          # Stochastic oversold zone
             'use_stochastic': True,        # Enable stochastic crossover confirmation
+            'spread_contraction_bars': 3,  # Option price must decline N bars
         }
     """
 
@@ -74,17 +78,21 @@ class MomentumPeakDetector:
     1. Option profit >= min_profit_pct
     2. RSI reached overbought (>80) within lookback window
     3. RSI dropped by >= rsi_drop_threshold from peak
-    4. EWO declining for N consecutive bars
-    5. RSI crossed below RSI_10min_avg (optional)
-    6. Stochastic %K crossed below %D in overbought zone (optional)
+    4. RSI has dropped below (100 - rsi_recovery_level) to confirm exit from overbought
+    5. EWO declining for N consecutive bars
+    6. RSI crossed below RSI_10min_avg (optional)
+    7. Stochastic %K crossed below %D in overbought zone (optional)
+    8. Option price declining for N consecutive bars (spread contraction)
 
     For PUTs (stock bottomed out → sell put):
     1. Option profit >= min_profit_pct
     2. RSI reached oversold (<20) within lookback window
     3. RSI bounced up by >= rsi_drop_threshold from trough
-    4. EWO increasing for N consecutive bars
-    5. RSI crossed above RSI_10min_avg (optional)
-    6. Stochastic %K crossed above %D in oversold zone (optional)
+    4. RSI has risen above rsi_recovery_level to confirm exit from oversold
+    5. EWO increasing for N consecutive bars
+    6. RSI crossed above RSI_10min_avg (optional)
+    7. Stochastic %K crossed above %D in oversold zone (optional)
+    8. Option price declining for N consecutive bars (spread contraction)
     """
 
     def __init__(self, config, option_type=None):
@@ -93,11 +101,13 @@ class MomentumPeakDetector:
         self.rsi_oversold = config.get('rsi_oversold', 20)
         self.rsi_lookback = config.get('rsi_lookback', 5)
         self.rsi_drop_threshold = config.get('rsi_drop_threshold', 10)
-        self.ewo_declining_bars = config.get('ewo_declining_bars', 1)
+        self.rsi_recovery_level = config.get('rsi_recovery_level', 30)
+        self.ewo_declining_bars = config.get('ewo_declining_bars', 3)
         self.require_rsi_below_avg = config.get('require_rsi_below_avg', True)
         self.stoch_overbought = config.get('stoch_overbought', 80)
         self.stoch_oversold = config.get('stoch_oversold', 20)
         self.use_stochastic = config.get('use_stochastic', True)
+        self.spread_contraction_bars = config.get('spread_contraction_bars', 3)
 
         # Determine position direction
         ot = (option_type or '').upper()
@@ -107,8 +117,9 @@ class MomentumPeakDetector:
         self.ewo_history = []
         self.stoch_k_history = []
         self.stoch_d_history = []
+        self.spread_history = []
 
-    def update(self, pnl_pct, rsi, rsi_avg, ewo, stoch_k=np.nan, stoch_d=np.nan):
+    def update(self, pnl_pct, rsi, rsi_avg, ewo, stoch_k=np.nan, stoch_d=np.nan, option_price=np.nan):
         """
         Check for momentum peak exit signal.
 
@@ -119,6 +130,7 @@ class MomentumPeakDetector:
             ewo: Current EWO value
             stoch_k: Current Stochastic %K value
             stoch_d: Current Stochastic %D value
+            option_price: Current option price for spread contraction check
 
         Returns:
             (should_exit, exit_reason): Tuple. exit_reason is None if no exit.
@@ -127,6 +139,7 @@ class MomentumPeakDetector:
         self.ewo_history.append(ewo)
         self.stoch_k_history.append(stoch_k)
         self.stoch_d_history.append(stoch_d)
+        self.spread_history.append(option_price)
 
         # Need at least 2 bars of history
         if len(self.rsi_history) < 2 or len(self.ewo_history) < 2:
@@ -163,17 +176,25 @@ class MomentumPeakDetector:
         if rsi_drop < self.rsi_drop_threshold:
             return False, None
 
-        # 4. EWO is declining for N consecutive bars
+        # 4. RSI has actually exited the overbought zone (not just a minor dip within it)
+        if rsi > (100 - self.rsi_recovery_level):
+            return False, None
+
+        # 5. EWO is declining for N consecutive bars
         if not self._ewo_trending(declining=True):
             return False, None
 
-        # 5. RSI below its 10-min average (optional confirmation)
+        # 6. RSI below its 10-min average (optional confirmation)
         if self.require_rsi_below_avg and not np.isnan(rsi_avg):
             if rsi >= rsi_avg:
                 return False, None
 
-        # 6. Stochastic bearish crossover in overbought zone (optional)
+        # 7. Stochastic bearish crossover in overbought zone (optional)
         if self.use_stochastic and not self._stoch_crossover_bearish():
+            return False, None
+
+        # 8. Option price declining for N consecutive bars (spread contraction)
+        if not self._spread_contracting():
             return False, None
 
         return True, 'Momentum Peak'
@@ -196,17 +217,25 @@ class MomentumPeakDetector:
         if rsi_bounce < self.rsi_drop_threshold:
             return False, None
 
-        # 4. EWO is increasing for N consecutive bars (bullish reversal = bad for PUT)
+        # 4. RSI has actually exited the oversold zone (not just a minor bounce within it)
+        if rsi < self.rsi_recovery_level:
+            return False, None
+
+        # 5. EWO is increasing for N consecutive bars (bullish reversal = bad for PUT)
         if not self._ewo_trending(declining=False):
             return False, None
 
-        # 5. RSI above its 10-min average (optional confirmation — inverse of CALL)
+        # 6. RSI above its 10-min average (optional confirmation — inverse of CALL)
         if self.require_rsi_below_avg and not np.isnan(rsi_avg):
             if rsi <= rsi_avg:
                 return False, None
 
-        # 6. Stochastic bullish crossover in oversold zone (optional)
+        # 7. Stochastic bullish crossover in oversold zone (optional)
         if self.use_stochastic and not self._stoch_crossover_bullish():
+            return False, None
+
+        # 8. Option price declining for N consecutive bars (spread contraction)
+        if not self._spread_contracting():
             return False, None
 
         return True, 'Momentum Peak'
@@ -254,6 +283,21 @@ class MomentumPeakDetector:
             return False
         # %K was below %D and now crossed above, while in oversold zone
         return prev_k <= prev_d and curr_k > curr_d and prev_k <= self.stoch_oversold
+
+    def _spread_contracting(self):
+        """Check if option price has been declining for N consecutive bars."""
+        n = self.spread_contraction_bars
+        if n <= 0:
+            return True  # disabled
+        if len(self.spread_history) < n + 1:
+            return False
+        recent = self.spread_history[-(n + 1):]
+        for i in range(len(recent) - 1):
+            if np.isnan(recent[i]) or np.isnan(recent[i + 1]):
+                return False
+            if recent[i + 1] >= recent[i]:  # not contracting
+                return False
+        return True
 
 
 # =============================================================================
@@ -541,7 +585,7 @@ class AIExitSignalDetector:
         Args:
             bar_data: dict with current bar's indicator values
                 (stock_price, true_price, volume, vwap, ema_21, ewo, rsi,
-                 supertrend_direction, market_bias, ichimoku_*, etc.)
+                 supertrend_direction, ticker_trend, ichimoku_*, etc.)
             pnl_pct: Current position P&L percentage
             minutes_held: Minutes since entry
             option_price: Current option price
@@ -1691,3 +1735,439 @@ class SupertrendFlipDetector:
             return True, 'Supertrend Flip'
 
         return False, None
+
+
+# =============================================================================
+# INTERNAL - MarketTrend Exit Strategy
+# =============================================================================
+
+class MarketTrend:
+    """
+    Factory for creating MarketTrendDetector instances.
+
+    Evaluates whether the ticker's VWAP-based trend (-1/0/+1) supports
+    holding the current position, and whether SPY's trend aligns.
+
+    PUTs:
+      - Bearish region (-1) = favorable → hold
+      - Sideways (0) = warning → possible reversal
+      - Bullish (+1) = reversal confirmed → sell signal
+      - Entry in bullish region = high-risk, need reversal or exit
+
+    CALLs (inverse):
+      - Bullish region (+1) = favorable → hold
+      - Sideways (0) = warning → possible reversal
+      - Bearish (-1) = reversal confirmed → sell signal
+      - Entry in bearish region = high-risk, need reversal or exit
+
+    SPY divergence: if ticker & SPY were trending together and SPY turns,
+    evaluate profitability and consider exit (stocks trail SPY movement).
+
+    Config: BACKTEST_CONFIG['market_trend']
+        {
+            'enabled': True,
+            'exit_enabled': False,          # False = blue X flag only
+            'high_risk_grace_bars': 10,     # Bars to wait for reversal on bad entry
+            'spy_diverge_profit_pct': 5,    # Min profit for SPY-divergence exit
+        }
+    """
+
+    def __init__(self, config=None):
+        mt_config = config or Config.get_setting('backtest', 'market_trend', {})
+        self.enabled = mt_config.get('enabled', False)
+        self.exit_enabled = mt_config.get('exit_enabled', False)
+        self.config = mt_config
+
+    def create_detector(self, option_type):
+        """Create a new MarketTrendDetector for a position. Returns None if disabled."""
+        if not self.enabled:
+            return None
+        return MarketTrendDetector(self.config, option_type)
+
+
+class MarketTrendDetector:
+    """
+    Per-position detector that tracks ticker trend and SPY alignment.
+
+    State machine:
+      - 'Hold':     Trend is favorable for the contract type
+      - 'Warning':  Trend shifted to sideways (possible reversal)
+      - 'Sell':     Trend reversed against position → exit signal
+      - 'HighRisk': Entered against the trend, waiting for reversal
+
+    SPY divergence is tracked separately: if both were trending together
+    and SPY turns first, the assumption is the ticker will follow.
+    """
+
+    def __init__(self, config, option_type):
+        self.is_call = option_type.upper() in ['CALL', 'CALLS', 'C']
+        self.exit_enabled = config.get('exit_enabled', False)
+        self.high_risk_grace_bars = config.get('high_risk_grace_bars', 10)
+        self.spy_diverge_profit_pct = config.get('spy_diverge_profit_pct', 5)
+
+        # State
+        self.bar_count = 0
+        self.entry_ticker_trend = None   # Ticker trend at entry
+        self.entry_spy_trend = None      # SPY trend at entry
+        self.prev_spy_trend = None       # Previous bar's SPY trend
+        self.state = None                # Hold / Warning / Sell / HighRisk
+        self.high_risk = False           # Entered against the trend
+
+    def _favorable_trend(self):
+        """Return the trend value that is favorable for this contract type."""
+        return 1 if self.is_call else -1
+
+    def _adverse_trend(self):
+        """Return the trend value that is adverse for this contract type."""
+        return -1 if self.is_call else 1
+
+    def update(self, ticker_trend, spy_trend, pnl_pct):
+        """
+        Evaluate MarketTrend exit signal.
+
+        Args:
+            ticker_trend: Current ticker trend (-1, 0, +1)
+            spy_trend: Current SPY trend (-1, 0, +1)
+            pnl_pct: Current P&L percentage
+
+        Returns:
+            (should_exit, exit_reason, state): Tuple.
+                should_exit: True if position should close (respects exit_enabled).
+                exit_reason: String reason or None.
+                state: Current detector state string (Hold/Warning/Sell/HighRisk/SPY-Warning).
+        """
+        self.bar_count += 1
+
+        if np.isnan(ticker_trend) or np.isnan(spy_trend):
+            return False, None, self.state
+
+        favorable = self._favorable_trend()
+        adverse = self._adverse_trend()
+
+        # Record entry conditions on first bar
+        if self.entry_ticker_trend is None:
+            self.entry_ticker_trend = ticker_trend
+            self.prev_spy_trend = spy_trend
+            self.entry_spy_trend = spy_trend
+
+            # Determine if this is a high-risk entry (entered against the trend)
+            # PUT entered in bullish, or CALL entered in bearish
+            if ticker_trend == adverse:
+                self.high_risk = True
+                self.state = 'HighRisk'
+            elif ticker_trend == favorable:
+                self.state = 'Hold'
+            else:
+                self.state = 'Hold'  # Sideways entry is neutral
+
+            return False, None, self.state
+
+        # --- High-risk entry logic ---
+        # Entered against the trend: need a reversal to favorable or exit
+        if self.high_risk:
+            if ticker_trend == favorable:
+                # Reversed to favorable — no longer high risk, transition to Hold
+                self.high_risk = False
+                self.state = 'Hold'
+                self.prev_spy_trend = spy_trend
+                return False, None, self.state
+
+            if ticker_trend == 0:
+                # Moved to sideways — progress toward reversal, still risky
+                self.state = 'HighRisk'
+                self.prev_spy_trend = spy_trend
+                return False, None, self.state
+
+            # Still in adverse trend
+            if self.bar_count > self.high_risk_grace_bars:
+                # Grace period expired, no reversal → sell
+                self.state = 'Sell'
+                self.prev_spy_trend = spy_trend
+                if self.exit_enabled:
+                    return True, 'MarketTrend-HighRisk', self.state
+                return False, None, self.state
+
+            self.state = 'HighRisk'
+            self.prev_spy_trend = spy_trend
+            return False, None, self.state
+
+        # --- Normal entry logic (entered in favorable or sideways) ---
+
+        # Check ticker trend state
+        if ticker_trend == favorable:
+            self.state = 'Hold'
+        elif ticker_trend == 0:
+            # Sideways → warning (possible reversal)
+            self.state = 'Warning'
+        elif ticker_trend == adverse:
+            # Full reversal confirmed → sell signal
+            self.state = 'Sell'
+            self.prev_spy_trend = spy_trend
+            if self.exit_enabled:
+                return True, 'MarketTrend-Reversal', self.state
+            return False, None, self.state
+
+        # --- SPY divergence logic ---
+        # If ticker and SPY were both trending in our favorable direction
+        # and SPY now turns, the ticker is likely to follow.
+        spy_turned = (
+            self.prev_spy_trend == favorable
+            and spy_trend != favorable
+        )
+
+        if spy_turned and ticker_trend == favorable and not np.isnan(pnl_pct):
+            # SPY shifted but ticker hasn't yet — evaluate exit if profitable
+            if pnl_pct >= self.spy_diverge_profit_pct:
+                self.state = 'SPY-Warning'
+                self.prev_spy_trend = spy_trend
+                if self.exit_enabled:
+                    return True, 'MarketTrend-SPY', self.state
+                return False, None, self.state
+
+        self.prev_spy_trend = spy_trend
+        return False, None, self.state
+
+
+# =============================================================================
+# INTERNAL - Deferred Entry Filter
+# =============================================================================
+
+class DeferredEntry:
+    """
+    Factory for creating DeferredEntryFilter instances.
+
+    When entry RiskOutlook is HIGH, the system defers the actual entry
+    until an exhaustion confirmation signal fires — timing the entry
+    closer to the price extreme (peak for PUTs, trough for CALLs).
+
+    Three independent exhaustion filters run in parallel. The first one
+    to trigger causes entry:
+
+    1. Stochastic Overbought/Oversold Crossover
+       - Wait for Stoch %K to enter extreme zone (>90 for PUTs, <10 for CALLs)
+       - Then enter when %K crosses back through %D (reversal confirmed)
+
+    2. Volume Climax
+       - Wait for a volume bar >= volume_multiplier * rolling average
+       - Enter on the next bar (exhaustion spike followed by reversal)
+
+    3. Indicator Saturation (Contrarian)
+       - Count how many sub-indicators agree with the adverse direction
+       - When saturation_threshold+ are aligned, the extreme is likely near
+       - Enter when at least one flips back (consensus breaking)
+
+    If none fire within max_defer_bars, the original entry executes
+    (timeout fallback to avoid missing the trade entirely).
+
+    Config: BACKTEST_CONFIG['deferred_entry']
+    """
+
+    def __init__(self, config=None):
+        de_config = config or Config.get_setting('backtest', 'deferred_entry', {})
+        self.enabled = de_config.get('enabled', True)
+        self.config = de_config
+
+    def create_filter(self, option_type):
+        """Create a new DeferredEntryFilter for a position. Returns None if disabled."""
+        if not self.enabled:
+            return None
+        return DeferredEntryFilter(self.config, option_type)
+
+
+class DeferredEntryFilter:
+    """
+    Scans bar-by-bar for exhaustion confirmation before allowing entry.
+
+    For PUTs: waits for the underlying to reach an overbought extreme
+    and show signs of reversal (ideal put entry = underlying peak).
+
+    For CALLs: waits for the underlying to reach an oversold extreme
+    and show signs of reversal (ideal call entry = underlying trough).
+
+    Call update() each bar during the deferral window. When it returns
+    True, the entry should execute at that bar's price.
+    """
+
+    def __init__(self, config, option_type):
+        self.is_call = option_type.upper() in ['CALL', 'CALLS', 'C']
+        self.is_put = not self.is_call
+
+        # Stochastic crossover filter
+        self.stoch_enabled = config.get('stoch_enabled', True)
+        self.stoch_extreme_threshold = config.get('stoch_extreme_threshold', 90)
+        self.stoch_extreme_threshold_low = config.get('stoch_extreme_threshold_low', 10)
+        self.stoch_reached_extreme = False
+
+        # Volume climax filter
+        self.volume_enabled = config.get('volume_enabled', True)
+        self.volume_lookback = config.get('volume_lookback', 10)
+        self.volume_multiplier = config.get('volume_multiplier', 1.5)
+        self.volume_history = []
+        self.volume_climax_fired = False
+
+        # Indicator saturation filter
+        self.saturation_enabled = config.get('saturation_enabled', True)
+        self.saturation_threshold = config.get('saturation_threshold', 10)
+        self.peak_saturation_count = 0
+        self.saturation_reached = False
+
+        # Timeout
+        self.max_defer_bars = config.get('max_defer_bars', 10)
+        self.bar_count = 0
+
+        # Track which filter triggered
+        self.trigger_reason = None
+
+    def update(self, stoch_k, stoch_d, volume, rsi,
+               supertrend_direction, macd_histogram, roc,
+               ema_values, stock_price, atr_sl_value, ewo):
+        """
+        Evaluate whether exhaustion confirmation has occurred.
+
+        Args:
+            stoch_k: Stochastic %K value
+            stoch_d: Stochastic %D value
+            volume: Current bar volume
+            rsi: Current RSI value
+            supertrend_direction: Supertrend direction (+1/-1)
+            macd_histogram: MACD histogram value
+            roc: Rate of Change (30-bar)
+            ema_values: dict of {period: value} for EMAs
+            stock_price: Current stock close price
+            atr_sl_value: ATR-based stop loss level
+            ewo: Elliott Wave Oscillator value
+
+        Returns:
+            bool: True if entry should execute now
+        """
+        self.bar_count += 1
+
+        # --- Timeout: enter regardless after max_defer_bars ---
+        if self.bar_count >= self.max_defer_bars:
+            self.trigger_reason = 'Deferred-Timeout'
+            return True
+
+        triggered = False
+
+        # --- Filter 1: Stochastic Overbought/Oversold Crossover ---
+        if self.stoch_enabled and not np.isnan(stoch_k) and not np.isnan(stoch_d):
+            if self.is_put:
+                # For PUTs: wait for stoch to go overbought, then cross down
+                if stoch_k >= self.stoch_extreme_threshold:
+                    self.stoch_reached_extreme = True
+                if self.stoch_reached_extreme and stoch_k < stoch_d:
+                    self.trigger_reason = 'Deferred-StochCrossover'
+                    triggered = True
+            else:
+                # For CALLs: wait for stoch to go oversold, then cross up
+                if stoch_k <= self.stoch_extreme_threshold_low:
+                    self.stoch_reached_extreme = True
+                if self.stoch_reached_extreme and stoch_k > stoch_d:
+                    self.trigger_reason = 'Deferred-StochCrossover'
+                    triggered = True
+
+        # --- Filter 2: Volume Climax ---
+        if self.volume_enabled and not np.isnan(volume):
+            self.volume_history.append(volume)
+            if len(self.volume_history) > self.volume_lookback:
+                self.volume_history.pop(0)
+
+            if len(self.volume_history) >= 2:
+                avg_volume = sum(self.volume_history[:-1]) / len(self.volume_history[:-1])
+                if avg_volume > 0 and volume >= self.volume_multiplier * avg_volume:
+                    self.volume_climax_fired = True
+
+                # Enter on the bar AFTER the climax
+                if self.volume_climax_fired and volume < self.volume_multiplier * avg_volume:
+                    if not triggered:
+                        self.trigger_reason = 'Deferred-VolumeClimax'
+                    triggered = True
+
+        # --- Filter 3: Indicator Saturation (Contrarian) ---
+        if self.saturation_enabled:
+            adverse_count = self._count_adverse_indicators(
+                rsi, supertrend_direction, macd_histogram, roc,
+                ema_values, stock_price, atr_sl_value, ewo
+            )
+
+            if adverse_count > self.peak_saturation_count:
+                self.peak_saturation_count = adverse_count
+
+            if self.peak_saturation_count >= self.saturation_threshold:
+                self.saturation_reached = True
+
+            # Enter when consensus starts breaking (at least 2 fewer than peak)
+            if self.saturation_reached and adverse_count <= self.peak_saturation_count - 2:
+                if not triggered:
+                    self.trigger_reason = 'Deferred-Saturation'
+                triggered = True
+
+        return triggered
+
+    def _count_adverse_indicators(self, rsi, supertrend_direction,
+                                   macd_histogram, roc,
+                                   ema_values, stock_price,
+                                   atr_sl_value, ewo):
+        """
+        Count how many indicators are aligned AGAINST the position direction.
+
+        For PUTs, "adverse" means indicators are bullish (price going up).
+        For CALLs, "adverse" means indicators are bearish (price going down).
+
+        Returns:
+            int: count of adverse indicators (0-12 range)
+        """
+        count = 0
+
+        # RSI direction
+        if not np.isnan(rsi):
+            if self.is_put and rsi > 60:
+                count += 1
+            elif self.is_call and rsi < 40:
+                count += 1
+
+        # Supertrend direction
+        if not np.isnan(supertrend_direction):
+            if self.is_put and supertrend_direction > 0:
+                count += 1
+            elif self.is_call and supertrend_direction < 0:
+                count += 1
+
+        # MACD histogram
+        if not np.isnan(macd_histogram):
+            if self.is_put and macd_histogram > 0:
+                count += 1
+            elif self.is_call and macd_histogram < 0:
+                count += 1
+
+        # ROC direction
+        if not np.isnan(roc):
+            if self.is_put and roc > 0:
+                count += 1
+            elif self.is_call and roc < 0:
+                count += 1
+
+        # EWO direction
+        if not np.isnan(ewo):
+            if self.is_put and ewo > 0:
+                count += 1
+            elif self.is_call and ewo < 0:
+                count += 1
+
+        # EMA positioning (price vs each EMA)
+        for period, ema_val in (ema_values or {}).items():
+            if np.isnan(ema_val):
+                continue
+            if self.is_put and stock_price > ema_val:
+                count += 1
+            elif self.is_call and stock_price < ema_val:
+                count += 1
+
+        # ATR-SL positioning
+        if not np.isnan(atr_sl_value):
+            if self.is_put and stock_price > atr_sl_value:
+                count += 1
+            elif self.is_call and stock_price < atr_sl_value:
+                count += 1
+
+        return count
