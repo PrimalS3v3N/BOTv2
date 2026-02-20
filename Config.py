@@ -271,7 +271,7 @@ BACKTEST_CONFIG = {
     # Momentum Peak: Detect momentum exhaustion peaks for early exit
     # CALLs: RSI overbought→dropping + EWO declining + Stochastic bearish crossover
     # PUTs:  RSI oversold→bouncing + EWO increasing + Stochastic bullish crossover
-    # Designed to exit 1-2 bars after a peak, before the bulk of the reversal
+    # Designed to exit after confirmed momentum exhaustion, not minor bounces
     'momentum_peak': {
         'enabled': True,
         'min_profit_pct': 15,              # Only consider when option profit >= this %
@@ -279,11 +279,13 @@ BACKTEST_CONFIG = {
         'rsi_oversold': 20,                # RSI must have reached this recently (PUTs)
         'rsi_lookback': 5,                 # Bars back to check for RSI extreme
         'rsi_drop_threshold': 10,          # RSI must change by >= this from extreme
-        'ewo_declining_bars': 1,           # EWO must trend adversely for N bars
+        'rsi_recovery_level': 30,          # RSI must exit extreme zone past this level (PUTs: >, CALLs: < 100-this)
+        'ewo_declining_bars': 3,           # EWO must trend adversely for N consecutive bars
         'require_rsi_below_avg': True,     # Require RSI vs RSI_10min_avg confirmation
         'stoch_overbought': 80,            # Stochastic overbought zone threshold
         'stoch_oversold': 20,              # Stochastic oversold zone threshold
         'use_stochastic': True,            # Enable stochastic crossover confirmation
+        'spread_contraction_bars': 3,      # Option price must decline for N consecutive bars before exit (0=disabled)
     },
 
     # StatsBook Exit: Exit based on historical statistical bounds
@@ -410,6 +412,26 @@ BACKTEST_CONFIG = {
         'downtrend_monitor_bars': 3,       # If next N bars are all negative, sell
         'downtrend_drop_pct': 10,          # OR if option drops X% below entry, sell
         'downtrend_exit_reason': 'DownTrend-SL',  # Exit reason label for risk downtrend
+
+        # Delayed Entry: Delay purchases for signals in first 15 minutes of market open
+        # when buying into the initial momentum move (chasing).
+        #
+        # CALLs: If signal stock price > market open price → delay entry until:
+        #   1. Stock price pulls back below market open price (better entry), OR
+        #   2. Option price drops by half of initial_sl_pct below signal price (discount)
+        #
+        # PUTs (inverse): If signal stock price < market open price → delay entry until:
+        #   1. Stock price bounces above market open price (puts get cheaper), OR
+        #   2. Option price drops by half of initial_sl_pct below signal price (discount)
+        #
+        # The delay window extends up to delay_window_minutes after market open.
+        # If neither condition is met within the window, the trade is skipped.
+        'delayed_entry': {
+            'enabled': True,
+            'signal_window_minutes': 15,     # Signals arriving in first N minutes qualify
+            'delay_window_minutes': 30,      # Maximum delay window from market open
+            'sl_discount_factor': 0.5,       # Fraction of initial_sl_pct for option discount
+        },
     },
 
     # SPY Market Gauge: Use SPY as overall market health indicator
@@ -428,10 +450,31 @@ BACKTEST_CONFIG = {
         },
     },
 
-    # Bias sensitivity: Controls the sideways band width for market bias calculation.
+    # Bias sensitivity: Controls the sideways band width for market trend calculation.
     # Smaller = more sensitive (more bull/bear signals), Larger = wider band (more sideways).
     # Default was 0.10, reduced to 0.05 for higher sensitivity.
     'bias_sideways_band': 0.05,
+
+    # ==========================================================================
+    # MarketTrend: Trend-based exit system
+    # ==========================================================================
+    # Computes ticker_trend and spy_trend (-1/0/+1) using VWAP + sideways band.
+    # Evaluates whether the trade's trend aligns with overall SPY movement.
+    #
+    # Logic:
+    #   PUTs  - bearish region = hold, sideways = warning, bullish = sell (reversal)
+    #   CALLs - bullish region = hold, sideways = warning, bearish = sell (reversal)
+    #   Entering against the trend = high-risk, need quick reversal or exit.
+    #   SPY divergence: if both trending together and SPY turns, evaluate exit.
+    #
+    # exit_enabled=False → still computes signals but shows blue 'X' on dashboard
+    # instead of actually closing the position.
+    'market_trend': {
+        'enabled': True,
+        'exit_enabled': False,             # False = visual-only (blue X), True = close position
+        'high_risk_grace_bars': 10,        # Bars to wait for reversal on high-risk entry
+        'spy_diverge_profit_pct': 5,       # Min profit % to trigger SPY-divergence exit
+    },
 
     # ==========================================================================
     # Order Book / Book Imbalance (Webull Integration)
@@ -570,7 +613,7 @@ DATAFRAME_COLUMNS = {
         'entry_price', 'entry_time', 'exit_price', 'exit_time', 'exit_reason',
         'contracts', 'highest_price', 'lowest_price',
         'pnl', 'pnl_pct', 'minutes_held',
-        'max_price_to_eod',
+        'max_price_to_eod', 'delayed_entry',
     ],
 
     # Per-bar tracking data from Databook (Test.py)
@@ -579,7 +622,11 @@ DATAFRAME_COLUMNS = {
         'option_price', 'volume', 'holding', 'entry_price',
         'pnl', 'pnl_pct', 'highest_price', 'lowest_price', 'minutes_held',
         'risk', 'risk_reasons', 'risk_trend',
-        'market_bias',
+        # MarketTrend columns
+        'ticker_trend',            # Ticker VWAP-based trend: -1 (bearish), 0 (sideways), +1 (bullish)
+        'spy_trend',               # SPY VWAP-based trend: -1 (bearish), 0 (sideways), +1 (bullish)
+        'market_trend',            # True = ticker & SPY trends match, False = diverging
+        'mt_state',                # MarketTrend detector state: Hold / Warning / Sell / HighRisk
         'spy_price', 'spy_since_open', 'spy_1m', 'spy_5m', 'spy_15m', 'spy_30m', 'spy_1h',
         'ticker_since_open', 'ticker_1m', 'ticker_5m', 'ticker_15m', 'ticker_30m', 'ticker_1h',
         'vwap', 'ema_10', 'ema_21', 'ema_50', 'ema_100', 'ema_200',
@@ -615,6 +662,7 @@ DATAFRAME_COLUMNS = {
         'exit_sig_ts',             # Time Stop exit triggered
         'exit_sig_vwap',           # VWAP Cross exit triggered
         'exit_sig_st',             # Supertrend Flip exit triggered
+        'exit_sig_mt',             # MarketTrend exit triggered (or flagged if exit_enabled=False)
         # Deferred entry columns
         'deferred_active',         # True if entry is being deferred (waiting for exhaustion)
         'deferred_trigger',        # Trigger reason when deferred entry fires (e.g. 'Deferred-StochCrossover')
@@ -634,7 +682,7 @@ DATAFRAME_COLUMNS = {
         'volume_sum', 'bar_count',
         'pnl_pct_start', 'pnl_pct_end', 'pnl_pct_max', 'pnl_pct_min',
         'rsi_avg', 'ewo_avg', 'vwap_avg',
-        'market_bias_mode',
+        'ticker_trend_mode',
         'exit_signals_fired',
         'signal_id',
     ],
@@ -651,39 +699,8 @@ DATAFRAME_COLUMNS = {
     ],
 
     # Dashboard databook display columns (Dashboard.py)
-    # Mirrors 'databook' columns so the dashboard table reflects the full databook.
-    'dashboard_databook': [
-        'timestamp', 'stock_price', 'stock_high', 'stock_low', 'true_price',
-        'option_price', 'volume', 'holding', 'entry_price',
-        'pnl', 'pnl_pct', 'highest_price', 'lowest_price', 'minutes_held',
-        'risk', 'risk_reasons', 'risk_trend',
-        'market_bias',
-        'spy_price', 'spy_since_open', 'spy_1m', 'spy_5m', 'spy_15m', 'spy_30m', 'spy_1h',
-        'ticker_since_open', 'ticker_1m', 'ticker_5m', 'ticker_15m', 'ticker_30m', 'ticker_1h',
-        'vwap', 'ema_10', 'ema_21', 'ema_50', 'ema_100', 'ema_200',
-        'vwap_ema_avg', 'emavwap', 'ewo', 'ewo_15min_avg', 'rsi', 'rsi_10min_avg',
-        'supertrend', 'supertrend_direction',
-        'ichimoku_tenkan', 'ichimoku_kijun', 'ichimoku_senkou_a', 'ichimoku_senkou_b',
-        'atr_sl',
-        # MACD indicator columns
-        'macd_line', 'macd_signal', 'macd_histogram',
-        # Price momentum (ROC)
-        'roc',
-        'ai_outlook_1m', 'ai_outlook_5m', 'ai_outlook_30m', 'ai_outlook_1h',
-        'ai_action', 'ai_reason',
-        # Options Exit System columns (SL = stop loss, TP = take profit)
-        'sl_trailing',
-        'sl_hard',
-        'tp_risk_outlook',
-        'tp_risk_reasons',
-        'tp_trend_30m',
-        'sl_ema_reversal',
-        'tp_confirmed',
-        # Exit signal flags (per-bar boolean: which signals would fire)
-        'exit_sig_sb', 'exit_sig_mp', 'exit_sig_ai',
-        'exit_sig_closure_peak',
-        'exit_sig_oe',
-    ],
+    # NOTE: Overwritten below by alias to 'databook'. Kept as documentation reference.
+    'dashboard_databook': [],
 }
 
 # Resolve alias: dashboard_databook uses the same columns as databook
