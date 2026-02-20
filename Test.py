@@ -660,7 +660,8 @@ class Databook:
                    exit_sig_closure_peak=None,
                    exit_sig_oe=None,
                    exit_sig_vc=None, exit_sig_ts=None, exit_sig_vwap=None,
-                   exit_sig_st=None):
+                   exit_sig_st=None,
+                   deferred_active=False, deferred_trigger=None):
         """Add a tracking record."""
         pnl_pct = self.position.get_pnl_pct(option_price) if holding else np.nan
 
@@ -786,6 +787,9 @@ class Databook:
             'exit_sig_ts': exit_sig_ts,
             'exit_sig_vwap': exit_sig_vwap,
             'exit_sig_st': exit_sig_st,
+            # Deferred entry columns
+            'deferred_active': deferred_active,
+            'deferred_trigger': deferred_trigger,
         }
 
         self.records.append(record)
@@ -1549,6 +1553,14 @@ class SimulationEngine:
         st_flip_strategy = Strategy.SupertrendFlipExit(self.config.get('supertrend_flip_exit', {}))
         st_flip_detector = st_flip_strategy.create_detector(position.option_type)
 
+        # Deferred entry filter (for HIGH risk entries)
+        de_strategy = Strategy.DeferredEntry(self.config.get('deferred_entry', {}))
+        de_filter = de_strategy.create_filter(position.option_type)
+        de_active = False           # True when deferring entry
+        de_triggered = False        # True once deferred entry fires
+        de_trigger_reason = None    # Which filter triggered entry
+        de_new_entry_idx = None     # Actual entry bar index (after deferral)
+
         # Closure - Peak settings
         CP_config = self.config.get('closure_peak', {})
         CP_enabled = CP_config.get('enabled', True)
@@ -1677,10 +1689,101 @@ class SimulationEngine:
             spy_price, spy_gauge_data = _spy_gauges[i]
             _, ticker_gauge_data = _ticker_gauges[i]
 
+            # --- Deferred Entry: RiskOutlook assessment at signal bar ---
+            # On the signal bar, assess risk FIRST. If HIGH and deferred entry
+            # is enabled, switch to deferral mode instead of entering immediately.
+            if i == entry_idx and not oe_favorability_assessed:
+                oe_favorability_assessed = True
+                ema_vals = {10: ema_10, 21: ema_21, 50: ema_50, 100: ema_100, 200: ema_200}
+                open_price = stock_data.iloc[0]['close']
+                roc_day = ((stock_price - open_price) / open_price) * 100 if open_price > 0 else np.nan
+                fav_level, fav_reasons = oe_detector.RiskOutlook(
+                    rsi=rsi,
+                    rsi_avg=rsi_10min_avg,
+                    ema_values=ema_vals,
+                    stock_price=stock_price,
+                    atr_sl_value=atr_sl_value,
+                    macd_histogram=macd_histogram_val,
+                    roc_30m=roc_val,
+                    roc_day=roc_day,
+                    supertrend_direction=st_direction,
+                    ewo=ewo,
+                    ewo_avg=ewo_15min_avg,
+                    stoch_k=stoch_k_val,
+                    stoch_d=stoch_d_val,
+                )
+
+                # Risk Assessment (also once at entry)
+                if not risk_assessed and risk_enabled:
+                    risk_assessed = True
+                    risk_level, risk_reasons = self.assess_risk(
+                        rsi, rsi_10min_avg, ewo_15min_avg,
+                        statsbooks.get(position.ticker),
+                        timestamp, signal['signal_time']
+                    )
+                    if risk_level == 'HIGH':
+                        print(f"    RISK: HIGH [{risk_reasons}]")
+                        oe_detector.is_high_risk = True
+
+                if fav_level == 'HIGH':
+                    print(f"    RISK OUTLOOK: HIGH [{fav_reasons}]")
+
+                # Activate deferred entry if risk is HIGH and filter available
+                if fav_level == 'HIGH' and de_filter is not None:
+                    de_active = True
+                    holding = False  # Don't enter yet — wait for exhaustion
+                    print(f"    DEFERRED ENTRY: Waiting for exhaustion confirmation (max {de_filter.max_defer_bars} bars)")
+
+            # --- Deferred Entry: Scan for exhaustion confirmation ---
+            if de_active and not de_triggered and i > entry_idx:
+                ema_vals = {10: ema_10, 21: ema_21, 50: ema_50, 100: ema_100, 200: ema_200}
+                should_enter = de_filter.update(
+                    stoch_k=stoch_k_val,
+                    stoch_d=stoch_d_val,
+                    volume=volume,
+                    rsi=rsi,
+                    supertrend_direction=st_direction,
+                    macd_histogram=macd_histogram_val,
+                    roc=roc_val,
+                    ema_values=ema_vals,
+                    stock_price=stock_price,
+                    atr_sl_value=atr_sl_value,
+                    ewo=ewo,
+                )
+                if should_enter:
+                    de_triggered = True
+                    de_active = False
+                    de_trigger_reason = de_filter.trigger_reason
+                    de_new_entry_idx = i
+
+                    # Re-enter at the current bar's price
+                    new_entry_option_price = option_price * (1 + self.slippage_pct)
+                    position.entry_price = new_entry_option_price
+                    position.entry_time = timestamp
+                    position.current_price = new_entry_option_price
+                    position.highest_price = new_entry_option_price
+                    position.lowest_price = new_entry_option_price
+
+                    # Reset the OptionsExit detector with new entry price
+                    oe_detector.entry_option_price = new_entry_option_price
+                    oe_detector.hard_sl_price = new_entry_option_price * (1 - oe_detector.initial_sl_pct / 100)
+                    oe_detector.trailing_sl_price = None
+                    oe_detector.trailing_active = False
+                    oe_detector.highest_profit_pct = 0.0
+                    oe_detector.bar_count = 0
+                    oe_detector._confirmation_bars = []
+                    oe_detector.confirmed = 'Pending'
+
+                    holding = True
+                    entry_stock_price = stock_price
+                    print(f"    DEFERRED ENTRY TRIGGERED: {de_trigger_reason} at bar {de_filter.bar_count} (${stock_price:.2f})")
+                else:
+                    holding = False  # Still waiting
+
             if holding:
                 position.update(timestamp, option_price, stock_price)
 
-                # --- Risk Assessment (once at entry) ---
+                # --- Risk Assessment (once at entry, if not already done above) ---
                 if not risk_assessed and risk_enabled:
                     risk_assessed = True
                     risk_level, risk_reasons = self.assess_risk(
@@ -1695,30 +1798,6 @@ class SimulationEngine:
                 oe_state = {}
                 oe_exit = False
                 oe_reason = None
-                if oe_detector and not oe_favorability_assessed:
-                    oe_favorability_assessed = True
-                    ema_vals = {10: ema_10, 21: ema_21, 50: ema_50, 100: ema_100, 200: ema_200}
-                    open_price = stock_data.iloc[0]['close']
-                    roc_day = ((stock_price - open_price) / open_price) * 100 if open_price > 0 else np.nan
-                    fav_level, fav_reasons = oe_detector.RiskOutlook(
-                        rsi=rsi,
-                        rsi_avg=rsi_10min_avg,
-                        ema_values=ema_vals,
-                        stock_price=stock_price,
-                        atr_sl_value=atr_sl_value,
-                        macd_histogram=macd_histogram_val,
-                        roc_30m=roc_val,
-                        roc_day=roc_day,
-                        supertrend_direction=st_direction,
-                        ewo=ewo,
-                        ewo_avg=ewo_15min_avg,
-                        stoch_k=stoch_k_val,
-                        stoch_d=stoch_d_val,
-                    )
-                    if risk_level == 'HIGH':
-                        oe_detector.is_high_risk = True
-                    if fav_level == 'HIGH':
-                        print(f"    RISK OUTLOOK: HIGH [{fav_reasons}]")
 
                 # --- Options Exit: Per-bar update ---
                 if oe_detector and not position.is_closed:
@@ -1873,6 +1952,8 @@ class SimulationEngine:
                     exit_sig_ai=ai_exit, exit_sig_closure_peak=cp_signal, exit_sig_oe=oe_exit,
                     exit_sig_vc=vc_exit, exit_sig_ts=ts_exit, exit_sig_vwap=vwap_exit,
                     exit_sig_st=st_flip_exit,
+                    deferred_active=de_active,
+                    deferred_trigger=de_trigger_reason if (de_triggered and i == de_new_entry_idx) else None,
                 )
 
                 # === EXIT PRIORITY CHAIN ===
@@ -1934,6 +2015,8 @@ class SimulationEngine:
                     stoch_k=stoch_k_val, stoch_d=stoch_d_val,
                     vpoc=vpoc_val, book_imbalance=np.nan,
                     spy_price=spy_price, spy_gauge=spy_gauge_data, ticker_gauge=ticker_gauge_data,
+                    deferred_active=de_active,
+                    deferred_trigger=de_trigger_reason if (de_triggered and i == de_new_entry_idx) else None,
                 )
 
         # Close at end of data if still open

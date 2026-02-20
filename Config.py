@@ -345,6 +345,37 @@ BACKTEST_CONFIG = {
         'confirm_bars': 1,                 # Bars adverse direction must persist (1 = immediate)
     },
 
+    # Deferred Entry: When RiskOutlook is HIGH, defer the actual entry until
+    # an exhaustion confirmation signal fires. Instead of entering immediately
+    # on the Discord signal, wait for the underlying to reach an extreme and
+    # show reversal signs — timing the entry closer to the peak (PUTs) or
+    # trough (CALLs). Three parallel filters; first to fire triggers entry.
+    # Falls back to immediate entry after max_defer_bars timeout.
+    'deferred_entry': {
+        'enabled': True,
+
+        # Maximum bars to wait for exhaustion confirmation before entering anyway
+        'max_defer_bars': 10,
+
+        # --- Filter 1: Stochastic Overbought/Oversold Crossover ---
+        # Wait for Stoch %K to reach extreme zone, then cross back through %D
+        'stoch_enabled': True,
+        'stoch_extreme_threshold': 90,     # PUTs: %K must reach this (overbought)
+        'stoch_extreme_threshold_low': 10, # CALLs: %K must reach this (oversold)
+
+        # --- Filter 2: Volume Climax ---
+        # Detect volume spike >= multiplier * rolling avg, enter next bar
+        'volume_enabled': True,
+        'volume_lookback': 10,             # Bars for rolling avg volume
+        'volume_multiplier': 1.5,          # Volume spike threshold (Nx avg)
+
+        # --- Filter 3: Indicator Saturation (Contrarian) ---
+        # Count adverse indicators; when saturation_threshold+ agree then
+        # at least 2 flip back, the extreme is breaking
+        'saturation_enabled': True,
+        'saturation_threshold': 10,        # N of ~12 indicators aligned = saturated
+    },
+
     # AI Exit Signal: Local LLM-based exit signal generation
     # Runs a quantized model via llama-cpp-python on GPU during backtesting.
     # The model analyzes multi-timeframe technical data and recommends hold/sell.
@@ -584,6 +615,9 @@ DATAFRAME_COLUMNS = {
         'exit_sig_ts',             # Time Stop exit triggered
         'exit_sig_vwap',           # VWAP Cross exit triggered
         'exit_sig_st',             # Supertrend Flip exit triggered
+        # Deferred entry columns
+        'deferred_active',         # True if entry is being deferred (waiting for exhaustion)
+        'deferred_trigger',        # Trigger reason when deferred entry fires (e.g. 'Deferred-StochCrossover')
     ],
 
     # Metadata columns appended to databook (Test.py)
