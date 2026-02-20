@@ -271,7 +271,7 @@ BACKTEST_CONFIG = {
     # Momentum Peak: Detect momentum exhaustion peaks for early exit
     # CALLs: RSI overbought→dropping + EWO declining + Stochastic bearish crossover
     # PUTs:  RSI oversold→bouncing + EWO increasing + Stochastic bullish crossover
-    # Designed to exit 1-2 bars after a peak, before the bulk of the reversal
+    # Designed to exit after confirmed momentum exhaustion, not minor bounces
     'momentum_peak': {
         'enabled': True,
         'min_profit_pct': 15,              # Only consider when option profit >= this %
@@ -279,11 +279,13 @@ BACKTEST_CONFIG = {
         'rsi_oversold': 20,                # RSI must have reached this recently (PUTs)
         'rsi_lookback': 5,                 # Bars back to check for RSI extreme
         'rsi_drop_threshold': 10,          # RSI must change by >= this from extreme
-        'ewo_declining_bars': 1,           # EWO must trend adversely for N bars
+        'rsi_recovery_level': 30,          # RSI must exit extreme zone past this level (PUTs: >, CALLs: < 100-this)
+        'ewo_declining_bars': 3,           # EWO must trend adversely for N consecutive bars
         'require_rsi_below_avg': True,     # Require RSI vs RSI_10min_avg confirmation
         'stoch_overbought': 80,            # Stochastic overbought zone threshold
         'stoch_oversold': 20,              # Stochastic oversold zone threshold
         'use_stochastic': True,            # Enable stochastic crossover confirmation
+        'spread_contraction_bars': 3,      # Option price must decline for N consecutive bars before exit (0=disabled)
     },
 
     # StatsBook Exit: Exit based on historical statistical bounds

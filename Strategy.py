@@ -47,11 +47,13 @@ class MomentumPeak:
             'rsi_oversold': 20,            # RSI oversold threshold (PUTs)
             'rsi_lookback': 5,             # Bars to check for recent extreme
             'rsi_drop_threshold': 10,      # Min RSI change from extreme
-            'ewo_declining_bars': 1,       # Consecutive EWO bars in adverse direction
+            'rsi_recovery_level': 30,      # RSI must exit extreme zone past this
+            'ewo_declining_bars': 3,       # Consecutive EWO bars in adverse direction
             'require_rsi_below_avg': True, # RSI vs RSI_10min_avg confirmation
             'stoch_overbought': 80,        # Stochastic overbought zone
             'stoch_oversold': 20,          # Stochastic oversold zone
             'use_stochastic': True,        # Enable stochastic crossover confirmation
+            'spread_contraction_bars': 3,  # Option price must decline N bars
         }
     """
 
@@ -75,17 +77,21 @@ class MomentumPeakDetector:
     1. Option profit >= min_profit_pct
     2. RSI reached overbought (>80) within lookback window
     3. RSI dropped by >= rsi_drop_threshold from peak
-    4. EWO declining for N consecutive bars
-    5. RSI crossed below RSI_10min_avg (optional)
-    6. Stochastic %K crossed below %D in overbought zone (optional)
+    4. RSI has dropped below (100 - rsi_recovery_level) to confirm exit from overbought
+    5. EWO declining for N consecutive bars
+    6. RSI crossed below RSI_10min_avg (optional)
+    7. Stochastic %K crossed below %D in overbought zone (optional)
+    8. Option price declining for N consecutive bars (spread contraction)
 
     For PUTs (stock bottomed out → sell put):
     1. Option profit >= min_profit_pct
     2. RSI reached oversold (<20) within lookback window
     3. RSI bounced up by >= rsi_drop_threshold from trough
-    4. EWO increasing for N consecutive bars
-    5. RSI crossed above RSI_10min_avg (optional)
-    6. Stochastic %K crossed above %D in oversold zone (optional)
+    4. RSI has risen above rsi_recovery_level to confirm exit from oversold
+    5. EWO increasing for N consecutive bars
+    6. RSI crossed above RSI_10min_avg (optional)
+    7. Stochastic %K crossed above %D in oversold zone (optional)
+    8. Option price declining for N consecutive bars (spread contraction)
     """
 
     def __init__(self, config, option_type=None):
@@ -94,11 +100,13 @@ class MomentumPeakDetector:
         self.rsi_oversold = config.get('rsi_oversold', 20)
         self.rsi_lookback = config.get('rsi_lookback', 5)
         self.rsi_drop_threshold = config.get('rsi_drop_threshold', 10)
-        self.ewo_declining_bars = config.get('ewo_declining_bars', 1)
+        self.rsi_recovery_level = config.get('rsi_recovery_level', 30)
+        self.ewo_declining_bars = config.get('ewo_declining_bars', 3)
         self.require_rsi_below_avg = config.get('require_rsi_below_avg', True)
         self.stoch_overbought = config.get('stoch_overbought', 80)
         self.stoch_oversold = config.get('stoch_oversold', 20)
         self.use_stochastic = config.get('use_stochastic', True)
+        self.spread_contraction_bars = config.get('spread_contraction_bars', 3)
 
         # Determine position direction
         ot = (option_type or '').upper()
@@ -108,8 +116,9 @@ class MomentumPeakDetector:
         self.ewo_history = []
         self.stoch_k_history = []
         self.stoch_d_history = []
+        self.spread_history = []
 
-    def update(self, pnl_pct, rsi, rsi_avg, ewo, stoch_k=np.nan, stoch_d=np.nan):
+    def update(self, pnl_pct, rsi, rsi_avg, ewo, stoch_k=np.nan, stoch_d=np.nan, option_price=np.nan):
         """
         Check for momentum peak exit signal.
 
@@ -120,6 +129,7 @@ class MomentumPeakDetector:
             ewo: Current EWO value
             stoch_k: Current Stochastic %K value
             stoch_d: Current Stochastic %D value
+            option_price: Current option price for spread contraction check
 
         Returns:
             (should_exit, exit_reason): Tuple. exit_reason is None if no exit.
@@ -128,6 +138,7 @@ class MomentumPeakDetector:
         self.ewo_history.append(ewo)
         self.stoch_k_history.append(stoch_k)
         self.stoch_d_history.append(stoch_d)
+        self.spread_history.append(option_price)
 
         # Need at least 2 bars of history
         if len(self.rsi_history) < 2 or len(self.ewo_history) < 2:
@@ -164,17 +175,25 @@ class MomentumPeakDetector:
         if rsi_drop < self.rsi_drop_threshold:
             return False, None
 
-        # 4. EWO is declining for N consecutive bars
+        # 4. RSI has actually exited the overbought zone (not just a minor dip within it)
+        if rsi > (100 - self.rsi_recovery_level):
+            return False, None
+
+        # 5. EWO is declining for N consecutive bars
         if not self._ewo_trending(declining=True):
             return False, None
 
-        # 5. RSI below its 10-min average (optional confirmation)
+        # 6. RSI below its 10-min average (optional confirmation)
         if self.require_rsi_below_avg and not np.isnan(rsi_avg):
             if rsi >= rsi_avg:
                 return False, None
 
-        # 6. Stochastic bearish crossover in overbought zone (optional)
+        # 7. Stochastic bearish crossover in overbought zone (optional)
         if self.use_stochastic and not self._stoch_crossover_bearish():
+            return False, None
+
+        # 8. Option price declining for N consecutive bars (spread contraction)
+        if not self._spread_contracting():
             return False, None
 
         return True, 'Momentum Peak'
@@ -197,17 +216,25 @@ class MomentumPeakDetector:
         if rsi_bounce < self.rsi_drop_threshold:
             return False, None
 
-        # 4. EWO is increasing for N consecutive bars (bullish reversal = bad for PUT)
+        # 4. RSI has actually exited the oversold zone (not just a minor bounce within it)
+        if rsi < self.rsi_recovery_level:
+            return False, None
+
+        # 5. EWO is increasing for N consecutive bars (bullish reversal = bad for PUT)
         if not self._ewo_trending(declining=False):
             return False, None
 
-        # 5. RSI above its 10-min average (optional confirmation — inverse of CALL)
+        # 6. RSI above its 10-min average (optional confirmation — inverse of CALL)
         if self.require_rsi_below_avg and not np.isnan(rsi_avg):
             if rsi <= rsi_avg:
                 return False, None
 
-        # 6. Stochastic bullish crossover in oversold zone (optional)
+        # 7. Stochastic bullish crossover in oversold zone (optional)
         if self.use_stochastic and not self._stoch_crossover_bullish():
+            return False, None
+
+        # 8. Option price declining for N consecutive bars (spread contraction)
+        if not self._spread_contracting():
             return False, None
 
         return True, 'Momentum Peak'
@@ -255,6 +282,21 @@ class MomentumPeakDetector:
             return False
         # %K was below %D and now crossed above, while in oversold zone
         return prev_k <= prev_d and curr_k > curr_d and prev_k <= self.stoch_oversold
+
+    def _spread_contracting(self):
+        """Check if option price has been declining for N consecutive bars."""
+        n = self.spread_contraction_bars
+        if n <= 0:
+            return True  # disabled
+        if len(self.spread_history) < n + 1:
+            return False
+        recent = self.spread_history[-(n + 1):]
+        for i in range(len(recent) - 1):
+            if np.isnan(recent[i]) or np.isnan(recent[i + 1]):
+                return False
+            if recent[i + 1] >= recent[i]:  # not contracting
+                return False
+        return True
 
 
 # =============================================================================
