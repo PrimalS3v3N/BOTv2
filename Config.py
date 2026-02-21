@@ -431,6 +431,8 @@ BACKTEST_CONFIG = {
 
         # --- Trailing Stop Loss ---
         'trail_activation_pct': 10,        # Engage trailing TP when profit margin >= X%
+        'trail_cheap_option_threshold': 0.40,  # Options priced below this: double trail_activation_pct
+                                                # Cheap options have amplified % swings on small moves
         'trail_base_floor_pct': 5,         # At activation: lock in X% above entry as floor
         'trail_early_floor_minutes': 5,    # First N minutes: SL floor = 0% (breakeven) instead of base
 
