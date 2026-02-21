@@ -19,26 +19,6 @@ try:
 except ImportError:
     pass
 
-
-# --- Initialization helper (must run before DISCORD_CONFIG) ---
-def _load_discord_token_from_excel():
-    """Load Discord token from Setting.xlsx (Row 1, Column B)."""
-    try:
-        import pandas as pd
-        config_dir = os.path.dirname(os.path.abspath(__file__))
-        excel_path = os.path.join(config_dir, 'Setting.xlsx')
-        if os.path.exists(excel_path):
-            df = pd.read_excel(excel_path, header=None)
-            token = df.iloc[0, 1]
-            if pd.notna(token):
-                return str(token).strip()
-    except Exception as e:
-        print(f"Warning: Could not load Discord token from Setting.xlsx: {e}")
-    return ''
-
-_DISCORD_TOKEN_FROM_EXCEL = _load_discord_token_from_excel()
-
-
 # =============================================================================
 # FEATURE TOGGLES (Master On/Off Switches)
 # =============================================================================
@@ -64,7 +44,7 @@ VOLUME_CLIMAX_EXIT_ENABLED      = True      # Volume spike + reversal exit
 TIME_STOP_ENABLED               = True      # Exit stale positions after N minutes
 VWAP_CROSS_EXIT_ENABLED         = True      # Price crosses VWAP against position
 SUPERTREND_FLIP_EXIT_ENABLED    = True      # Supertrend trend reversal exit
-MARKET_TREND_ENABLED            = True      # Trend-based exit system (compute signals)
+MARKET_TREND_ENABLED            = False      # Trend-based exit system (compute signals)
 MARKET_TREND_EXIT_ENABLED       = False     # Actually close positions on MarketTrend signal
 AI_EXIT_SIGNAL_ENABLED          = False     # Local LLM-based exit (requires GGUF model file)
 BOOK_IMBALANCE_ENABLED          = False     # Order book imbalance (placeholder: Webull L2)
@@ -84,69 +64,6 @@ VPOC_INDICATOR_ENABLED          = True      # Calculate Volume Point of Control
 
 
 # =============================================================================
-# SIGNAL MODULE (Signal.py, Test.py)
-# =============================================================================
-
-DISCORD_CONFIG = {
-    'token': _DISCORD_TOKEN_FROM_EXCEL or os.getenv('DISCORD_TOKEN', ''),  # Auth token from Setting.xlsx or env
-    'channel_id': os.getenv('DISCORD_CHANNEL_ID', '748401380288364575'),   # Signal channel ID
-    'api_version': 'v10',                          # Discord API version
-    'base_url': 'https://discord.com/api',         # Discord API base URL
-    'send_timeout': 0.35,                          # Send timeout (seconds)
-    'receive_timeout': 0.35,                       # Receive timeout (seconds)
-    'message_limit': 20,                           # Messages per request (normal mode)
-    'test_message_limit': 100,                     # Messages per request (test mode)
-    'alert_marker': '<a:RedAlert:759583962237763595>',  # Discord alert emoji ID
-    'rate_limit': {
-        'min_delay': .5,                          # Min seconds between requests
-        'max_delay': 1.5,                          # Max seconds between requests
-        'batch_size': 75,                          # Messages per request
-        'long_pause_chance': 0.15,                 # Chance of longer pause (15%)
-        'long_pause_min': 1.0,                     # Long pause min (seconds)
-        'long_pause_max': 2.0,                    # Long pause max (seconds)
-    },
-    'spoof_browser': True,                         # Enable browser spoofing
-    'browser_config': {
-        'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36 Edg/144.0.0.0',
-        'accept': '*/*',
-        'accept_language': 'en-US,en;q=0.9',
-        'accept_encoding': 'gzip, deflate, br',
-        'connection': 'keep-alive',
-        'cache_control': 'no-cache',
-        'pragma': 'no-cache',
-        'sec_ch_ua': '"Not_A Brand";v="8", "Chromium";v="144", "Microsoft Edge";v="144"',
-        'sec_ch_ua_mobile': '?0',
-        'sec_ch_ua_platform': '"Windows"',
-        'sec_fetch_dest': 'empty',
-        'sec_fetch_mode': 'cors',
-        'sec_fetch_site': 'same-origin',
-        'x_discord_locale': 'en-US',
-        'x_discord_timezone': 'America/New_York',
-        'x_debug_options': 'bugReporterEnabled',
-        'origin': 'https://discord.com',
-        'referer': 'https://discord.com/channels/@me',
-    },
-    'x_super_properties': {
-        'os': 'Windows',
-        'browser': 'Edge',
-        'device': '',
-        'system_locale': 'en-US',
-        'browser_user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36 Edg/144.0.0.0',
-        'browser_version': '144.0.0.0',
-        'os_version': '10',
-        'referrer': '',
-        'referring_domain': '',
-        'referrer_current': '',
-        'referring_domain_current': '',
-        'release_channel': 'stable',
-        'client_build_number': 254573,
-        'client_event_source': None,
-        'design_id': 0,
-    },
-}
-
-
-# =============================================================================
 # DATA MODULE (Data.py, Test.py)
 # =============================================================================
 
@@ -161,67 +78,6 @@ DATA_CONFIG = {
     'timeframes': ['1min', '5min', '15min'],       # Available timeframes
     'bars_to_fetch': 100,                          # Initial bars to fetch
     'pre_signal_minutes': 60,                      # Pre-signal data window (minutes)
-}
-
-
-# =============================================================================
-# ROBINHOOD SCRAPER (Data.py - Internal Webscraping)
-# =============================================================================
-
-def _load_robinhood_credentials():
-    """Load Robinhood credentials from settings.csv (rows 2,3,4+ col B)."""
-    try:
-        import pandas as pd
-        config_dir = os.path.dirname(os.path.abspath(__file__))
-        csv_path = os.path.join(config_dir, 'settings.csv')
-        if os.path.exists(csv_path):
-            df = pd.read_csv(csv_path, header=None)
-            creds = {}
-            if len(df) > 1 and pd.notna(df.iloc[1, 1]):
-                creds['username'] = str(df.iloc[1, 1]).strip()
-            if len(df) > 2 and pd.notna(df.iloc[2, 1]):
-                creds['password'] = str(df.iloc[2, 1]).strip()
-            if len(df) > 3 and pd.notna(df.iloc[3, 1]):
-                creds['mfa_secret'] = str(df.iloc[3, 1]).strip()
-            return creds
-    except Exception as e:
-        print(f"Warning: Could not load Robinhood credentials from settings.csv: {e}")
-    return {}
-
-_RH_CREDENTIALS = _load_robinhood_credentials()
-
-ROBINHOOD_CONFIG = {
-    'username': _RH_CREDENTIALS.get('username', ''),
-    'password': _RH_CREDENTIALS.get('password', ''),
-    'mfa_secret': _RH_CREDENTIALS.get('mfa_secret', ''),
-    'base_url': 'https://robinhood.com',
-    'api_base': 'https://api.robinhood.com',
-    'login_url': 'https://api.robinhood.com/oauth2/token/',
-    'quotes_url': 'https://api.robinhood.com/quotes/',
-    'options_url': 'https://api.robinhood.com/options/marketdata/',
-    'instruments_url': 'https://api.robinhood.com/instruments/',
-    'options_instruments_url': 'https://api.robinhood.com/options/instruments/',
-    'options_chains_url': 'https://api.robinhood.com/options/chains/',
-    'client_id': 'c82SH0WZOsabOXGP2sxqcj34FxkvfnWRZBKlBjFS',  # Robinhood public client ID
-    'device_token': None,              # Generated at runtime (UUID4)
-    'session_timeout': 86400,          # Session valid for 24 hours
-    'max_retries': 3,                  # Max login retries
-    'request_timeout': 10,            # HTTP request timeout (seconds)
-    'rate_limit_delay': 0.5,          # Delay between requests (seconds)
-    'browser_config': {
-        'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36',
-        'accept': 'application/json',
-        'accept_language': 'en-US,en;q=0.9',
-        'accept_encoding': 'gzip, deflate, br',
-        'origin': 'https://robinhood.com',
-        'referer': 'https://robinhood.com/',
-        'sec_ch_ua': '"Chromium";v="144", "Google Chrome";v="144"',
-        'sec_ch_ua_mobile': '?0',
-        'sec_ch_ua_platform': '"Windows"',
-        'sec_fetch_dest': 'empty',
-        'sec_fetch_mode': 'cors',
-        'sec_fetch_site': 'same-site',
-    },
 }
 
 
@@ -661,7 +517,88 @@ BACKTEST_CONFIG = {
     },
 }
 
+# =============================================================================
+# SIGNAL MODULE (Signal.py, Test.py)
+# =============================================================================
 
+# --- Initialization helper (must run before DISCORD_CONFIG) ---
+def _load_discord_token_from_excel():
+    """Load Discord token from Setting.xlsx (Row 1, Column B)."""
+    try:
+        import pandas as pd
+        config_dir = os.path.dirname(os.path.abspath(__file__))
+        excel_path = os.path.join(config_dir, 'Setting.xlsx')
+        if os.path.exists(excel_path):
+            df = pd.read_excel(excel_path, header=None)
+            token = df.iloc[0, 1]
+            if pd.notna(token):
+                return str(token).strip()
+    except Exception as e:
+        print(f"Warning: Could not load Discord token from Setting.xlsx: {e}")
+    return ''
+
+_DISCORD_TOKEN_FROM_EXCEL = _load_discord_token_from_excel()
+
+
+DISCORD_CONFIG = {
+    'token': _DISCORD_TOKEN_FROM_EXCEL or os.getenv('DISCORD_TOKEN', ''),  # Auth token from Setting.xlsx or env
+    'channel_id': os.getenv('DISCORD_CHANNEL_ID', '748401380288364575'),   # Signal channel ID
+    'api_version': 'v10',                          # Discord API version
+    'base_url': 'https://discord.com/api',         # Discord API base URL
+    'send_timeout': 0.35,                          # Send timeout (seconds)
+    'receive_timeout': 0.35,                       # Receive timeout (seconds)
+    'message_limit': 20,                           # Messages per request (normal mode)
+    'test_message_limit': 100,                     # Messages per request (test mode)
+    'alert_marker': '<a:RedAlert:759583962237763595>',  # Discord alert emoji ID
+    'rate_limit': {
+        'min_delay': .5,                          # Min seconds between requests
+        'max_delay': 1.5,                          # Max seconds between requests
+        'batch_size': 75,                          # Messages per request
+        'long_pause_chance': 0.15,                 # Chance of longer pause (15%)
+        'long_pause_min': 1.0,                     # Long pause min (seconds)
+        'long_pause_max': 2.0,                    # Long pause max (seconds)
+    },
+    'spoof_browser': True,                         # Enable browser spoofing
+    'browser_config': {
+        'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36 Edg/144.0.0.0',
+        'accept': '*/*',
+        'accept_language': 'en-US,en;q=0.9',
+        'accept_encoding': 'gzip, deflate, br',
+        'connection': 'keep-alive',
+        'cache_control': 'no-cache',
+        'pragma': 'no-cache',
+        'sec_ch_ua': '"Not_A Brand";v="8", "Chromium";v="144", "Microsoft Edge";v="144"',
+        'sec_ch_ua_mobile': '?0',
+        'sec_ch_ua_platform': '"Windows"',
+        'sec_fetch_dest': 'empty',
+        'sec_fetch_mode': 'cors',
+        'sec_fetch_site': 'same-origin',
+        'x_discord_locale': 'en-US',
+        'x_discord_timezone': 'America/New_York',
+        'x_debug_options': 'bugReporterEnabled',
+        'origin': 'https://discord.com',
+        'referer': 'https://discord.com/channels/@me',
+    },
+    'x_super_properties': {
+        'os': 'Windows',
+        'browser': 'Edge',
+        'device': '',
+        'system_locale': 'en-US',
+        'browser_user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36 Edg/144.0.0.0',
+        'browser_version': '144.0.0.0',
+        'os_version': '10',
+        'referrer': '',
+        'referring_domain': '',
+        'referrer_current': '',
+        'referring_domain_current': '',
+        'release_channel': 'stable',
+        'client_build_number': 254573,
+        'client_event_source': None,
+        'design_id': 0,
+    },
+}
+    
+    
 # =============================================================================
 # DATAFRAME COLUMN DEFINITIONS (Source of Truth)
 # =============================================================================
@@ -778,6 +715,67 @@ DATAFRAME_COLUMNS = {
 
 # Resolve alias: dashboard_databook uses the same columns as databook
 DATAFRAME_COLUMNS['dashboard_databook'] = DATAFRAME_COLUMNS['databook']
+
+
+# =============================================================================
+# ROBINHOOD SCRAPER (Data.py - Internal Webscraping)
+# =============================================================================
+
+def _load_robinhood_credentials():
+    """Load Robinhood credentials from settings.csv (rows 2,3,4+ col B)."""
+    try:
+        import pandas as pd
+        config_dir = os.path.dirname(os.path.abspath(__file__))
+        csv_path = os.path.join(config_dir, 'settings.csv')
+        if os.path.exists(csv_path):
+            df = pd.read_csv(csv_path, header=None)
+            creds = {}
+            if len(df) > 1 and pd.notna(df.iloc[1, 1]):
+                creds['username'] = str(df.iloc[1, 1]).strip()
+            if len(df) > 2 and pd.notna(df.iloc[2, 1]):
+                creds['password'] = str(df.iloc[2, 1]).strip()
+            if len(df) > 3 and pd.notna(df.iloc[3, 1]):
+                creds['mfa_secret'] = str(df.iloc[3, 1]).strip()
+            return creds
+    except Exception as e:
+        print(f"Warning: Could not load Robinhood credentials from settings.csv: {e}")
+    return {}
+
+_RH_CREDENTIALS = _load_robinhood_credentials()
+
+ROBINHOOD_CONFIG = {
+    'username': _RH_CREDENTIALS.get('username', ''),
+    'password': _RH_CREDENTIALS.get('password', ''),
+    'mfa_secret': _RH_CREDENTIALS.get('mfa_secret', ''),
+    'base_url': 'https://robinhood.com',
+    'api_base': 'https://api.robinhood.com',
+    'login_url': 'https://api.robinhood.com/oauth2/token/',
+    'quotes_url': 'https://api.robinhood.com/quotes/',
+    'options_url': 'https://api.robinhood.com/options/marketdata/',
+    'instruments_url': 'https://api.robinhood.com/instruments/',
+    'options_instruments_url': 'https://api.robinhood.com/options/instruments/',
+    'options_chains_url': 'https://api.robinhood.com/options/chains/',
+    'client_id': 'c82SH0WZOsabOXGP2sxqcj34FxkvfnWRZBKlBjFS',  # Robinhood public client ID
+    'device_token': None,              # Generated at runtime (UUID4)
+    'session_timeout': 86400,          # Session valid for 24 hours
+    'max_retries': 3,                  # Max login retries
+    'request_timeout': 10,            # HTTP request timeout (seconds)
+    'rate_limit_delay': 0.5,          # Delay between requests (seconds)
+    'browser_config': {
+        'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36',
+        'accept': 'application/json',
+        'accept_language': 'en-US,en;q=0.9',
+        'accept_encoding': 'gzip, deflate, br',
+        'origin': 'https://robinhood.com',
+        'referer': 'https://robinhood.com/',
+        'sec_ch_ua': '"Chromium";v="144", "Google Chrome";v="144"',
+        'sec_ch_ua_mobile': '?0',
+        'sec_ch_ua_platform': '"Windows"',
+        'sec_fetch_dest': 'empty',
+        'sec_fetch_mode': 'cors',
+        'sec_fetch_site': 'same-site',
+    },
+}
 
 
 # =============================================================================
