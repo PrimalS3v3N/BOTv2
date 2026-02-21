@@ -2038,8 +2038,12 @@ class SimulationEngine:
                 # OptionsExit is checked per-second for precise SL/TP detection.
                 # All other detectors run once per minute (indicator-based).
                 # =============================================================
+                _bar_extrap = self.config.get('bar_extrapolation', {})
                 sub_prices = Analysis.extrapolate_bar_prices(
-                    stock_open, stock_high, stock_low, stock_price)
+                    stock_open, stock_high, stock_low, stock_price,
+                    high_span_max=_bar_extrap.get('high_span_max'),
+                    low_span_max=_bar_extrap.get('low_span_max'),
+                    min_segment=_bar_extrap.get('min_segment', 1))
 
                 # Track whether OptionsExit triggered during sub-second scan
                 oe_exit = False

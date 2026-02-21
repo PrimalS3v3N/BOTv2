@@ -40,6 +40,50 @@ _DISCORD_TOKEN_FROM_EXCEL = _load_discord_token_from_excel()
 
 
 # =============================================================================
+# FEATURE TOGGLES (Master On/Off Switches)
+# =============================================================================
+# All strategy and subsystem enabled flags are defined here for quick access.
+# The dictionaries below reference these variables so changes propagate everywhere.
+
+# --- Entry Strategies ---
+DEFERRED_ENTRY_ENABLED          = True      # Defer entry until exhaustion confirmation (HIGH risk)
+DEFERRED_STOCH_ENABLED          = True      # Deferred Entry filter: Stochastic crossover
+DEFERRED_VOLUME_ENABLED         = True      # Deferred Entry filter: Volume climax
+DEFERRED_SATURATION_ENABLED     = True      # Deferred Entry filter: Indicator saturation
+
+# --- Risk Assessment ---
+RISK_ASSESSMENT_ENABLED         = True      # Entry favorability check (overbought detection)
+EWO_OVERBOUGHT_ENABLED          = True      # Risk condition: EWO avg > Median.Max(EWO)
+DELAYED_ENTRY_ENABLED           = True      # Delay purchases in first 15 min of market open
+
+# --- Exit Strategies ---
+CLOSURE_PEAK_ENABLED            = True      # RSI-based exit in last 30 minutes of trading day
+MOMENTUM_PEAK_ENABLED           = True      # Momentum exhaustion peak detection
+STATSBOOK_EXIT_ENABLED          = True      # Historical statistical bounds exit
+VOLUME_CLIMAX_EXIT_ENABLED      = True      # Volume spike + reversal exit
+TIME_STOP_ENABLED               = True      # Exit stale positions after N minutes
+VWAP_CROSS_EXIT_ENABLED         = True      # Price crosses VWAP against position
+SUPERTREND_FLIP_EXIT_ENABLED    = True      # Supertrend trend reversal exit
+MARKET_TREND_ENABLED            = True      # Trend-based exit system (compute signals)
+MARKET_TREND_EXIT_ENABLED       = False     # Actually close positions on MarketTrend signal
+AI_EXIT_SIGNAL_ENABLED          = False     # Local LLM-based exit (requires GGUF model file)
+BOOK_IMBALANCE_ENABLED          = False     # Order book imbalance (placeholder: Webull L2)
+
+# --- Options Exit System (Primary TP/SL) ---
+OPTIONS_EXIT_ENABLED            = True      # Master toggle for options TP/SL system
+VELOCITY_EXIT_ENABLED           = True      # Proactive peak detection via deceleration
+ATR_SL_ENABLED                  = True      # ATR-SL favorability at entry
+MACD_ENABLED                    = True      # MACD histogram trend confirmation
+
+# --- Market Data ---
+SPY_GAUGE_ENABLED               = True      # SPY as market health indicator
+
+# --- Indicators ---
+VWAP_INDICATOR_ENABLED          = True      # Calculate VWAP
+VPOC_INDICATOR_ENABLED          = True      # Calculate Volume Point of Control
+
+
+# =============================================================================
 # SIGNAL MODULE (Signal.py, Test.py)
 # =============================================================================
 
@@ -230,6 +274,17 @@ BACKTEST_CONFIG = {
     'slippage_pct': 0.001,                         # Slippage per fill (0.1%)
     'commission_per_contract': 0.65,               # Per-contract commission
 
+    # Bar extrapolation: randomize intra-bar price path timing
+    # Each 60-second bar is split into 3 segments: first waypoint, second waypoint, close.
+    # Bearish bars: open → high → low → close
+    # Bullish bars: open → low → high → close
+    # Segment durations are randomized each bar for realistic simulation.
+    'bar_extrapolation': {
+        'high_span_max': 25,               # Max seconds for segment reaching the high (random 0..N)
+        'low_span_max': 25,                # Max seconds for segment reaching the low (random 0..N)
+        'min_segment': 1,                  # Minimum seconds per segment (prevents zero-length)
+    },
+
     # Technical indicators for backtest
     # NOTE — RSI thresholds used across the system:
     #   indicators.rsi_overbought/oversold  = 70/30  (stock-level, shared by options_exit)
@@ -238,7 +293,7 @@ BACKTEST_CONFIG = {
     #   closure_peak.rsi_call/put_threshold = 85/15  (end-of-day exit)
     'indicators': {
         'ema_periods': [10, 21, 50, 100, 200],     # EMA periods (bars)
-        'vwap_enabled': True,                      # Calculate VWAP
+        'vwap_enabled': VWAP_INDICATOR_ENABLED,      # Calculate VWAP
         'rsi_period': 14,                          # RSI calculation period
         'rsi_overbought': 70,                      # RSI overbought threshold
         'rsi_oversold': 30,                        # RSI oversold threshold
@@ -256,13 +311,13 @@ BACKTEST_CONFIG = {
         'stoch_smooth': 3,                         # Stochastic %K smoothing SMA period
         'stoch_overbought': 80,                    # Stochastic overbought threshold
         'stoch_oversold': 20,                      # Stochastic oversold threshold
-        'vpoc_enabled': True,                      # Calculate VPOC (Volume Point of Control)
+        'vpoc_enabled': VPOC_INDICATOR_ENABLED,      # Calculate VPOC (Volume Point of Control)
         'vpoc_bin_size': None,                     # VPOC price bin width (None = auto 0.1% of mean)
     },
 
     # Closure - Peak: Avg RSI (10min) based exit in last 30 minutes of trading day
     'closure_peak': {
-        'enabled': True,
+        'enabled': CLOSURE_PEAK_ENABLED,
         'rsi_call_threshold': 85,              # Sell CALL contracts when Avg RSI (10min) >= this
         'rsi_put_threshold': 15,               # Sell PUT contracts when Avg RSI (10min) <= this
         'minutes_before_close': 30,            # Activate in last N minutes (15:30+)
@@ -273,7 +328,7 @@ BACKTEST_CONFIG = {
     # PUTs:  RSI oversold→bouncing + EWO increasing + Stochastic bullish crossover
     # Designed to exit after confirmed momentum exhaustion, not minor bounces
     'momentum_peak': {
-        'enabled': True,
+        'enabled': MOMENTUM_PEAK_ENABLED,
         'min_profit_pct': 15,              # Only consider when option profit >= this %
         'rsi_overbought': 80,              # RSI must have reached this recently (CALLs)
         'rsi_oversold': 20,                # RSI must have reached this recently (PUTs)
@@ -292,7 +347,7 @@ BACKTEST_CONFIG = {
     # Uses StatsBook data to identify when price action reaches historical extremes
     # Min = noise floor, Median = normal zone, Max = selling zone
     'statsbook_exit': {
-        'enabled': True,
+        'enabled': STATSBOOK_EXIT_ENABLED,
         'timeframe': '5m',                 # StatsBook timeframe to compare against
         'ewo_max_exit': True,              # Exit when EWO >= Median.Max(EWO)
         'hl_max_exit': False,              # Exit when rolling H-L >= Median.Max(H-L)
@@ -306,7 +361,7 @@ BACKTEST_CONFIG = {
     # reversal bar signals institutional exhaustion. High-volume reversals are
     # among the most reliable intraday signals for directional shifts.
     'volume_climax_exit': {
-        'enabled': True,
+        'enabled': VOLUME_CLIMAX_EXIT_ENABLED,
         'volume_lookback': 20,             # Bars for rolling avg volume calculation
         'volume_multiplier': 3.0,          # Volume must be >= Nx rolling avg to qualify
         'min_profit_pct': 10,              # Minimum option profit % to consider exit
@@ -320,7 +375,7 @@ BACKTEST_CONFIG = {
     # Options lose value every minute via theta decay. Holding a position
     # that isn't moving costs real money. Frees capital for redeployment.
     'time_stop': {
-        'enabled': True,
+        'enabled': TIME_STOP_ENABLED,
         'max_minutes': 90,                 # Exit if held longer than N minutes
         'min_profit_pct': 5,               # ... and profit is below this %
     },
@@ -330,7 +385,7 @@ BACKTEST_CONFIG = {
     # signals that institutional flow has shifted against the position.
     # Requires confirmation (N bars on wrong side) to avoid whipsaws.
     'vwap_cross_exit': {
-        'enabled': True,
+        'enabled': VWAP_CROSS_EXIT_ENABLED,
         'min_profit_pct': 5,               # Minimum option profit % to consider exit
         'min_hold_bars': 10,               # Minimum bars held before checking
         'confirm_bars': 2,                 # Bars price must stay on adverse side of VWAP
@@ -341,7 +396,7 @@ BACKTEST_CONFIG = {
     # favorable to adverse means price broke through a volatility-adjusted
     # support/resistance level — a mechanical trend reversal confirmation.
     'supertrend_flip_exit': {
-        'enabled': True,
+        'enabled': SUPERTREND_FLIP_EXIT_ENABLED,
         'min_profit_pct': 5,               # Minimum option profit % to consider exit
         'min_hold_bars': 5,                # Minimum bars held before checking
         'confirm_bars': 1,                 # Bars adverse direction must persist (1 = immediate)
@@ -354,27 +409,27 @@ BACKTEST_CONFIG = {
     # trough (CALLs). Three parallel filters; first to fire triggers entry.
     # Falls back to immediate entry after max_defer_bars timeout.
     'deferred_entry': {
-        'enabled': True,
+        'enabled': DEFERRED_ENTRY_ENABLED,
 
         # Maximum bars to wait for exhaustion confirmation before entering anyway
         'max_defer_bars': 10,
 
         # --- Filter 1: Stochastic Overbought/Oversold Crossover ---
         # Wait for Stoch %K to reach extreme zone, then cross back through %D
-        'stoch_enabled': True,
+        'stoch_enabled': DEFERRED_STOCH_ENABLED,
         'stoch_extreme_threshold': 90,     # PUTs: %K must reach this (overbought)
         'stoch_extreme_threshold_low': 10, # CALLs: %K must reach this (oversold)
 
         # --- Filter 2: Volume Climax ---
         # Detect volume spike >= multiplier * rolling avg, enter next bar
-        'volume_enabled': True,
+        'volume_enabled': DEFERRED_VOLUME_ENABLED,
         'volume_lookback': 10,             # Bars for rolling avg volume
         'volume_multiplier': 1.5,          # Volume spike threshold (Nx avg)
 
         # --- Filter 3: Indicator Saturation (Contrarian) ---
         # Count adverse indicators; when saturation_threshold+ agree then
         # at least 2 flip back, the extreme is breaking
-        'saturation_enabled': True,
+        'saturation_enabled': DEFERRED_SATURATION_ENABLED,
         'saturation_threshold': 10,        # N of ~12 indicators aligned = saturated
     },
 
@@ -382,7 +437,7 @@ BACKTEST_CONFIG = {
     # Runs a quantized model via llama-cpp-python on GPU during backtesting.
     # The model analyzes multi-timeframe technical data and recommends hold/sell.
     'ai_exit_signal': {
-        'enabled': False,                              # Disabled by default (requires model file)
+        'enabled': AI_EXIT_SIGNAL_ENABLED,             # Disabled by default (requires model file)
         'model_path': r'C:\Users\Vadim\OneDrive\Software\Meta-Llama-3-8B-Instruct.Q5_K_M.gguf',  # Absolute path to GGUF model file
         'n_gpu_layers': -1,                            # GPU layers to offload (-1 = all)
         'n_ctx': 2048,                                 # Context window (tokens)
@@ -400,11 +455,11 @@ BACKTEST_CONFIG = {
     # Evaluates at signal time whether we are buying into an overbought zone.
     # If any condition is TRUE, RISK = HIGH.
     'risk_assessment': {
-        'enabled': True,
+        'enabled': RISK_ASSESSMENT_ENABLED,
         # Condition 1: RSI overbought — (RSI + RSI_avg) / 2 > threshold
         'rsi_overbought_threshold': 80,
         # Condition 2: EWO overbought — EWO_avg > Median.Max(EWO) from StatsBook (1m)
-        'ewo_overbought_enabled': True,
+        'ewo_overbought_enabled': EWO_OVERBOUGHT_ENABLED,
         # Condition 3: First 15 minutes of market open (9:30 - 9:45 EST)
         'market_open_window_minutes': 15,
         # Post-purchase monitoring for HIGH risk trades
@@ -427,7 +482,7 @@ BACKTEST_CONFIG = {
         # The delay window extends up to delay_window_minutes after market open.
         # If neither condition is met within the window, the trade is skipped.
         'delayed_entry': {
-            'enabled': True,
+            'enabled': DELAYED_ENTRY_ENABLED,
             'signal_window_minutes': 15,     # Signals arriving in first N minutes qualify
             'delay_window_minutes': 30,      # Maximum delay window from market open
             'sl_discount_factor': 0.5,       # Fraction of initial_sl_pct for option discount
@@ -438,7 +493,7 @@ BACKTEST_CONFIG = {
     # Compares current SPY price against average price over lookback windows.
     # If current > avg → Bullish, else → Bearish for that timeframe.
     'spy_gauge': {
-        'enabled': True,
+        'enabled': SPY_GAUGE_ENABLED,
         'ticker': 'SPY',
         'timeframes': {
             'since_open': 0,     # 0 = from market open (9:30)
@@ -470,8 +525,8 @@ BACKTEST_CONFIG = {
     # exit_enabled=False → still computes signals but shows blue 'X' on dashboard
     # instead of actually closing the position.
     'market_trend': {
-        'enabled': True,
-        'exit_enabled': False,             # False = visual-only (blue X), True = close position
+        'enabled': MARKET_TREND_ENABLED,
+        'exit_enabled': MARKET_TREND_EXIT_ENABLED,  # False = visual-only (blue X), True = close position
         'high_risk_grace_bars': 10,        # Bars to wait for reversal on high-risk entry
         'spy_diverge_profit_pct': 5,       # Min profit % to trigger SPY-divergence exit
     },
@@ -489,7 +544,7 @@ BACKTEST_CONFIG = {
     # - VPOC + negative imbalance = support weakening, potential breakdown
     # - Large sell wall above VPOC = resistance ceiling
     'book_imbalance': {
-        'enabled': False,                          # Disabled until Webull L2 data connected
+        'enabled': BOOK_IMBALANCE_ENABLED,         # Disabled until Webull L2 data connected
         'data_source': 'webull',                   # PLACEHOLDER: Future data provider
         'depth_levels': 5,                         # Top N price levels to aggregate
         'refresh_interval': 1,                     # Seconds between book snapshots
@@ -511,7 +566,7 @@ BACKTEST_CONFIG = {
     #   4. Trailing TP scales continuously with profit margin
     #   5. Monitor for reversals against our contract type
     'options_exit': {
-        'enabled': True,
+        'enabled': OPTIONS_EXIT_ENABLED,
 
         # --- Initial Stop Loss ---
         'initial_sl_pct': 20,              # Hard SL: exit if option drops X% below entry (adjustable)
@@ -565,7 +620,7 @@ BACKTEST_CONFIG = {
         #   3. Sustained: deceleration lasted for confirm_bars consecutive bars
         #   4. Profit is significant: profit_pct > min_profit_pct
         #   5. Stock is extended: price > all short EMAs (10, 21)
-        'velocity_exit_enabled': True,
+        'velocity_exit_enabled': VELOCITY_EXIT_ENABLED,
         'velocity_window': 3,              # Bars to compute average velocity (shorter = focused on recent run)
         'velocity_decel_ratio': 0.30,      # Exit if velocity < 30% of recent avg
         'velocity_confirm_bars': 1,        # Deceleration bars needed (1 = immediate, 2 = more conservative)
@@ -591,11 +646,11 @@ BACKTEST_CONFIG = {
 
         # --- ATR-SL Favorability ---
         # If stock price is below ATR-SL at entry → unfavorable for calls, favorable for puts
-        'atr_sl_enabled': True,
+        'atr_sl_enabled': ATR_SL_ENABLED,
 
         # --- MACD Confirmation ---
         # Use MACD histogram direction to confirm trend alignment with contract type
-        'macd_enabled': True,
+        'macd_enabled': MACD_ENABLED,
         'macd_fast': 12,
         'macd_slow': 26,
         'macd_signal': 9,
