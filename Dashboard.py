@@ -242,31 +242,31 @@ def create_trade_chart(df, trade_label, market_hours_only=False, show_ewo=True, 
             row=1, col=1, secondary_y=True
         )
 
-    # Price (left y-axis) - blue with high/low error bars
-    if 'true_price' in df.columns and df['true_price'].notna().any():
-        true_price_trace = go.Scatter(
+    # Stock Price (left y-axis) - blue with high/low error bars
+    if 'stock_price' in df.columns and df['stock_price'].notna().any():
+        price_trace = go.Scatter(
             x=df['time'],
-            y=df['true_price'],
+            y=df['stock_price'],
             name='Price',
             line=dict(color='#2196F3', width=2),
             hovertemplate='Price: $%{y:.2f}<extra></extra>'
         )
 
-        # Add error bars showing high/low range relative to true price
+        # Add error bars showing high/low range relative to stock price
         if 'stock_high' in df.columns and 'stock_low' in df.columns:
-            tp_error_plus = df['stock_high'] - df['true_price']
-            tp_error_minus = df['true_price'] - df['stock_low']
-            true_price_trace.error_y = dict(
+            error_plus = df['stock_high'] - df['stock_price']
+            error_minus = df['stock_price'] - df['stock_low']
+            price_trace.error_y = dict(
                 type='data',
                 symmetric=False,
-                array=tp_error_plus,
-                arrayminus=tp_error_minus,
+                array=error_plus,
+                arrayminus=error_minus,
                 color='rgba(255, 255, 255, 0.8)',
                 thickness=3,
                 width=0
             )
 
-        fig.add_trace(true_price_trace, row=1, col=1, secondary_y=False)
+        fig.add_trace(price_trace, row=1, col=1, secondary_y=False)
 
     # VWAP (left y-axis)
     if 'vwap' in df.columns and df['vwap'].notna().any():
@@ -591,7 +591,7 @@ def create_trade_chart(df, trade_label, market_hours_only=False, show_ewo=True, 
             fig.add_trace(
                 go.Scatter(
                     x=df['time'],
-                    y=df['true_price'] if 'true_price' in df.columns else df.get('stock_price'),
+                    y=df['stock_price'],
                     name='Ticker Gauge',
                     mode='markers',
                     marker=dict(size=0, opacity=0),
@@ -1321,7 +1321,7 @@ def main():
         # Vectorized formatting — uses numpy/pandas ops instead of per-cell lambdas
 
         # Format price columns as $X.XX using vectorized string concatenation
-        price_cols = [c for c in ['stock_price', 'stock_high', 'stock_low', 'true_price', 'option_price',
+        price_cols = [c for c in ['stock_price', 'stock_high', 'stock_low', 'option_price',
                      'entry_price', 'highest_price', 'lowest_price',
                      'vwap', 'ema_10', 'ema_21', 'ema_50', 'ema_100', 'ema_200',
                      'vwap_ema_avg', 'emavwap', 'supertrend',
