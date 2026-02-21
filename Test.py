@@ -3083,8 +3083,12 @@ class Backtest:
             else:
                 reason_list.append((reason, count, 0, 0))
         reason_list.sort(key=lambda x: x[2], reverse=True)
-        for reason, count, pnl, pnl_pct in reason_list:
-            print(f"  ${pnl:+,.2f} : {pnl_pct:+.1f}% : {count}x : {reason}")
+        rows = [(f"${pnl:+,.2f}", f"{pnl_pct:+.1f}%", f"{count}x", reason)
+                for reason, count, pnl, pnl_pct in reason_list]
+        if rows:
+            w = [max(len(r[i]) for r in rows) for i in range(3)]
+            for c0, c1, c2, name in rows:
+                print(f"  {c0:>{w[0]}} : {c1:>{w[1]}} : {c2:>{w[2]}} : {name}")
 
         print(f"{'='*60}\n")
 
@@ -4257,9 +4261,15 @@ class LiveTest:
                 reason_data[reason]['count'] += 1
                 reason_data[reason]['total_spent'] += p.entry_price * 100 * p.contracts
             print(f"\n  EXIT REASONS:")
-            for reason, data in sorted(reason_data.items(), key=lambda x: x[1]['pnl'], reverse=True):
+            sorted_reasons = sorted(reason_data.items(), key=lambda x: x[1]['pnl'], reverse=True)
+            rows = []
+            for reason, data in sorted_reasons:
                 pnl_pct = (data['pnl'] / data['total_spent'] * 100) if data['total_spent'] > 0 else 0
-                print(f"    ${data['pnl']:+,.2f} : {pnl_pct:+.1f}% : {data['count']}x : {reason}")
+                rows.append((f"${data['pnl']:+,.2f}", f"{pnl_pct:+.1f}%", f"{data['count']}x", reason))
+            if rows:
+                w = [max(len(r[i]) for r in rows) for i in range(3)]
+                for c0, c1, c2, name in rows:
+                    print(f"    {c0:>{w[0]}} : {c1:>{w[1]}} : {c2:>{w[2]}} : {name}")
 
         print(f"{'='*60}\n")
 
@@ -4556,8 +4566,12 @@ class LiveRerun:
             else:
                 reason_list.append((reason, count, 0, 0))
         reason_list.sort(key=lambda x: x[2], reverse=True)
-        for reason, count, pnl, pnl_pct in reason_list:
-            print(f"    ${pnl:+,.2f} : {pnl_pct:+.1f}% : {count}x : {reason}")
+        rows = [(f"${pnl:+,.2f}", f"{pnl_pct:+.1f}%", f"{count}x", reason)
+                for reason, count, pnl, pnl_pct in reason_list]
+        if rows:
+            w = [max(len(r[i]) for r in rows) for i in range(3)]
+            for c0, c1, c2, name in rows:
+                print(f"    {c0:>{w[0]}} : {c1:>{w[1]}} : {c2:>{w[2]}} : {name}")
 
         print(f"{'='*60}\n")
 
