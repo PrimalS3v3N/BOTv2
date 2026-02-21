@@ -666,6 +666,7 @@ class Databook:
                    exit_sig_oe=None,
                    exit_sig_vc=None, exit_sig_ts=None, exit_sig_vwap=None,
                    exit_sig_st=None, exit_sig_mt=None,
+                   exit_sig_pp=None,
                    deferred_active=False, deferred_trigger=None):
         """Add a tracking record."""
         pnl_pct = self.position.get_pnl_pct(option_price) if holding else np.nan
@@ -777,6 +778,7 @@ class Databook:
             'exit_sig_vwap': exit_sig_vwap,
             'exit_sig_st': exit_sig_st,
             'exit_sig_mt': exit_sig_mt,
+            'exit_sig_pp': exit_sig_pp,
             # Deferred entry columns
             'deferred_active': deferred_active,
             'deferred_trigger': deferred_trigger,
@@ -1788,6 +1790,9 @@ class SimulationEngine:
         st_flip_strategy = Strategy.SupertrendFlipExit(self.config.get('supertrend_flip_exit', {}))
         st_flip_detector = st_flip_strategy.create_detector(position.option_type)
 
+        pp_strategy = Strategy.PeakPeakExit(self.config.get('peak_peak_exit', {}))
+        pp_detector = pp_strategy.create_detector()
+
         # Deferred entry filter (for HIGH risk entries)
         de_strategy = Strategy.DeferredEntry(self.config.get('deferred_entry', {}))
         de_filter = de_strategy.create_filter(position.option_type)
@@ -2217,6 +2222,13 @@ class SimulationEngine:
                     st_flip_pnl = position.get_pnl_pct(option_price)
                     st_flip_exit, st_flip_reason = st_flip_detector.update(st_flip_pnl, st_direction, timestamp=timestamp)
 
+                # Update Peak-Peak detector
+                pp_exit = False
+                pp_reason = None
+                if pp_detector and not position.is_closed:
+                    pp_pnl = position.get_pnl_pct(option_price)
+                    pp_exit, pp_reason = pp_detector.update(option_price, pp_pnl, timestamp)
+
                 # Update MarketTrend detector
                 mt_exit = False
                 mt_reason = None
@@ -2271,6 +2283,7 @@ class SimulationEngine:
                     exit_sig_vc=vc_exit, exit_sig_ts=ts_exit, exit_sig_vwap=vwap_exit,
                     exit_sig_st=st_flip_exit,
                     exit_sig_mt=mt_exit or (mt_reason is not None),
+                    exit_sig_pp=pp_exit,
                     deferred_active=de_active,
                     deferred_trigger=de_trigger_reason if (de_triggered and i == de_new_entry_idx) else None,
                 )
@@ -2285,6 +2298,9 @@ class SimulationEngine:
                 elif mp_exit and not position.is_closed:
                     exit_price = option_price * (1 - self.slippage_pct)
                     position.close(exit_price, timestamp, mp_reason)
+                elif pp_exit and not position.is_closed:
+                    exit_price = option_price * (1 - self.slippage_pct)
+                    position.close(exit_price, timestamp, pp_reason)
                 elif vc_exit and not position.is_closed:
                     exit_price = option_price * (1 - self.slippage_pct)
                     position.close(exit_price, timestamp, vc_reason)
@@ -2448,12 +2464,35 @@ class SimulationEngine:
             'average_minutes_held': closed_trades['minutes_held'].mean() if len(closed_trades) > 0 else 0,
             'profit_factor': abs(winners['pnl'].sum() / losers['pnl'].sum()) if len(losers) > 0 and losers['pnl'].sum() != 0 else float('inf'),
             'exit_reasons': closed_trades['exit_reason'].value_counts().to_dict() if len(closed_trades) > 0 else {},
+            'exit_reason_pnl': self._compute_exit_reason_pnl(closed_trades) if len(closed_trades) > 0 else {},
             'initial_capital': self.config.get('initial_capital', 10000.0),
             'total_capital_utilized': total_capital_utilized,
             'max_capital_held': max_capital_held,
             'capitalized_pnl': capitalized_pnl,
             'profit_min': total_profit_min,
         }
+
+    def _compute_exit_reason_pnl(self, closed_trades):
+        """
+        Compute per-exit-reason P&L breakdown.
+
+        Returns:
+            dict: {reason: {'pnl': total_$, 'count': N, 'total_spent': $, 'pnl_pct': %}}
+            where pnl_pct = total P&L / total capital spent on those trades * 100
+        """
+        result = {}
+        for reason, group in closed_trades.groupby('exit_reason'):
+            total_pnl = group['pnl'].sum()
+            count = len(group)
+            total_spent = (group['entry_price'] * 100 * group['contracts']).sum()
+            pnl_pct = (total_pnl / total_spent * 100) if total_spent > 0 else 0
+            result[reason] = {
+                'pnl': total_pnl,
+                'count': count,
+                'total_spent': total_spent,
+                'pnl_pct': pnl_pct,
+            }
+        return result
 
     def _calculate_max_capital_held(self, positions_df):
         """Calculate maximum capital held at any one time."""
@@ -2785,8 +2824,13 @@ class Backtest:
         print(f"  Profit[min]: ${summary.get('profit_min', 0):+,.2f}")
 
         print(f"\nEXIT REASONS:")
+        exit_pnl = summary.get('exit_reason_pnl', {})
         for reason, count in summary.get('exit_reasons', {}).items():
-            print(f"  {reason}: {count}")
+            if reason in exit_pnl:
+                data = exit_pnl[reason]
+                print(f"  {reason} = {count}x : ${data['pnl']:+,.2f} : {data['pnl_pct']:+.1f}%")
+            else:
+                print(f"  {reason} = {count}x")
 
         print(f"{'='*60}\n")
 
@@ -3308,6 +3352,9 @@ class LiveTest:
         st_flip_strategy = Strategy.SupertrendFlipExit(config.get('supertrend_flip_exit', {}))
         st_flip_detector = st_flip_strategy.create_detector(position.option_type)
 
+        pp_strategy = Strategy.PeakPeakExit(config.get('peak_peak_exit', {}))
+        pp_detector = pp_strategy.create_detector()
+
         mt_strategy = Strategy.MarketTrend(config.get('market_trend', {}))
         mt_detector = mt_strategy.create_detector(position.option_type)
         mt_exit_enabled = config.get('market_trend', {}).get('exit_enabled', False)
@@ -3325,6 +3372,7 @@ class LiveTest:
             'ts_detector': ts_detector,
             'vwap_detector': vwap_detector,
             'st_flip_detector': st_flip_detector,
+            'pp_detector': pp_detector,
             'mt_detector': mt_detector,
             'mt_exit_enabled': mt_exit_enabled,
             'oe_favorability_assessed': False,
@@ -3637,6 +3685,13 @@ class LiveTest:
             st_flip_pnl = position.get_pnl_pct(option_price)
             st_flip_exit, st_flip_reason = st_flip_detector.update(st_flip_pnl, st_direction, timestamp=timestamp)
 
+        # Update Peak-Peak detector
+        pp_exit, pp_reason = False, None
+        pp_detector = state['pp_detector']
+        if pp_detector and not position.is_closed:
+            pp_pnl = position.get_pnl_pct(option_price)
+            pp_exit, pp_reason = pp_detector.update(option_price, pp_pnl, timestamp)
+
         # Compute ticker/SPY trends for this bar (live single-bar calculation)
         bias_band_pct = self.engine.config.get('bias_sideways_band', 0.05)
         ticker_trend_val = np.nan
@@ -3729,6 +3784,7 @@ class LiveTest:
             exit_sig_vc=vc_exit, exit_sig_ts=ts_exit, exit_sig_vwap=vwap_exit,
             exit_sig_st=st_flip_exit,
             exit_sig_mt=mt_exit or (mt_reason is not None),
+            exit_sig_pp=pp_exit,
         )
 
         # === EXIT PRIORITY CHAIN ===
@@ -3739,6 +3795,8 @@ class LiveTest:
             position.close(option_price * (1 - slippage), timestamp, sb_reason)
         elif mp_exit and not position.is_closed:
             position.close(option_price * (1 - slippage), timestamp, mp_reason)
+        elif pp_exit and not position.is_closed:
+            position.close(option_price * (1 - slippage), timestamp, pp_reason)
         elif vc_exit and not position.is_closed:
             position.close(option_price * (1 - slippage), timestamp, vc_reason)
         elif vwap_exit and not position.is_closed:
@@ -3916,6 +3974,22 @@ class LiveTest:
                 print(f"  Avg PnL: {completed['pnl_pct'].mean():+.1f}%")
                 print(f"  Best: {completed['pnl_pct'].max():+.1f}%")
                 print(f"  Worst: {completed['pnl_pct'].min():+.1f}%")
+
+        # Exit reason breakdown with P&L
+        closed_positions = [p for p in self.positions.values() if p.is_closed]
+        if closed_positions:
+            reason_data = {}
+            for p in closed_positions:
+                reason = p.exit_reason or 'unknown'
+                if reason not in reason_data:
+                    reason_data[reason] = {'pnl': 0, 'count': 0, 'total_spent': 0}
+                reason_data[reason]['pnl'] += p.get_pnl(p.exit_price)
+                reason_data[reason]['count'] += 1
+                reason_data[reason]['total_spent'] += p.entry_price * 100 * p.contracts
+            print(f"\n  EXIT REASONS:")
+            for reason, data in sorted(reason_data.items(), key=lambda x: x[1]['count'], reverse=True):
+                pnl_pct = (data['pnl'] / data['total_spent'] * 100) if data['total_spent'] > 0 else 0
+                print(f"    {reason} = {data['count']}x : ${data['pnl']:+,.2f} : {pnl_pct:+.1f}%")
 
         print(f"{'='*60}\n")
 
@@ -4202,8 +4276,13 @@ class LiveRerun:
         print(f"    Worst: ${summary.get('worst_trade', 0):+,.2f}")
 
         print(f"\n  EXIT REASONS:")
+        exit_pnl = summary.get('exit_reason_pnl', {})
         for reason, count in summary.get('exit_reasons', {}).items():
-            print(f"    {reason}: {count}")
+            if reason in exit_pnl:
+                data = exit_pnl[reason]
+                print(f"    {reason} = {count}x : ${data['pnl']:+,.2f} : {data['pnl_pct']:+.1f}%")
+            else:
+                print(f"    {reason} = {count}x")
 
         print(f"{'='*60}\n")
 
