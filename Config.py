@@ -44,6 +44,7 @@ VOLUME_CLIMAX_EXIT_ENABLED      = True      # Volume spike + reversal exit
 TIME_STOP_ENABLED               = True      # Exit stale positions after N minutes
 VWAP_CROSS_EXIT_ENABLED         = True      # Price crosses VWAP against position
 SUPERTREND_FLIP_EXIT_ENABLED    = True      # Supertrend trend reversal exit
+PEAK_PEAK_EXIT_ENABLED          = True      # Peak-Peak exit: re-touch of option high after delay
 MARKET_TREND_ENABLED            = False      # Trend-based exit system (compute signals)
 MARKET_TREND_EXIT_ENABLED       = False     # Actually close positions on MarketTrend signal
 AI_EXIT_SIGNAL_ENABLED          = False     # Local LLM-based exit (requires GGUF model file)
@@ -260,6 +261,17 @@ BACKTEST_CONFIG = {
         'min_profit_pct': 5,               # Minimum option profit % to consider exit
         'min_hold_bars': 5,                # Minimum bars held before checking
         'confirm_bars': 1,                 # Bars adverse direction must persist (1 = immediate)
+    },
+
+    # Peak-Peak Exit: Capture missed opportunity on option price double-top.
+    # Tracks the option's max price since purchase. Once price drops below
+    # the peak and at least min_hold_minutes have passed, if price returns
+    # to that peak level (or higher), exit immediately. This catches the
+    # "second touch" of the high that often precedes a reversal.
+    'peak_peak_exit': {
+        'enabled': PEAK_PEAK_EXIT_ENABLED,
+        'min_hold_minutes': 10,            # Minimum minutes between peak and re-touch
+        'min_profit_pct': 5,               # Minimum option profit % to consider exit
     },
 
     # Deferred Entry: When RiskOutlook is HIGH, defer the actual entry until
@@ -710,6 +722,7 @@ DATAFRAME_COLUMNS = {
         'exit_sig_vwap',           # VWAP Cross exit triggered
         'exit_sig_st',             # Supertrend Flip exit triggered
         'exit_sig_mt',             # MarketTrend exit triggered (or flagged if exit_enabled=False)
+        'exit_sig_pp',             # Peak-Peak exit triggered
         # Deferred entry columns
         'deferred_active',         # True if entry is being deferred (waiting for exhaustion)
         'deferred_trigger',        # Trigger reason when deferred entry fires (e.g. 'Deferred-StochCrossover')

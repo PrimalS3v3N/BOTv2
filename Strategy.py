@@ -22,7 +22,8 @@ __all__ = ['DeferredEntry', 'DeferredEntryFilter',
            'TimeStop', 'TimeStopDetector',
            'VWAPCrossExit', 'VWAPCrossDetector',
            'SupertrendFlipExit', 'SupertrendFlipDetector',
-           'MarketTrend', 'MarketTrendDetector']
+           'MarketTrend', 'MarketTrendDetector',
+           'PeakPeakExit', 'PeakPeakDetector']
 
 
 # =============================================================================
@@ -2380,3 +2381,120 @@ class MarketTrendDetector:
 
         self.prev_spy_trend = spy_trend
         return False, None, self.state
+
+
+# =============================================================================
+# INTERNAL - Peak-Peak Exit Strategy
+# =============================================================================
+
+class PeakPeakExit:
+    """
+    Factory for creating PeakPeakDetector instances.
+
+    Captures a specific missed opportunity pattern: after the option reaches
+    a peak price, if at least 10 minutes pass and the option price returns to
+    that peak (or higher), exit immediately.
+
+    Rationale: When price revisits a previous high after significant time,
+    it often fails to break through and reverses — a double-top pattern on
+    the option price itself. Exiting on the second touch captures the
+    opportunity that was missed on the first peak.
+
+    Config: BACKTEST_CONFIG['peak_peak_exit']
+        {
+            'enabled': True,
+            'min_hold_minutes': 10,        # Minimum minutes between peak and re-touch
+            'min_profit_pct': 5,           # Minimum option profit % to consider exit
+        }
+    """
+
+    def __init__(self, config=None):
+        pp_config = config or Config.get_setting('backtest', 'peak_peak_exit', {})
+        self.enabled = pp_config.get('enabled', False)
+        self.config = pp_config
+
+    def create_detector(self):
+        """Create a new PeakPeakDetector for a position. Returns None if disabled."""
+        if not self.enabled:
+            return None
+        return PeakPeakDetector(self.config)
+
+
+class PeakPeakDetector:
+    """
+    Tracks option price peaks and detects return-to-peak after a time delay.
+
+    Logic:
+    1. Track the maximum option price seen since entry (the "peak").
+    2. Once price drops below the peak, record the peak price and the time
+       it was reached.
+    3. If at least min_hold_minutes have elapsed since the peak was set,
+       and the option price returns to the peak level (or higher), exit.
+    4. The peak only counts if the option has been profitable above
+       min_profit_pct at some point.
+
+    This catches the "double-top" pattern on option prices where the
+    second touch is the exit opportunity missed on the first.
+    """
+
+    def __init__(self, config):
+        self.min_hold_minutes = config.get('min_hold_minutes', 10)
+        self.min_profit_pct = config.get('min_profit_pct', 5)
+
+        # Peak tracking
+        self.peak_price = None          # Highest option price seen
+        self.peak_time = None           # Timestamp when peak was set
+        self.peak_confirmed = False     # True once price has moved below peak (peak is "real")
+        self.entry_price = None         # Set on first update
+
+    def update(self, option_price, pnl_pct, timestamp):
+        """
+        Check for Peak-Peak exit signal.
+
+        Args:
+            option_price: Current option contract price
+            pnl_pct: Current P&L percentage
+            timestamp: Current timestamp
+
+        Returns:
+            (should_exit, exit_reason): Tuple. exit_reason is None if no exit.
+        """
+        if np.isnan(option_price) or np.isnan(pnl_pct) or timestamp is None:
+            return False, None
+
+        # Initialize on first call
+        if self.entry_price is None:
+            self.entry_price = option_price
+            self.peak_price = option_price
+            self.peak_time = timestamp
+            return False, None
+
+        # Update peak if we have a new high
+        if option_price > self.peak_price:
+            # Only count as a meaningful peak if profitable
+            if pnl_pct >= self.min_profit_pct:
+                if self.peak_confirmed:
+                    # Price returned to or exceeded previous confirmed peak —
+                    # check if enough time has passed since that peak
+                    minutes_since_peak = (timestamp - self.peak_time).total_seconds() / 60
+                    if minutes_since_peak >= self.min_hold_minutes:
+                        return True, 'Peak-Peak'
+
+            # Update peak regardless (track the true high)
+            self.peak_price = option_price
+            self.peak_time = timestamp
+            self.peak_confirmed = False
+            return False, None
+
+        # Price is below peak — confirm that a peak has formed
+        if not self.peak_confirmed and self.peak_price > self.entry_price:
+            self.peak_confirmed = True
+
+        # Check if price is returning to the confirmed peak level
+        if self.peak_confirmed and self.peak_time is not None:
+            minutes_since_peak = (timestamp - self.peak_time).total_seconds() / 60
+            if minutes_since_peak >= self.min_hold_minutes:
+                if option_price >= self.peak_price and pnl_pct >= self.min_profit_pct:
+                    return True, 'Peak-Peak'
+
+        return False, None
