@@ -670,9 +670,6 @@ class Databook:
         """Add a tracking record."""
         pnl_pct = self.position.get_pnl_pct(option_price) if holding else np.nan
 
-        # Calculate True Price via Analysis module
-        tp = Analysis.true_price(stock_price, stock_high, stock_low)
-
         # Track running day high/low for sideways band calculation
         if not np.isnan(stock_high):
             self.day_high = max(self.day_high, stock_high)
@@ -688,7 +685,6 @@ class Databook:
             'stock_price': stock_price,
             'stock_high': stock_high,
             'stock_low': stock_low,
-            'true_price': tp,
             'option_price': option_price,
             'volume': volume,
             'holding': holding,
@@ -1826,6 +1822,7 @@ class SimulationEngine:
         risk_downtrend_drop_pct = risk_config.get('downtrend_drop_pct', 10)
         risk_downtrend_reason = risk_config.get('downtrend_exit_reason', 'DownTrend-SL')
         risk_negative_bar_count = 0
+        risk_negative_start_time = None
 
         max_vwap_ema_avg = np.nan
 
@@ -1908,7 +1905,7 @@ class SimulationEngine:
 
             current_days_to_expiry = max(0, (expiry_dt - timestamp).total_seconds() / 86400)
 
-            # Estimate option price
+            # Estimate option price (at bar close for initial computation)
             option_price = Analysis.estimate_option_price_bs(
                 stock_price=stock_price,
                 strike=position.strike,
@@ -1975,7 +1972,7 @@ class SimulationEngine:
                 if fav_level == 'HIGH' and de_filter is not None:
                     de_active = True
                     holding = False  # Don't enter yet — wait for exhaustion
-                    print(f"    DEFERRED ENTRY: Waiting for exhaustion confirmation (max {de_filter.max_defer_bars} bars)")
+                    print(f"    DEFERRED ENTRY: Waiting for exhaustion confirmation (max {de_filter.max_defer_minutes} min)")
 
             # --- Deferred Entry: Scan for exhaustion confirmation ---
             if de_active and not de_triggered and i > entry_idx:
@@ -1992,6 +1989,7 @@ class SimulationEngine:
                     stock_price=stock_price,
                     atr_sl_value=atr_sl_value,
                     ewo=ewo,
+                    timestamp=timestamp,
                 )
                 if should_enter:
                     de_triggered = True
@@ -2014,6 +2012,7 @@ class SimulationEngine:
                     oe_detector.trailing_active = False
                     oe_detector.highest_profit_pct = 0.0
                     oe_detector.bar_count = 0
+                    oe_detector._entry_time = None
                     oe_detector._confirmation_bars = []
                     oe_detector.confirmed = 'Pending'
 
@@ -2034,7 +2033,66 @@ class SimulationEngine:
                 market_trend_val = (int(ticker_trend_val) == int(spy_trend_val))
 
             if holding:
-                position.update(timestamp, option_price, stock_price)
+                # =============================================================
+                # Per-second extrapolation: generate 60 sub-prices per minute
+                # OptionsExit is checked per-second for precise SL/TP detection.
+                # All other detectors run once per minute (indicator-based).
+                # =============================================================
+                sub_prices = Analysis.extrapolate_bar_prices(
+                    stock_open, stock_high, stock_low, stock_price)
+
+                # Track whether OptionsExit triggered during sub-second scan
+                oe_exit = False
+                oe_reason = None
+                oe_state = {}
+                _sub_exit_ts = None
+                _sub_exit_stock = None
+                _sub_exit_option = None
+
+                if oe_detector and not position.is_closed:
+                    ema_vals = {10: ema_10, 21: ema_21, 50: ema_50, 100: ema_100, 200: ema_200}
+                    for j in range(60):
+                        sub_ts = timestamp + timedelta(seconds=j)
+                        sub_stock = float(sub_prices[j])
+                        sub_days = max(0, (expiry_dt - sub_ts).total_seconds() / 86400)
+                        sub_option = Analysis.estimate_option_price_bs(
+                            stock_price=sub_stock,
+                            strike=position.strike,
+                            option_type=position.option_type,
+                            days_to_expiry=sub_days,
+                            entry_price=position.entry_price,
+                            entry_stock_price=entry_stock_price,
+                            entry_days_to_expiry=entry_days_to_expiry
+                        )
+
+                        position.update(sub_ts, sub_option, sub_stock)
+                        position.update_eod_price(sub_option)
+
+                        oe_exit, oe_reason, oe_state = oe_detector.update(
+                            option_price=sub_option,
+                            stock_price=sub_stock,
+                            ema_values=ema_vals,
+                            timestamp=sub_ts,
+                        )
+
+                        if oe_exit:
+                            _sub_exit_ts = sub_ts
+                            _sub_exit_stock = sub_stock
+                            _sub_exit_option = sub_option
+                            break
+                    else:
+                        # No intra-minute exit — ensure position is up to date at bar close
+                        bar_end_ts = timestamp + timedelta(seconds=59)
+                        position.update(bar_end_ts, option_price, stock_price)
+                else:
+                    # No OptionsExit detector — just update at bar close
+                    position.update(timestamp, option_price, stock_price)
+
+                # If OptionsExit triggered mid-minute, override bar values for recording
+                if _sub_exit_ts:
+                    timestamp = _sub_exit_ts
+                    stock_price = _sub_exit_stock
+                    option_price = _sub_exit_option
 
                 # --- Risk Assessment (once at entry, if not already done above) ---
                 if not risk_assessed and risk_enabled:
@@ -2047,21 +2105,7 @@ class SimulationEngine:
                     if risk_level == 'HIGH':
                         print(f"    RISK: HIGH [{risk_reasons}]")
 
-                # --- Options Exit: RiskOutlook (once at entry) ---
-                oe_state = {}
-                oe_exit = False
-                oe_reason = None
-
-                # --- Options Exit: Per-bar update ---
-                if oe_detector and not position.is_closed:
-                    ema_vals = {10: ema_10, 21: ema_21, 50: ema_50, 100: ema_100, 200: ema_200}
-                    oe_exit, oe_reason, oe_state = oe_detector.update(
-                        option_price=option_price,
-                        stock_price=stock_price,
-                        ema_values=ema_vals,
-                    )
-
-                # --- Risk trend monitoring ---
+                # --- Risk trend monitoring (time-based) ---
                 if risk_level == 'HIGH' and not position.is_closed and position.get_minutes_held(timestamp) >= risk_downtrend_delay_min:
                     pnl_pct_now = position.get_pnl_pct(option_price)
 
@@ -2073,11 +2117,19 @@ class SimulationEngine:
                     if risk_trend == 'Downtrend':
                         if pnl_pct_now < 0:
                             risk_negative_bar_count += 1
+                            if risk_negative_start_time is None:
+                                risk_negative_start_time = timestamp
                         else:
                             risk_negative_bar_count = 0
+                            risk_negative_start_time = None
 
                         if not position.is_closed:
-                            if risk_negative_bar_count >= risk_downtrend_bars:
+                            # Time-based downtrend check
+                            if risk_negative_start_time:
+                                risk_negative_minutes = (timestamp - risk_negative_start_time).total_seconds() / 60
+                            else:
+                                risk_negative_minutes = risk_negative_bar_count
+                            if risk_negative_minutes >= risk_downtrend_bars:
                                 exit_price = option_price * (1 - self.slippage_pct)
                                 position.close(exit_price, timestamp, risk_downtrend_reason)
                             elif pnl_pct_now <= -risk_downtrend_drop_pct:
@@ -2096,7 +2148,7 @@ class SimulationEngine:
                 sb_reason = None
                 if sb_detector and not position.is_closed:
                     sb_pnl = position.get_pnl_pct(option_price)
-                    sb_exit, sb_reason = sb_detector.update(sb_pnl, ewo, stock_high, stock_low)
+                    sb_exit, sb_reason = sb_detector.update(sb_pnl, ewo, stock_high, stock_low, timestamp=timestamp)
 
                 # Update AI exit signal detector
                 ai_exit = False
@@ -2107,7 +2159,6 @@ class SimulationEngine:
                         'stock_price': stock_price,
                         'stock_high': stock_high,
                         'stock_low': stock_low,
-                        'true_price': Analysis.true_price(stock_price, stock_high, stock_low),
                         'volume': volume,
                         'option_price': option_price,
                         'pnl_pct': position.get_pnl_pct(option_price),
@@ -2138,7 +2189,7 @@ class SimulationEngine:
                 vc_reason = None
                 if vc_detector and not position.is_closed:
                     vc_pnl = position.get_pnl_pct(option_price)
-                    vc_exit, vc_reason = vc_detector.update(vc_pnl, volume, stock_price, stock_open, stoch_k_val)
+                    vc_exit, vc_reason = vc_detector.update(vc_pnl, volume, stock_price, stock_open, stoch_k_val, timestamp=timestamp)
 
                 # Update Time Stop detector
                 ts_exit = False
@@ -2153,14 +2204,14 @@ class SimulationEngine:
                 vwap_reason = None
                 if vwap_detector and not position.is_closed:
                     vwap_pnl = position.get_pnl_pct(option_price)
-                    vwap_exit, vwap_reason = vwap_detector.update(vwap_pnl, stock_price, vwap)
+                    vwap_exit, vwap_reason = vwap_detector.update(vwap_pnl, stock_price, vwap, timestamp=timestamp)
 
                 # Update Supertrend Flip detector
                 st_flip_exit = False
                 st_flip_reason = None
                 if st_flip_detector and not position.is_closed:
                     st_flip_pnl = position.get_pnl_pct(option_price)
-                    st_flip_exit, st_flip_reason = st_flip_detector.update(st_flip_pnl, st_direction)
+                    st_flip_exit, st_flip_reason = st_flip_detector.update(st_flip_pnl, st_direction, timestamp=timestamp)
 
                 # Update MarketTrend detector
                 mt_exit = False
@@ -2168,7 +2219,7 @@ class SimulationEngine:
                 mt_state = None
                 if mt_detector and not position.is_closed:
                     mt_pnl = position.get_pnl_pct(option_price)
-                    mt_exit, mt_reason, mt_state = mt_detector.update(ticker_trend_val, spy_trend_val, mt_pnl)
+                    mt_exit, mt_reason, mt_state = mt_detector.update(ticker_trend_val, spy_trend_val, mt_pnl, timestamp=timestamp)
 
                 # Compute Closure-Peak signal flag
                 cp_signal = False
@@ -3488,6 +3539,7 @@ class LiveTest:
             ema_vals = {10: ema_10, 21: ema_21, 50: ema_50, 100: ema_100, 200: ema_200}
             oe_exit, oe_reason, oe_state = oe_detector.update(
                 option_price=option_price, stock_price=stock_price, ema_values=ema_vals,
+                timestamp=timestamp,
             )
 
         # --- Risk trend monitoring ---
@@ -3528,7 +3580,7 @@ class LiveTest:
         sb_detector = state['sb_detector']
         if sb_detector and not position.is_closed:
             sb_pnl = position.get_pnl_pct(option_price)
-            sb_exit, sb_reason = sb_detector.update(sb_pnl, ewo, stock_high, stock_low)
+            sb_exit, sb_reason = sb_detector.update(sb_pnl, ewo, stock_high, stock_low, timestamp=timestamp)
 
         ai_exit, ai_reason = False, None
         ai_signal_data = {}
@@ -3536,7 +3588,6 @@ class LiveTest:
         if ai_detector and not position.is_closed:
             ai_bar_data = {
                 'stock_price': stock_price, 'stock_high': stock_high, 'stock_low': stock_low,
-                'true_price': Analysis.true_price(stock_price, stock_high, stock_low),
                 'volume': volume, 'option_price': option_price,
                 'pnl_pct': position.get_pnl_pct(option_price),
                 'vwap': vwap, 'ema_21': ema_21, 'ewo': ewo, 'ewo_15min_avg': ewo_15min_avg,
@@ -3558,7 +3609,7 @@ class LiveTest:
         vc_detector = state['vc_detector']
         if vc_detector and not position.is_closed:
             vc_pnl = position.get_pnl_pct(option_price)
-            vc_exit, vc_reason = vc_detector.update(vc_pnl, volume, stock_price, stock_open, stoch_k_val)
+            vc_exit, vc_reason = vc_detector.update(vc_pnl, volume, stock_price, stock_open, stoch_k_val, timestamp=timestamp)
 
         # Update Time Stop detector
         ts_exit, ts_reason = False, None
@@ -3573,14 +3624,14 @@ class LiveTest:
         vwap_detector = state['vwap_detector']
         if vwap_detector and not position.is_closed:
             vwap_pnl = position.get_pnl_pct(option_price)
-            vwap_exit, vwap_reason = vwap_detector.update(vwap_pnl, stock_price, vwap)
+            vwap_exit, vwap_reason = vwap_detector.update(vwap_pnl, stock_price, vwap, timestamp=timestamp)
 
         # Update Supertrend Flip detector
         st_flip_exit, st_flip_reason = False, None
         st_flip_detector = state['st_flip_detector']
         if st_flip_detector and not position.is_closed:
             st_flip_pnl = position.get_pnl_pct(option_price)
-            st_flip_exit, st_flip_reason = st_flip_detector.update(st_flip_pnl, st_direction)
+            st_flip_exit, st_flip_reason = st_flip_detector.update(st_flip_pnl, st_direction, timestamp=timestamp)
 
         # Compute ticker/SPY trends for this bar (live single-bar calculation)
         bias_band_pct = self.engine.config.get('bias_sideways_band', 0.05)
@@ -3631,7 +3682,7 @@ class LiveTest:
         mt_detector = state['mt_detector']
         if mt_detector and not position.is_closed:
             mt_pnl = position.get_pnl_pct(option_price)
-            mt_exit, mt_reason, mt_state = mt_detector.update(ticker_trend_val, spy_trend_val, mt_pnl)
+            mt_exit, mt_reason, mt_state = mt_detector.update(ticker_trend_val, spy_trend_val, mt_pnl, timestamp=timestamp)
 
         # Closure-Peak signal
         CP_enabled = state['CP_enabled']

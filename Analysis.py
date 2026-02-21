@@ -110,9 +110,8 @@ def EWO(df, column='close', fast_period=5, slow_period=35):
 
 
 def true_price(stock_price, stock_high, stock_low):
-    """Calculate True Price as the average of high, low, and stock price at each interval."""
-    if pd.notna(stock_high) and pd.notna(stock_low):
-        return (stock_high + stock_low + stock_price) / 3
+    """Deprecated: Previously calculated (high+low+close)/3.
+    Now replaced by per-second extrapolation which naturally incorporates high/low."""
     return stock_price
 
 
@@ -720,28 +719,25 @@ def add_indicators(df, ema_periods=None, ewo_fast=5, ewo_slow=35, ewo_avg_period
 
     df = df.copy()
 
-    # Calculate true price column: (high + low + close) / 3
-    # All indicators use true price instead of raw stock close price
-    if 'high' in df.columns and 'low' in df.columns:
-        df['_true_price'] = (df['high'] + df['low'] + df['close']) / 3
-    else:
-        df['_true_price'] = df['close']
+    # All indicators use close price directly.
+    # (Previously used true_price = (high+low+close)/3, now replaced by per-second
+    # extrapolation which naturally incorporates high/low into the price path.)
 
-    # Add EMAs at multiple periods (based on true price)
+    # Add EMAs at multiple periods
     for period in ema_periods:
-        df[f'ema_{period}'] = EMA(df, column='_true_price', period=period)
+        df[f'ema_{period}'] = EMA(df, column='close', period=period)
 
-    # Add VWAP (based on true price)
-    df['vwap'] = VWAP(df, price_col='_true_price', volume_col='volume')
+    # Add VWAP
+    df['vwap'] = VWAP(df, price_col='close', volume_col='volume')
 
-    # Add EWO (based on true price)
-    df['ewo'] = EWO(df, column='_true_price', fast_period=ewo_fast, slow_period=ewo_slow)
+    # Add EWO
+    df['ewo'] = EWO(df, column='close', fast_period=ewo_fast, slow_period=ewo_slow)
 
     # Add EWO 15-minute rolling average (simple moving average over ewo_avg_period bars)
     df['ewo_15min_avg'] = df['ewo'].rolling(window=ewo_avg_period, min_periods=1).mean()
 
-    # Add RSI (based on true price)
-    df['rsi'] = RSI(df, column='_true_price', period=rsi_period)
+    # Add RSI
+    df['rsi'] = RSI(df, column='close', period=rsi_period)
 
     # Add RSI 10-minute rolling average (simple moving average over rsi_avg_period bars)
     df['rsi_10min_avg'] = df['rsi'].rolling(window=rsi_avg_period, min_periods=1).mean()
@@ -767,13 +763,13 @@ def add_indicators(df, ema_periods=None, ewo_fast=5, ewo_slow=35, ewo_avg_period
     # Add ATR Trailing Stoploss
     df['atr_sl'] = ATR_SL(df, atr_period=atr_sl_period, hhv_period=atr_sl_hhv, multiplier=atr_sl_multiplier)
 
-    # Add MACD (based on true price)
+    # Add MACD
     df['macd_line'], df['macd_signal'], df['macd_histogram'] = MACD(
-        df, column='_true_price', fast_period=macd_fast, slow_period=macd_slow, signal_period=macd_signal
+        df, column='close', fast_period=macd_fast, slow_period=macd_slow, signal_period=macd_signal
     )
 
-    # Add Rate of Change / Price Momentum (based on true price)
-    df['roc'] = ROC(df, column='_true_price', period=roc_period)
+    # Add Rate of Change / Price Momentum
+    df['roc'] = ROC(df, column='close', period=roc_period)
 
     # Add Stochastic Oscillator (uses raw OHLC, not true price — needs actual H/L range)
     df['stoch_k'], df['stoch_d'] = Stochastic(
@@ -785,9 +781,6 @@ def add_indicators(df, ema_periods=None, ewo_fast=5, ewo_slow=35, ewo_avg_period
         df['vpoc'] = VPOC(df, price_col='close', volume_col='volume', bin_size=vpoc_bin_size)
     else:
         df['vpoc'] = np.nan
-
-    # Clean up temporary column
-    df = df.drop(columns=['_true_price'])
 
     return df
 
@@ -1008,9 +1001,68 @@ def estimate_option_price_bs(stock_price, strike, option_type, days_to_expiry,
     return max(min_price, theoretical_price)
 
 
+def extrapolate_bar_prices(open_price, high_price, low_price, close_price, n=60):
+    """
+    Extrapolate a single OHLC bar into n per-second price points.
+
+    Creates a realistic intra-bar price path that visits the high and low
+    within the bar, distributed in equal thirds (20-20-20 for n=60).
+
+    Path logic:
+      - Bearish bar (open > close): open → high → low → close
+      - Bullish bar (open <= close): open → low → high → close
+
+    Args:
+        open_price: Bar open price
+        high_price: Bar high price
+        low_price: Bar low price
+        close_price: Bar close price
+        n: Number of points to generate (default: 60 for 1 point/second)
+
+    Returns:
+        numpy array of n interpolated prices
+    """
+    if np.isnan(open_price) or np.isnan(close_price):
+        return np.full(n, close_price if not np.isnan(close_price) else open_price)
+
+    # Handle missing high/low by using max/min of open/close
+    if np.isnan(high_price):
+        high_price = max(open_price, close_price)
+    if np.isnan(low_price):
+        low_price = min(open_price, close_price)
+
+    # Ensure high >= max(open, close) and low <= min(open, close)
+    high_price = max(high_price, open_price, close_price)
+    low_price = min(low_price, open_price, close_price)
+
+    # Determine path based on bar direction
+    if open_price > close_price:
+        # Bearish: open → high → low → close
+        waypoints = [open_price, high_price, low_price, close_price]
+    else:
+        # Bullish: open → low → high → close
+        waypoints = [open_price, low_price, high_price, close_price]
+
+    # Split n points into 3 equal segments
+    seg1 = n // 3           # First segment length
+    seg2 = n // 3           # Second segment length
+    seg3 = n - seg1 - seg2  # Third segment gets remainder
+
+    # Generate linear interpolation for each segment
+    # endpoint=False on first two segments to avoid duplicating boundary points
+    prices = np.concatenate([
+        np.linspace(waypoints[0], waypoints[1], seg1, endpoint=False),
+        np.linspace(waypoints[1], waypoints[2], seg2, endpoint=False),
+        np.linspace(waypoints[2], waypoints[3], seg3, endpoint=True),
+    ])
+
+    return prices
+
+
 # Export functions for use by other modules
 __all__ = ['EMA', 'VWAP', 'EWO', 'true_price', 'RSI', 'MACD', 'ROC',
            'Supertrend', 'IchimokuCloud', 'ATR_SL',
            'Stochastic', 'VPOC', 'BookImbalance',
            'add_indicators', 'black_scholes_call', 'black_scholes_put', 'black_scholes_price',
-           'calculate_greeks', 'estimate_option_price_bs']
+           'calculate_greeks', 'estimate_option_price_bs',
+           'extrapolate_bar_prices']

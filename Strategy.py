@@ -112,16 +112,18 @@ class DeferredEntryFilter:
         self.peak_saturation_count = 0
         self.saturation_reached = False
 
-        # Timeout
-        self.max_defer_bars = config.get('max_defer_bars', 10)
-        self.bar_count = 0
+        # Timeout (config in minutes, supports legacy 'max_defer_bars' key)
+        self.max_defer_minutes = config.get('max_defer_minutes', config.get('max_defer_bars', 10))
+        self.bar_count = 0  # kept for display/logging
+        self._entry_time = None
 
         # Track which filter triggered
         self.trigger_reason = None
 
     def update(self, stoch_k, stoch_d, volume, rsi,
                supertrend_direction, macd_histogram, roc,
-               ema_values, stock_price, atr_sl_value, ewo):
+               ema_values, stock_price, atr_sl_value, ewo,
+               timestamp=None):
         """
         Evaluate whether exhaustion confirmation has occurred.
 
@@ -137,14 +139,21 @@ class DeferredEntryFilter:
             stock_price: Current stock close price
             atr_sl_value: ATR-based stop loss level
             ewo: Elliott Wave Oscillator value
+            timestamp: Current timestamp for time-based tracking
 
         Returns:
             bool: True if entry should execute now
         """
         self.bar_count += 1
+        if timestamp and self._entry_time is None:
+            self._entry_time = timestamp
 
-        # --- Timeout: enter regardless after max_defer_bars ---
-        if self.bar_count >= self.max_defer_bars:
+        # --- Timeout: enter regardless after max_defer_minutes ---
+        if timestamp and self._entry_time:
+            minutes_elapsed = (timestamp - self._entry_time).total_seconds() / 60
+        else:
+            minutes_elapsed = self.bar_count  # fallback: 1 bar ≈ 1 minute
+        if minutes_elapsed >= self.max_defer_minutes:
             self.trigger_reason = 'Deferred-Timeout'
             return True
 
@@ -616,7 +625,7 @@ class StatsBookDetector:
 
     def __init__(self, config, statsbook_df):
         self.min_profit_pct = config.get('min_profit_pct', 10)
-        self.min_hold_bars = config.get('min_hold_bars', 5)
+        self.min_hold_minutes = config.get('min_hold_minutes', config.get('min_hold_bars', 5))
         self.ewo_max_exit = config.get('ewo_max_exit', True)
         self.hl_max_exit = config.get('hl_max_exit', True)
         self.rolling_window = config.get('rolling_window', 5)
@@ -634,6 +643,7 @@ class StatsBookDetector:
 
         # Rolling window state
         self.bar_count = 0
+        self._entry_time = None
         self.high_window = []
         self.low_window = []
 
@@ -645,7 +655,7 @@ class StatsBookDetector:
         except (KeyError, TypeError, ValueError):
             return np.nan
 
-    def update(self, pnl_pct, ewo, stock_high, stock_low):
+    def update(self, pnl_pct, ewo, stock_high, stock_low, timestamp=None):
         """
         Check for exit/hold signal based on StatsBook bounds.
 
@@ -654,11 +664,14 @@ class StatsBookDetector:
             ewo: Current EWO value
             stock_high: Current bar high price
             stock_low: Current bar low price
+            timestamp: Current timestamp for time-based tracking
 
         Returns:
             (should_exit, exit_reason): Tuple. exit_reason is None if no exit.
         """
         self.bar_count += 1
+        if timestamp and self._entry_time is None:
+            self._entry_time = timestamp
 
         # Track rolling window for H-L range calculation
         if not np.isnan(stock_high) and not np.isnan(stock_low) and stock_low > 0:
@@ -668,8 +681,12 @@ class StatsBookDetector:
                 self.high_window.pop(0)
                 self.low_window.pop(0)
 
-        # Need minimum bars before evaluating
-        if self.bar_count < self.min_hold_bars:
+        # Need minimum time before evaluating
+        if timestamp and self._entry_time:
+            minutes_elapsed = (timestamp - self._entry_time).total_seconds() / 60
+        else:
+            minutes_elapsed = self.bar_count
+        if minutes_elapsed < self.min_hold_minutes:
             return False, None
 
         # Need minimum profit to consider exit
@@ -819,6 +836,11 @@ class AIExitSignalDetector:
 
         self._bars_since_eval = 0
         self._total_bars = 0
+        self._entry_time = None
+        self._last_eval_time = None
+        self.eval_interval_minutes = config.get('eval_interval_minutes', config.get('eval_interval', 5))
+        self.min_minutes_before_eval = config.get('min_minutes_before_eval',
+                                                   config.get('min_bars_before_eval', 5))
 
         # Last AI signal (persists between evaluations)
         self._current_signal = {
@@ -837,7 +859,7 @@ class AIExitSignalDetector:
 
         Args:
             bar_data: dict with current bar's indicator values
-                (stock_price, true_price, volume, vwap, ema_21, ewo, rsi,
+                (stock_price, volume, vwap, ema_21, ewo, rsi,
                  supertrend_direction, ticker_trend, ichimoku_*, etc.)
             pnl_pct: Current position P&L percentage
             minutes_held: Minutes since entry
@@ -850,13 +872,23 @@ class AIExitSignalDetector:
         self._snapshot.add_bar(bar_data)
         self._total_bars += 1
         self._bars_since_eval += 1
+        if self._entry_time is None and timestamp:
+            self._entry_time = timestamp
 
-        # Wait for minimum bars before first evaluation
-        if self._total_bars < self.min_bars_before_eval:
+        # Wait for minimum time before first evaluation
+        if timestamp and self._entry_time:
+            minutes_elapsed = (timestamp - self._entry_time).total_seconds() / 60
+        else:
+            minutes_elapsed = self._total_bars
+        if minutes_elapsed < self.min_minutes_before_eval:
             return False, None
 
-        # Only evaluate at configured intervals
-        if self._bars_since_eval < self.eval_interval:
+        # Only evaluate at configured intervals (time-based)
+        if timestamp and self._last_eval_time:
+            minutes_since_eval = (timestamp - self._last_eval_time).total_seconds() / 60
+        else:
+            minutes_since_eval = self._bars_since_eval
+        if minutes_since_eval < self.eval_interval_minutes:
             # Return cached signal's exit decision
             if self.exit_on_sell and self._current_signal.get('action') == 'sell':
                 return True, 'AI Exit Signal'
@@ -864,6 +896,7 @@ class AIExitSignalDetector:
 
         # Time to run inference
         self._bars_since_eval = 0
+        self._last_eval_time = timestamp
 
         data_block = self._snapshot.build_prompt_data(
             ticker=self.ticker,
@@ -1020,8 +1053,9 @@ class OptionsExitDetector:
         self.risk_addon_scale = config.get('risk_addon_scale', 5.0)
         self.risk_addon_norm = config.get('risk_addon_norm', 30.0)
 
-        # Entry favorability / RiskOutlook
-        self.confirmation_window = config.get('confirmation_window_bars', 10)
+        # Entry favorability / RiskOutlook (config in minutes)
+        self.confirmation_window_minutes = config.get('confirmation_window_minutes',
+                                                       config.get('confirmation_window_bars', 10))
         self.rsi_overbought = config.get('rsi_overbought', 70)
         self.rsi_oversold = config.get('rsi_oversold', 30)
 
@@ -1035,11 +1069,12 @@ class OptionsExitDetector:
         # MACD
         self.macd_enabled = config.get('macd_enabled', True)
 
-        # Velocity deceleration exit
+        # Velocity deceleration exit (config in minutes)
         self.velocity_exit_enabled = config.get('velocity_exit_enabled', True)
         self.velocity_window = config.get('velocity_window', 5)
         self.velocity_decel_ratio = config.get('velocity_decel_ratio', 0.30)
-        self.velocity_confirm_bars = config.get('velocity_confirm_bars', 2)
+        self.velocity_confirm_minutes = config.get('velocity_confirm_minutes',
+                                                    config.get('velocity_confirm_bars', 2))
         self.velocity_min_profit_pct = config.get('velocity_min_profit_pct', 25)
         self.velocity_min_move = config.get('velocity_min_move', 0.0)
 
@@ -1059,10 +1094,12 @@ class OptionsExitDetector:
         self.trailing_tp_price = None       # Current trailing TP price (None until activated)
         self.trailing_active = False
         self.highest_profit_pct = 0.0       # Watermark: best profit seen so far
-        self.bar_count = 0
+        self.bar_count = 0                  # Legacy counter (kept for logging/display)
+        self._entry_time = None             # Time-based tracking
         self.is_high_risk = False
         self._stock_prices = []             # Stock close history for velocity
-        self._decel_count = 0               # Consecutive bars of deceleration
+        self._decel_count = 0               # Consecutive seconds of deceleration
+        self._decel_start_time = None       # When deceleration started
 
         # Entry favorability assessment (computed once)
         self.favorability = None             # 'LOW' / 'MEDIUM' / 'HIGH' risk
@@ -1132,13 +1169,13 @@ class OptionsExitDetector:
     # Velocity deceleration detection
     # ------------------------------------------------------------------
 
-    def _check_velocity_exit(self, stock_price, profit_pct, ema_values):
+    def _check_velocity_exit(self, stock_price, profit_pct, ema_values, timestamp=None):
         """
         Detect stock price velocity deceleration for proactive peak exit.
 
-        Tracks bar-to-bar stock price changes (velocity).  When the stock was
-        running strongly and velocity drops to a fraction of its recent average,
-        it signals momentum exhaustion — exit before the crash.
+        Tracks price changes (velocity).  When the stock was running strongly
+        and velocity drops to a fraction of its recent average, it signals
+        momentum exhaustion — exit before the crash.
 
         Returns:
             bool: True if velocity deceleration exit should fire.
@@ -1155,6 +1192,7 @@ class OptionsExitDetector:
         # Minimum profit gate
         if profit_pct < self.velocity_min_profit_pct:
             self._decel_count = 0
+            self._decel_start_time = None
             return False
 
         # Compute velocities: close[i] - close[i-1] for recent bars
@@ -1175,6 +1213,7 @@ class OptionsExitDetector:
         # Stock must have been "running" (avg velocity above minimum move)
         if avg_velocity < self.velocity_min_move:
             self._decel_count = 0
+            self._decel_start_time = None
             return False
 
         # Deceleration = still moving in the right direction, just much slower.
@@ -1182,17 +1221,27 @@ class OptionsExitDetector:
         # handle outright reversals.  This targets the "stall before the crash".
         if current_velocity < 0:
             self._decel_count = 0
+            self._decel_start_time = None
             return False
 
         # Check for deceleration: current velocity < ratio × average
         if current_velocity < self.velocity_decel_ratio * avg_velocity:
             self._decel_count += 1
+            if self._decel_start_time is None and timestamp:
+                self._decel_start_time = timestamp
         else:
             self._decel_count = 0
+            self._decel_start_time = None
             return False
 
-        # Confirmation: deceleration must persist for N bars
-        if self._decel_count < self.velocity_confirm_bars:
+        # Confirmation: deceleration must persist for N minutes
+        # In per-second mode, _decel_count tracks consecutive ticks of deceleration.
+        # Convert to time-based: check if deceleration started >= N minutes ago.
+        if timestamp and self._decel_start_time:
+            decel_minutes = (timestamp - self._decel_start_time).total_seconds() / 60
+        else:
+            decel_minutes = self._decel_count  # fallback: 1 count ≈ 1 minute
+        if decel_minutes < self.velocity_confirm_minutes:
             return False
 
         # Extended check: price should be above short EMAs (still in "run" territory)
@@ -1222,7 +1271,7 @@ class OptionsExitDetector:
             return 0.0  # Not yet active
 
         # First N minutes: breakeven floor (0%) to give the trade room
-        if self.bar_count <= self.trail_early_floor_minutes:
+        if self._minutes_elapsed <= self.trail_early_floor_minutes:
             base = 0.0
         else:
             base = self.trail_base_floor_pct
@@ -1425,32 +1474,43 @@ class OptionsExitDetector:
         return self.favorability, self.favorability_reasons
 
     # ------------------------------------------------------------------
-    # Per-bar update
+    # Per-tick update (called per-second during extrapolated simulation)
     # ------------------------------------------------------------------
 
-    def update(self, option_price, stock_price, ema_values=None):
+    def update(self, option_price, stock_price, ema_values=None, timestamp=None):
         """
-        Per-bar update: check hard SL, update trailing TP, check EMA reversal.
+        Per-tick update: check hard SL, update trailing TP, check EMA reversal.
+
+        Called per-second during extrapolated backtesting, per-minute in live.
 
         Args:
             option_price: Current estimated option price
             stock_price: Current stock price
             ema_values: dict mapping period -> EMA value (for reversal detection)
+            timestamp: Current timestamp for time-based tracking
 
         Returns:
             (should_exit, exit_reason, state_dict)
-            state_dict contains per-bar state for the databook.
+            state_dict contains per-tick state for the databook.
         """
         self.bar_count += 1
+        if timestamp and self._entry_time is None:
+            self._entry_time = timestamp
         ema_values = ema_values or {}
+
+        # Compute minutes elapsed (time-based instead of bar-count)
+        if timestamp and self._entry_time:
+            self._minutes_elapsed = (timestamp - self._entry_time).total_seconds() / 60
+        else:
+            self._minutes_elapsed = self.bar_count  # fallback
 
         profit_pct = ((option_price - self.entry_option_price) / self.entry_option_price) * 100
 
-        # Track confirmation window
-        if self.bar_count <= self.confirmation_window:
+        # Track confirmation window (time-based)
+        if self._minutes_elapsed <= self.confirmation_window_minutes:
             self._confirmation_bars.append(option_price)
-            if self.bar_count == self.confirmation_window:
-                self._evaluate_confirmation()
+        elif self.confirmed == 'Pending' and len(self._confirmation_bars) >= 2:
+            self._evaluate_confirmation()
 
         # --- EMA reversal check ---
         emas_against = 0
@@ -1513,7 +1573,7 @@ class OptionsExitDetector:
                 return True, 'Trail-TP', state
 
         # --- Velocity deceleration exit (proactive peak detection) ---
-        if self._check_velocity_exit(stock_price, profit_pct, ema_values):
+        if self._check_velocity_exit(stock_price, profit_pct, ema_values, timestamp):
             state = self._build_state(option_price, profit_pct)
             return True, 'Velocity-Peak', state
 
@@ -1631,7 +1691,7 @@ class VolumeClimaxDetector:
         self.volume_lookback = config.get('volume_lookback', 20)
         self.volume_multiplier = config.get('volume_multiplier', 3.0)
         self.min_profit_pct = config.get('min_profit_pct', 10)
-        self.min_hold_bars = config.get('min_hold_bars', 10)
+        self.min_hold_minutes = config.get('min_hold_minutes', config.get('min_hold_bars', 10))
         self.use_stochastic = config.get('use_stochastic', False)
         self.stoch_overbought = config.get('stoch_overbought', 75)
         self.stoch_oversold = config.get('stoch_oversold', 25)
@@ -1639,8 +1699,9 @@ class VolumeClimaxDetector:
 
         self.volume_history = []
         self.bar_count = 0
+        self._entry_time = None
 
-    def update(self, pnl_pct, volume, stock_close, stock_open, stoch_k=np.nan):
+    def update(self, pnl_pct, volume, stock_close, stock_open, stoch_k=np.nan, timestamp=None):
         """
         Check for volume climax exit signal.
 
@@ -1650,18 +1711,25 @@ class VolumeClimaxDetector:
             stock_close: Current bar close price
             stock_open: Current bar open price
             stoch_k: Current Stochastic %K value (optional)
+            timestamp: Current timestamp for time-based tracking
 
         Returns:
             (should_exit, exit_reason): Tuple. exit_reason is None if no exit.
         """
         self.bar_count += 1
+        if timestamp and self._entry_time is None:
+            self._entry_time = timestamp
 
         # Track volume history (append before check so current bar is included in future avg)
         if not np.isnan(volume) and volume > 0:
             self.volume_history.append(volume)
 
-        # Need minimum bars and volume history
-        if self.bar_count < self.min_hold_bars:
+        # Need minimum time and volume history
+        if timestamp and self._entry_time:
+            minutes_elapsed = (timestamp - self._entry_time).total_seconds() / 60
+        else:
+            minutes_elapsed = self.bar_count
+        if minutes_elapsed < self.min_hold_minutes:
             return False, None
 
         if len(self.volume_history) < self.volume_lookback:
@@ -1824,15 +1892,17 @@ class VWAPCrossDetector:
 
     def __init__(self, config, option_type):
         self.min_profit_pct = config.get('min_profit_pct', 5)
-        self.min_hold_bars = config.get('min_hold_bars', 10)
-        self.confirm_bars = config.get('confirm_bars', 2)
+        self.min_hold_minutes = config.get('min_hold_minutes', config.get('min_hold_bars', 10))
+        self.confirm_minutes = config.get('confirm_minutes', config.get('confirm_bars', 2))
         self.is_call = option_type.upper() in ['CALL', 'CALLS', 'C']
 
         self.bar_count = 0
+        self._entry_time = None
         self.was_favorable = False       # Price has been on favorable side at least once
-        self.adverse_bar_count = 0       # Consecutive bars on adverse side
+        self.adverse_bar_count = 0       # Consecutive bars/ticks on adverse side
+        self._adverse_start_time = None  # When adverse streak started
 
-    def update(self, pnl_pct, stock_price, vwap):
+    def update(self, pnl_pct, stock_price, vwap, timestamp=None):
         """
         Check for VWAP cross exit signal.
 
@@ -1840,11 +1910,14 @@ class VWAPCrossDetector:
             pnl_pct: Current P&L percentage
             stock_price: Current stock price (close)
             vwap: Current VWAP value
+            timestamp: Current timestamp for time-based tracking
 
         Returns:
             (should_exit, exit_reason): Tuple. exit_reason is None if no exit.
         """
         self.bar_count += 1
+        if timestamp and self._entry_time is None:
+            self._entry_time = timestamp
 
         if np.isnan(pnl_pct) or np.isnan(stock_price) or np.isnan(vwap):
             return False, None
@@ -1859,22 +1932,33 @@ class VWAPCrossDetector:
         if on_favorable_side:
             self.was_favorable = True
             self.adverse_bar_count = 0
+            self._adverse_start_time = None
             return False, None
 
         # Price is on adverse side — count consecutive bars
         if self.was_favorable:
             self.adverse_bar_count += 1
+            if self._adverse_start_time is None and timestamp:
+                self._adverse_start_time = timestamp
 
-        # Need minimum bars held
-        if self.bar_count < self.min_hold_bars:
+        # Need minimum time held
+        if timestamp and self._entry_time:
+            minutes_elapsed = (timestamp - self._entry_time).total_seconds() / 60
+        else:
+            minutes_elapsed = self.bar_count
+        if minutes_elapsed < self.min_hold_minutes:
             return False, None
 
         # Need minimum profit
         if pnl_pct < self.min_profit_pct:
             return False, None
 
-        # Check confirmation: must be on adverse side for N consecutive bars
-        if self.was_favorable and self.adverse_bar_count >= self.confirm_bars:
+        # Check confirmation: must be on adverse side for N consecutive minutes
+        if timestamp and self._adverse_start_time:
+            adverse_minutes = (timestamp - self._adverse_start_time).total_seconds() / 60
+        else:
+            adverse_minutes = self.adverse_bar_count
+        if self.was_favorable and adverse_minutes >= self.confirm_minutes:
             return True, 'VWAP Cross'
 
         return False, None
@@ -1936,29 +2020,34 @@ class SupertrendFlipDetector:
 
     def __init__(self, config, option_type):
         self.min_profit_pct = config.get('min_profit_pct', 5)
-        self.min_hold_bars = config.get('min_hold_bars', 5)
-        self.confirm_bars = config.get('confirm_bars', 1)
+        self.min_hold_minutes = config.get('min_hold_minutes', config.get('min_hold_bars', 5))
+        self.confirm_minutes = config.get('confirm_minutes', config.get('confirm_bars', 1))
         self.is_call = option_type.upper() in ['CALL', 'CALLS', 'C']
 
         # Favorable direction for this position type
         self.favorable_direction = 1.0 if self.is_call else -1.0
 
         self.bar_count = 0
+        self._entry_time = None
         self.was_favorable = False       # Direction was favorable at some point
         self.adverse_bar_count = 0       # Consecutive bars in adverse direction
+        self._adverse_start_time = None  # When adverse streak started
 
-    def update(self, pnl_pct, supertrend_direction):
+    def update(self, pnl_pct, supertrend_direction, timestamp=None):
         """
         Check for Supertrend flip exit signal.
 
         Args:
             pnl_pct: Current P&L percentage
             supertrend_direction: Current Supertrend direction (1.0 or -1.0)
+            timestamp: Current timestamp for time-based tracking
 
         Returns:
             (should_exit, exit_reason): Tuple. exit_reason is None if no exit.
         """
         self.bar_count += 1
+        if timestamp and self._entry_time is None:
+            self._entry_time = timestamp
 
         if np.isnan(pnl_pct) or np.isnan(supertrend_direction):
             return False, None
@@ -1969,22 +2058,33 @@ class SupertrendFlipDetector:
         if is_favorable:
             self.was_favorable = True
             self.adverse_bar_count = 0
+            self._adverse_start_time = None
             return False, None
 
         # Direction is adverse — count consecutive bars
         if self.was_favorable:
             self.adverse_bar_count += 1
+            if self._adverse_start_time is None and timestamp:
+                self._adverse_start_time = timestamp
 
-        # Need minimum bars held
-        if self.bar_count < self.min_hold_bars:
+        # Need minimum time held
+        if timestamp and self._entry_time:
+            minutes_elapsed = (timestamp - self._entry_time).total_seconds() / 60
+        else:
+            minutes_elapsed = self.bar_count
+        if minutes_elapsed < self.min_hold_minutes:
             return False, None
 
         # Need minimum profit
         if pnl_pct < self.min_profit_pct:
             return False, None
 
-        # Check confirmation: must be adverse for N consecutive bars
-        if self.was_favorable and self.adverse_bar_count >= self.confirm_bars:
+        # Check confirmation: must be adverse for N consecutive minutes
+        if timestamp and self._adverse_start_time:
+            adverse_minutes = (timestamp - self._adverse_start_time).total_seconds() / 60
+        else:
+            adverse_minutes = self.adverse_bar_count
+        if self.was_favorable and adverse_minutes >= self.confirm_minutes:
             return True, 'Supertrend Flip'
 
         return False, None
@@ -2055,11 +2155,13 @@ class MarketTrendDetector:
     def __init__(self, config, option_type):
         self.is_call = option_type.upper() in ['CALL', 'CALLS', 'C']
         self.exit_enabled = config.get('exit_enabled', False)
-        self.high_risk_grace_bars = config.get('high_risk_grace_bars', 10)
+        self.high_risk_grace_minutes = config.get('high_risk_grace_minutes',
+                                                   config.get('high_risk_grace_bars', 10))
         self.spy_diverge_profit_pct = config.get('spy_diverge_profit_pct', 5)
 
         # State
         self.bar_count = 0
+        self._entry_time = None
         self.entry_ticker_trend = None   # Ticker trend at entry
         self.entry_spy_trend = None      # SPY trend at entry
         self.prev_spy_trend = None       # Previous bar's SPY trend
@@ -2074,7 +2176,7 @@ class MarketTrendDetector:
         """Return the trend value that is adverse for this contract type."""
         return -1 if self.is_call else 1
 
-    def update(self, ticker_trend, spy_trend, pnl_pct):
+    def update(self, ticker_trend, spy_trend, pnl_pct, timestamp=None):
         """
         Evaluate MarketTrend exit signal.
 
@@ -2082,6 +2184,7 @@ class MarketTrendDetector:
             ticker_trend: Current ticker trend (-1, 0, +1)
             spy_trend: Current SPY trend (-1, 0, +1)
             pnl_pct: Current P&L percentage
+            timestamp: Current timestamp for time-based tracking
 
         Returns:
             (should_exit, exit_reason, state): Tuple.
@@ -2090,6 +2193,8 @@ class MarketTrendDetector:
                 state: Current detector state string (Hold/Warning/Sell/HighRisk/SPY-Warning).
         """
         self.bar_count += 1
+        if timestamp and self._entry_time is None:
+            self._entry_time = timestamp
 
         if np.isnan(ticker_trend) or np.isnan(spy_trend):
             return False, None, self.state
@@ -2132,7 +2237,11 @@ class MarketTrendDetector:
                 return False, None, self.state
 
             # Still in adverse trend
-            if self.bar_count > self.high_risk_grace_bars:
+            if timestamp and self._entry_time:
+                minutes_elapsed = (timestamp - self._entry_time).total_seconds() / 60
+            else:
+                minutes_elapsed = self.bar_count
+            if minutes_elapsed > self.high_risk_grace_minutes:
                 # Grace period expired, no reversal → sell
                 self.state = 'Sell'
                 self.prev_spy_trend = spy_trend

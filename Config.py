@@ -636,7 +636,7 @@ DATAFRAME_COLUMNS = {
 
     # Per-bar tracking data from Databook (Test.py)
     'databook': [
-        'timestamp', 'stock_price', 'stock_high', 'stock_low', 'true_price',
+        'timestamp', 'stock_price', 'stock_high', 'stock_low',
         'option_price', 'volume', 'holding', 'entry_price',
         'pnl', 'pnl_pct', 'highest_price', 'lowest_price', 'minutes_held',
         'risk', 'risk_reasons', 'risk_trend',

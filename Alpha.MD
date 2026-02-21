@@ -92,7 +92,7 @@ Config.py ───────────────────────�
 | Volatility | ATR-SL | `ATR_SL(df, atr_period)` | 5 bar ATR, 10 bar HHV |
 | Pricing | Black-Scholes | `estimate_option_price_bs(...)` | Calibrated to market |
 | Pricing | Greeks | `calculate_greeks(...)` | Delta, Gamma, Theta, Vega, Rho |
-| Utility | True Price | `true_price(close, high, low)` | (H + L + C) / 3 |
+| Utility | Extrapolate Bar | `extrapolate_bar_prices(O, H, L, C)` | 60 per-second prices from OHLC |
 
 **Bundle:** `add_indicators(df)` adds all standard indicators in one call.
 

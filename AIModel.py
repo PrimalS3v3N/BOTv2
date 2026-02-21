@@ -65,7 +65,7 @@ class DataSnapshot:
 
         Args:
             bar_data: dict with keys matching the databook record format:
-                stock_price, stock_high, stock_low, true_price, volume,
+                stock_price, stock_high, stock_low, volume,
                 option_price, pnl_pct, vwap, ema_21, ewo, ewo_15min_avg,
                 rsi, rsi_10min_avg, supertrend_direction, ticker_trend (market_bias),
                 ichimoku_tenkan, ichimoku_kijun, ichimoku_senkou_a, ichimoku_senkou_b
@@ -135,7 +135,7 @@ class DataSnapshot:
 
     def _ichimoku_summary(self, bar):
         """Summarize Ichimoku cloud position."""
-        price = bar.get('true_price', np.nan)
+        price = bar.get('stock_price', np.nan)
         span_a = bar.get('ichimoku_senkou_a', np.nan)
         span_b = bar.get('ichimoku_senkou_b', np.nan)
         tenkan = bar.get('ichimoku_tenkan', np.nan)
@@ -181,7 +181,7 @@ class DataSnapshot:
             f"POSITION: {ticker} {option_type} ${strike} | P&L: {self._safe(pnl_pct)}% | Held: {minutes_held}min\n"
             f"\n"
             f"1-MINUTE (current bar):\n"
-            f"  Price: ${self._safe(current.get('stock_price'))} | True Price: ${self._safe(current.get('true_price'))}\n"
+            f"  Price: ${self._safe(current.get('stock_price'))}\n"
             f"  RSI: {self._safe(current.get('rsi'), '.1f')} | EWO: {self._safe(current.get('ewo'), '.3f')}\n"
             f"  VWAP: ${self._safe(current.get('vwap'))} | EMA: ${self._safe(current.get('ema_21'))}\n"
             f"  Supertrend: {self._supertrend_summary(current)} | Trend: {self._safe(current.get('market_bias'), '.0f')}\n"
@@ -648,7 +648,7 @@ class OptimalExitLogger:
 
     # Indicator columns to capture from each databook bar
     INDICATOR_KEYS = [
-        'stock_price', 'true_price', 'option_price', 'volume',
+        'stock_price', 'option_price', 'volume',
         'pnl_pct',
         'market_bias',
         'vwap', 'ema_10', 'ema_21', 'ema_50', 'ema_100', 'ema_200',
