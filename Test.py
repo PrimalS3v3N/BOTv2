@@ -1442,15 +1442,21 @@ class SimulationEngine:
         """
         Create a Position from a signal.
 
+        Uses the best available entry price: min(signal_cost, market_price).
+        Signal cost is the alert's listed price; market price comes from BS
+        model (backtest) or live quotes. Slippage is applied after selection.
+
         Args:
             signal: Signal dict/series with ticker, strike, option_type, expiration, cost
             entry_stock_price: Stock price at entry
             entry_time: Timestamp of entry
-            entry_option_price: Option price at entry (if None, uses BS model or signal cost)
+            entry_option_price: Market/explicit option price (if None, uses BS model)
 
         Returns:
             (Position, entry_option_price)
         """
+        signal_cost = signal.get('cost')
+
         if entry_option_price is None:
             if signal.get('expiration'):
                 expiry_dt = dt.datetime.combine(
@@ -1460,15 +1466,24 @@ class SimulationEngine:
             else:
                 days_to_expiry = 30
 
-            if signal.get('cost'):
-                entry_option_price = signal.get('cost')
+            bs_price = Analysis.estimate_option_price_bs(
+                stock_price=entry_stock_price,
+                strike=signal['strike'],
+                option_type=signal['option_type'],
+                days_to_expiry=days_to_expiry
+            )
+
+            # Aim for signal price or better (whichever is lower)
+            if signal_cost and signal_cost > 0 and bs_price and bs_price > 0:
+                entry_option_price = min(signal_cost, bs_price)
+            elif signal_cost and signal_cost > 0:
+                entry_option_price = signal_cost
             else:
-                entry_option_price = Analysis.estimate_option_price_bs(
-                    stock_price=entry_stock_price,
-                    strike=signal['strike'],
-                    option_type=signal['option_type'],
-                    days_to_expiry=days_to_expiry
-                )
+                entry_option_price = bs_price
+        else:
+            # Caller provided market price — still aim for signal price or better
+            if signal_cost and signal_cost > 0 and entry_option_price > 0:
+                entry_option_price = min(signal_cost, entry_option_price)
 
         entry_option_price *= (1 + self.slippage_pct)
 
@@ -1997,8 +2012,10 @@ class SimulationEngine:
                     de_trigger_reason = de_filter.trigger_reason
                     de_new_entry_idx = i
 
-                    # Re-enter at the current bar's price
-                    new_entry_option_price = option_price * (1 + self.slippage_pct)
+                    # Re-enter at the best available price (signal price or better)
+                    signal_cost = signal.get('cost')
+                    best_price = min(signal_cost, option_price) if signal_cost and signal_cost > 0 else option_price
+                    new_entry_option_price = best_price * (1 + self.slippage_pct)
                     position.entry_price = new_entry_option_price
                     position.entry_time = timestamp
                     position.current_price = new_entry_option_price
@@ -3134,7 +3151,8 @@ class LiveTest:
 
             # Create position on first data point (if not already created)
             if signal_id not in self.positions:
-                entry_price = signal.get('cost', option_price)
+                # Market price; create_position picks min(signal_cost, market)
+                entry_price = option_price if option_price and option_price > 0 else signal.get('cost', 0)
                 if entry_price and entry_price > 0:
                     # Check if this signal needs delayed entry
                     if signal_id in self._pending_delays:
@@ -3170,7 +3188,7 @@ class LiveTest:
                         # Delay conditions met — create position
                         del self._pending_delays[signal_id]
                         print(f"    DELAY: {delay_reason} — entering {signal_id} @ ${option_price:.2f}")
-                        position, _ = self.engine.create_position(
+                        position, actual_entry = self.engine.create_position(
                             signal=signal,
                             entry_stock_price=stock_price,
                             entry_time=timestamp,
@@ -3180,14 +3198,14 @@ class LiveTest:
                         self.positions[signal_id] = position
                         self.databooks[signal_id] = Databook(position)
                         self._signal_last_bar[signal_id] = -1
-                        print(f"    Position opened (delayed): {signal_id} @ ${option_price:.2f}")
+                        print(f"    Position opened (delayed): {signal_id} @ ${actual_entry:.2f}")
 
                     elif self._should_delay_live_entry(signal, stock_price, timestamp):
                         # New signal that needs delay — register as pending
                         pass  # _should_delay_live_entry already registered it
                     else:
                         # Normal entry — no delay needed
-                        position, _ = self.engine.create_position(
+                        position, actual_entry = self.engine.create_position(
                             signal=signal,
                             entry_stock_price=stock_price,
                             entry_time=timestamp,
@@ -3196,7 +3214,7 @@ class LiveTest:
                         self.positions[signal_id] = position
                         self.databooks[signal_id] = Databook(position)
                         self._signal_last_bar[signal_id] = -1
-                        print(f"    Position opened: {signal_id} @ ${entry_price:.2f}")
+                        print(f"    Position opened: {signal_id} @ ${actual_entry:.2f}")
 
             # Update position if open
             position = self.positions.get(signal_id)
