@@ -527,7 +527,8 @@ class HistoricalDataFetcher:
 class Position:
     """Represents a trading position with state tracking."""
 
-    def __init__(self, signal, entry_price, entry_time, contracts=1):
+    def __init__(self, signal, entry_price, entry_time, contracts=1,
+                 trade_number=1, signal_group_id=None):
         # Signal data
         self.ticker = signal.get('ticker')
         self.strike = signal.get('strike')
@@ -558,6 +559,10 @@ class Position:
 
         # Max profit tracking (entry to end of market day)
         self.max_price_to_eod = entry_price  # Track max price from entry to end of day
+
+        # Re-entry / SignalGroup tracking
+        self.trade_number = trade_number          # 1 = first trade, 2 = re-entry, etc.
+        self.signal_group_id = signal_group_id    # Shared ID across trades from same signal
 
     def update(self, timestamp, price, stock_price=None):
         """Update position with new price data during holding period."""
@@ -622,7 +627,89 @@ class Position:
             'minutes_held': self.get_minutes_held(self.exit_time) if self.exit_time else None,
             'max_price_to_eod': self.max_price_to_eod,
             'delayed_entry': self.delayed_entry_reason,
+            'trade_number': self.trade_number,
+            'signal_group_id': self.signal_group_id,
         }
+
+
+# =============================================================================
+# INTERNAL - SignalGroup (Parent-child trade tracking)
+# =============================================================================
+
+class SignalGroup:
+    """
+    Groups multiple trades under a single Discord signal.
+
+    Signal A (parent) → Trade 1 (entry+exit) → Trade 2 (re-entry+exit)
+
+    Tracks cumulative P&L across all trades for the same signal.
+    Used by the re-entry system to manage multi-trade positions.
+    """
+
+    def __init__(self, signal, group_id=None):
+        self.signal = signal
+        self.group_id = group_id or f"{signal.get('ticker')}:{signal.get('strike')}:{signal.get('option_type')}:{id(self)}"
+        self.positions = []      # List of Position objects (trade 1, trade 2, ...)
+        self.databooks = []      # List of Databook objects (one per trade)
+        self.reentry_count = 0   # Number of re-entries executed
+
+    def add_trade(self, position, databook):
+        """Add a trade (position + databook) to this signal group."""
+        self.positions.append(position)
+        self.databooks.append(databook)
+
+    @property
+    def latest_position(self):
+        """Get the most recent position."""
+        return self.positions[-1] if self.positions else None
+
+    @property
+    def latest_databook(self):
+        """Get the most recent databook."""
+        return self.databooks[-1] if self.databooks else None
+
+    @property
+    def trade_count(self):
+        """Total number of trades in this group."""
+        return len(self.positions)
+
+    def get_cumulative_pnl(self):
+        """Get cumulative P&L in dollars across all closed trades."""
+        total = 0.0
+        for pos in self.positions:
+            if pos.is_closed and pos.exit_price is not None:
+                total += pos.get_pnl(pos.exit_price)
+        return total
+
+    def get_cumulative_pnl_pct(self):
+        """Get cumulative P&L % relative to first trade's entry price."""
+        if not self.positions or self.positions[0].entry_price <= 0:
+            return 0.0
+        first_entry = self.positions[0].entry_price
+        total_pnl = self.get_cumulative_pnl()
+        return (total_pnl / (first_entry * 100 * self.positions[0].contracts)) * 100
+
+    def get_combined_label(self):
+        """Get a label for the entire signal group."""
+        if not self.positions:
+            return 'unknown'
+        base = self.positions[0].get_trade_label()
+        if self.trade_count > 1:
+            return f"{base} ({self.trade_count} trades)"
+        return base
+
+    def get_per_bar_cumulative_pnl(self, bar_timestamp):
+        """
+        Get the cumulative P&L at a specific timestamp across all trades.
+        Includes realized P&L from closed trades + unrealized from open trade.
+        """
+        realized = 0.0
+        for pos in self.positions:
+            if pos.is_closed and pos.exit_time and pos.exit_time <= bar_timestamp:
+                realized += pos.get_pnl(pos.exit_price)
+            elif not pos.is_closed and pos.entry_time and pos.entry_time <= bar_timestamp:
+                realized += pos.get_pnl(pos.current_price)
+        return realized
 
 
 # =============================================================================
@@ -766,6 +853,9 @@ class Databook:
             'tp_trend_30m': (oe_state or {}).get('tp_trend_30m'),
             'sl_ema_reversal': (oe_state or {}).get('sl_ema_reversal'),
             'tp_confirmed': (oe_state or {}).get('tp_confirmed'),
+            # ATR-SL Trend Gate columns
+            'atr_sl_trend': (oe_state or {}).get('atr_sl_trend'),
+            'atr_sl_trend_gate': (oe_state or {}).get('atr_sl_trend_gate'),
             # Exit signal flags (per-bar: which signals would fire)
             'exit_sig_sb': exit_sig_sb,
             'exit_sig_mp': exit_sig_mp,
@@ -799,6 +889,8 @@ class Databook:
             df['entry_time'] = self.position.entry_time
             df['exit_time'] = self.position.exit_time
             df['exit_reason'] = self.position.exit_reason
+            df['trade_number'] = self.position.trade_number
+            df['signal_group_id'] = self.position.signal_group_id
 
             # Reorder columns per Config source of truth
             col_order = Config.DATAFRAME_COLUMNS['databook'] + Config.DATAFRAME_COLUMNS['databook_metadata']
@@ -2077,6 +2169,9 @@ class SimulationEngine:
                             stock_price=sub_stock,
                             ema_values=ema_vals,
                             timestamp=sub_ts,
+                            atr_sl_value=atr_sl_value,
+                            stock_high=stock_high,
+                            stock_low=stock_low,
                         )
 
                         if oe_exit:
@@ -2587,6 +2682,7 @@ class Backtest:
         self.positions = []
         self.databooks = {}
         self.statsbooks = {}
+        self.signal_groups = []
 
         for idx, signal in self.signals_df.iterrows():
             print(f"\n  [{idx+1}/{len(self.signals_df)}] {signal['ticker']} "
@@ -2598,14 +2694,34 @@ class Backtest:
                 print(f"    Building StatsBook for {ticker}...")
                 self.statsbooks[ticker] = self.statsbook_builder.build(ticker)
 
-            position, matrix = self._process_signal(signal)
+            group = self._process_signal(signal)
 
-            if position:
-                self.positions.append(position)
-                self.databooks[position.get_trade_label()] = matrix
+            if group and group.positions:
+                self.signal_groups.append(group)
 
-                pnl = position.get_pnl(position.exit_price) if position.exit_price else 0
-                print(f"    Exit: {position.exit_reason} | P&L: ${pnl:+.2f}")
+                # Unpack all trades from the signal group
+                for pos in group.positions:
+                    self.positions.append(pos)
+                    # Use trade-number-aware label to avoid key collisions
+                    label = pos.get_trade_label()
+                    if pos.trade_number > 1:
+                        label = f"{label}:T{pos.trade_number}"
+
+                for i, (pos, db) in enumerate(zip(group.positions, group.databooks)):
+                    label = pos.get_trade_label()
+                    if pos.trade_number > 1:
+                        label = f"{label}:T{pos.trade_number}"
+                    self.databooks[label] = db
+
+                # Print first trade P&L
+                first_pos = group.positions[0]
+                pnl = first_pos.get_pnl(first_pos.exit_price) if first_pos.exit_price else 0
+                print(f"    Exit: {first_pos.exit_reason} | P&L: ${pnl:+.2f}")
+
+                # Print cumulative P&L if multi-trade
+                if group.trade_count > 1:
+                    cum_pnl = group.get_cumulative_pnl()
+                    print(f"    Signal Group ({group.trade_count} trades) | Cumulative P&L: ${cum_pnl:+.2f}")
 
         # Step 4: Compile results
         print(f"\n{'='*60}")
@@ -2651,7 +2767,11 @@ class Backtest:
         return None
 
     def _process_signal(self, signal):
-        """Process a single signal through the backtest using SimulationEngine."""
+        """
+        Process a single signal through the backtest using SimulationEngine.
+
+        Returns a SignalGroup containing one or more trades (original + re-entries).
+        """
         ticker = signal['ticker']
         signal_time = signal['signal_time']
 
@@ -2665,14 +2785,14 @@ class Backtest:
 
         if stock_data is None or stock_data.empty:
             print(f"    No data available for {ticker}")
-            return None, None
+            return None
 
         # Find entry point
         entry_idx = stock_data.index.searchsorted(signal_time)
 
         if entry_idx >= len(stock_data):
             print(f"    No data after signal time")
-            return None, None
+            return None
 
         # Get entry bar
         entry_bar = stock_data.iloc[entry_idx]
@@ -2684,7 +2804,7 @@ class Backtest:
         delayed_entry_reason = None
         if delay_result is False:
             # Delay needed but no valid entry found — skip trade
-            return None, None
+            return None
         elif delay_result is not None:
             # Delayed entry found — use new entry point
             entry_idx = delay_result['entry_idx']
@@ -2693,7 +2813,10 @@ class Backtest:
             entry_stock_price = delay_result['entry_stock_price']
             delayed_entry_reason = delay_result['delay_reason']
 
-        # Create position via engine
+        # Create SignalGroup for this signal
+        group = SignalGroup(signal)
+
+        # Create position via engine (Trade 1)
         entry_option_price_override = delay_result.get('entry_option_price') if delay_result and delay_result is not False else None
         position, entry_option_price = self.engine.create_position(
             signal=signal,
@@ -2701,6 +2824,8 @@ class Backtest:
             entry_time=entry_time,
             entry_option_price=entry_option_price_override,
         )
+        position.trade_number = 1
+        position.signal_group_id = group.group_id
 
         # Store delay info on position for tracking
         if delayed_entry_reason:
@@ -2724,7 +2849,131 @@ class Backtest:
             spy_data=spy_data,
         )
 
-        return position, matrix
+        group.add_trade(position, matrix)
+
+        # --- Re-entry check ---
+        reentry_config = self.config.get('reentry', {})
+        if reentry_config.get('enabled', False) and position.is_closed:
+            reentry_result = self._attempt_reentry(
+                signal=signal,
+                group=group,
+                stock_data=stock_data,
+                spy_data=spy_data,
+                reentry_config=reentry_config,
+            )
+            # reentry_result is handled inside _attempt_reentry (adds to group)
+
+        return group
+
+    def _attempt_reentry(self, signal, group, stock_data, spy_data, reentry_config):
+        """
+        Check if re-entry conditions are met after Trade 1 exits.
+
+        Conditions:
+          1. Trade 1 exited via a qualifying reason (e.g., Trail-TP)
+          2. Re-entry limit not reached
+          3. Option price dropped below original signal cost
+          4. Enough time left in the trading day
+
+        If conditions met, creates Trade 2 and simulates it.
+        """
+        max_reentries = reentry_config.get('max_reentries', 1)
+        trigger_reasons = reentry_config.get('trigger_exit_reasons', ['Trail-TP'])
+        require_below_cost = reentry_config.get('price_below_signal_cost', True)
+
+        prev_position = group.latest_position
+        if not prev_position or not prev_position.is_closed:
+            return
+
+        # Check re-entry limit
+        if group.reentry_count >= max_reentries:
+            return
+
+        # Check if exit reason qualifies
+        if prev_position.exit_reason not in trigger_reasons:
+            return
+
+        # Find re-entry point: scan bars after Trade 1 exit
+        exit_time = prev_position.exit_time
+        exit_idx = stock_data.index.searchsorted(exit_time)
+        signal_cost = signal.get('cost', 0)
+
+        if signal_cost <= 0:
+            return
+
+        # Scan for option price dropping below signal cost
+        for scan_idx in range(exit_idx + 1, len(stock_data)):
+            scan_ts = stock_data.index[scan_idx]
+
+            # Don't re-enter in last 30 minutes
+            if scan_ts.time() >= dt.time(15, 30):
+                break
+
+            scan_bar = stock_data.iloc[scan_idx]
+            scan_stock_price = scan_bar['close']
+
+            # Estimate option price at this bar
+            try:
+                expiry_dt = pd.Timestamp(signal.get('expiration'))
+                if expiry_dt.tzinfo is None:
+                    expiry_dt = expiry_dt.tz_localize(EASTERN)
+                days_to_expiry = max(0, (expiry_dt - scan_ts).total_seconds() / 86400)
+
+                scan_option_price = Analysis.estimate_option_price_bs(
+                    stock_price=scan_stock_price,
+                    strike=signal.get('strike'),
+                    option_type=signal.get('option_type'),
+                    days_to_expiry=days_to_expiry,
+                    entry_price=prev_position.entry_price,
+                    entry_stock_price=scan_bar['close'],
+                    entry_days_to_expiry=days_to_expiry + 1
+                )
+            except Exception:
+                continue
+
+            # Check: option price below signal cost
+            if require_below_cost and scan_option_price >= signal_cost:
+                continue
+
+            # Re-entry conditions met
+            reentry_stock_price = scan_stock_price
+            reentry_time = scan_ts
+            reentry_idx = scan_idx
+
+            # Create re-entry position (Trade 2)
+            reentry_position, reentry_option_price = self.engine.create_position(
+                signal=signal,
+                entry_stock_price=reentry_stock_price,
+                entry_time=reentry_time,
+                entry_option_price=scan_option_price,
+            )
+            reentry_position.trade_number = group.trade_count + 1
+            reentry_position.signal_group_id = group.group_id
+
+            # Create tracking matrix for re-entry
+            reentry_matrix = Databook(reentry_position)
+
+            print(f"    RE-ENTRY: Trade {reentry_position.trade_number} at "
+                  f"${scan_option_price:.2f} (signal cost: ${signal_cost:.2f})")
+
+            # Simulate re-entry trade
+            self.engine.simulate_position(
+                position=reentry_position,
+                matrix=reentry_matrix,
+                stock_data=stock_data,
+                signal=signal,
+                entry_idx=reentry_idx,
+                entry_stock_price=reentry_stock_price,
+                statsbooks=self.statsbooks,
+                spy_data=spy_data,
+            )
+
+            group.add_trade(reentry_position, reentry_matrix)
+            group.reentry_count += 1
+
+            pnl = reentry_position.get_pnl(reentry_position.exit_price) if reentry_position.exit_price else 0
+            print(f"    RE-ENTRY Exit: {reentry_position.exit_reason} | P&L: ${pnl:+.2f}")
+            break  # Only one re-entry per signal
 
     def _compile_results(self):
         """Compile backtest results via SimulationEngine."""
@@ -2832,9 +3081,25 @@ class Backtest:
 
         try:
             # Format data for Dashboard.py which expects 'matrices' key
+            # Also include signal_groups for multi-trade tracking
+            signal_group_data = {}
+            for group in getattr(self, 'signal_groups', []):
+                signal_group_data[group.group_id] = {
+                    'group_id': group.group_id,
+                    'trade_count': group.trade_count,
+                    'cumulative_pnl': group.get_cumulative_pnl(),
+                    'cumulative_pnl_pct': group.get_cumulative_pnl_pct(),
+                    'trade_labels': [
+                        (p.get_trade_label() if p.trade_number == 1
+                         else f"{p.get_trade_label()}:T{p.trade_number}")
+                        for p in group.positions
+                    ],
+                }
+
             dashboard_data = {
                 'matrices': self.results.get('Databooks', {}),
                 'statsbooks': self.results.get('StatsBooks', {}),
+                'signal_groups': signal_group_data,
             }
             with open(filepath, 'wb') as f:
                 pickle.dump(dashboard_data, f)

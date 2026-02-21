@@ -1066,6 +1066,14 @@ class OptionsExitDetector:
         # ATR-SL
         self.atr_sl_enabled = config.get('atr_sl_enabled', True)
 
+        # ATR-SL Trend Gate: suppress Trail-TP while trend is intact
+        self.atr_sl_trend_gate_enabled = config.get('atr_sl_trend_gate_enabled', False)
+        self.atr_sl_trend_sideways_bars = config.get('atr_sl_trend_sideways_bars', 5)
+        self._recent_highs = []    # Rolling window of stock highs for sideways detection
+        self._recent_lows = []     # Rolling window of stock lows for sideways detection
+        self.atr_sl_trend = None   # Current ATR-SL trend: 'Uptrend' / 'Downtrend' / 'Sideways'
+        self.atr_sl_trend_gate_active = False  # True = Trail-TP suppressed by trend
+
         # MACD
         self.macd_enabled = config.get('macd_enabled', True)
 
@@ -1164,6 +1172,70 @@ class OptionsExitDetector:
             return self._adaptive_buffer_base / decay_factor
         # Fallback: use minimum buffer
         return self.trail_buffer_min_pct
+
+    # ------------------------------------------------------------------
+    # ATR-SL trend classification
+    # ------------------------------------------------------------------
+
+    def _classify_atr_sl_trend(self, stock_price, stock_high, stock_low, atr_sl_value):
+        """
+        Classify the current ATR-SL trend state.
+
+        For PUTS (inverse logic for CALLS):
+          - Downtrend: stock_price < ATR-SL (good for puts, hold)
+          - Uptrend:   stock_price lows > ATR-SL (bad for puts, sell signal)
+          - Sideways:  ATR-SL is between the last N-bar high and low
+
+        Returns:
+            str: 'Uptrend', 'Downtrend', or 'Sideways'
+        """
+        if np.isnan(atr_sl_value) or np.isnan(stock_price):
+            return self.atr_sl_trend  # Keep previous state
+
+        # Track rolling highs/lows for sideways detection
+        if not np.isnan(stock_high):
+            self._recent_highs.append(stock_high)
+        if not np.isnan(stock_low):
+            self._recent_lows.append(stock_low)
+
+        # Trim to window size
+        window = self.atr_sl_trend_sideways_bars
+        if len(self._recent_highs) > window:
+            self._recent_highs = self._recent_highs[-window:]
+        if len(self._recent_lows) > window:
+            self._recent_lows = self._recent_lows[-window:]
+
+        # Sideways: ATR-SL is between the recent N-bar high and low
+        if self._recent_highs and self._recent_lows:
+            recent_high = max(self._recent_highs)
+            recent_low = min(self._recent_lows)
+            if recent_low <= atr_sl_value <= recent_high:
+                return 'Sideways'
+
+        # Directional classification
+        if stock_price > atr_sl_value:
+            return 'Uptrend'    # Stock above ATR-SL = bullish
+        else:
+            return 'Downtrend'  # Stock below ATR-SL = bearish
+
+    def _is_trend_favorable(self):
+        """
+        Check if the ATR-SL trend is favorable for holding the position.
+
+        CALLS: Uptrend is favorable (stock above ATR-SL → hold)
+        PUTS:  Downtrend is favorable (stock below ATR-SL → hold)
+        Sideways: Not favorable (no clear trend → allow exit)
+
+        Returns:
+            bool: True if trend supports holding, False if exit is OK.
+        """
+        if self.atr_sl_trend is None:
+            return False  # No data yet, don't gate
+
+        if self.is_call:
+            return self.atr_sl_trend == 'Uptrend'
+        else:
+            return self.atr_sl_trend == 'Downtrend'
 
     # ------------------------------------------------------------------
     # Velocity deceleration detection
@@ -1477,7 +1549,8 @@ class OptionsExitDetector:
     # Per-tick update (called per-second during extrapolated simulation)
     # ------------------------------------------------------------------
 
-    def update(self, option_price, stock_price, ema_values=None, timestamp=None):
+    def update(self, option_price, stock_price, ema_values=None, timestamp=None,
+               atr_sl_value=np.nan, stock_high=np.nan, stock_low=np.nan):
         """
         Per-tick update: check hard SL, update trailing TP, check EMA reversal.
 
@@ -1488,6 +1561,9 @@ class OptionsExitDetector:
             stock_price: Current stock price
             ema_values: dict mapping period -> EMA value (for reversal detection)
             timestamp: Current timestamp for time-based tracking
+            atr_sl_value: Current ATR-SL value (for trend gate)
+            stock_high: Current bar high (for sideways detection)
+            stock_low: Current bar low (for sideways detection)
 
         Returns:
             (should_exit, exit_reason, state_dict)
@@ -1523,6 +1599,12 @@ class OptionsExitDetector:
             elif not self.is_call and stock_price > ema_val:
                 emas_against += 1
         self.ema_reversal = emas_against >= self.ema_reversal_sensitivity
+
+        # --- ATR-SL trend classification ---
+        if self.atr_sl_trend_gate_enabled and not np.isnan(atr_sl_value):
+            self.atr_sl_trend = self._classify_atr_sl_trend(
+                stock_price, stock_high, stock_low, atr_sl_value)
+            self.atr_sl_trend_gate_active = self._is_trend_favorable()
 
         # --- Update profit watermark (needed before hard SL adjustment) ---
         if profit_pct > self.highest_profit_pct:
@@ -1568,9 +1650,17 @@ class OptionsExitDetector:
                 self.trailing_tp_price = new_trailing_tp
 
             # Check if price hit trailing TP
+            # Trend gate: suppress Trail-TP exit while ATR-SL trend is favorable
             if option_price <= self.trailing_tp_price:
-                state = self._build_state(option_price, profit_pct)
-                return True, 'Trail-TP', state
+                if self.atr_sl_trend_gate_active:
+                    # Trend is intact — hold the position, don't exit yet.
+                    # The trailing TP price continues to ratchet up, so when
+                    # the trend eventually breaks, the exit will capture the
+                    # higher trailing level.
+                    pass
+                else:
+                    state = self._build_state(option_price, profit_pct)
+                    return True, 'Trail-TP', state
 
         # --- Velocity deceleration exit (proactive peak detection) ---
         if self._check_velocity_exit(stock_price, profit_pct, ema_values, timestamp):
@@ -1626,6 +1716,8 @@ class OptionsExitDetector:
             'tp_trend_30m': self.trend_30m,
             'sl_ema_reversal': self.ema_reversal,
             'tp_confirmed': self.confirmed,
+            'atr_sl_trend': self.atr_sl_trend,
+            'atr_sl_trend_gate': self.atr_sl_trend_gate_active,
         }
 
 

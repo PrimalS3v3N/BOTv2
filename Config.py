@@ -55,6 +55,10 @@ VELOCITY_EXIT_ENABLED           = True      # Proactive peak detection via decel
 ATR_SL_ENABLED                  = True      # ATR-SL favorability at entry
 MACD_ENABLED                    = True      # MACD histogram trend confirmation
 
+# --- ATR-SL Trend Gate (Trailing TP trend-awareness) ---
+ATR_SL_TREND_GATE_ENABLED       = True      # Hold through trend; only exit when trend breaks
+REENTRY_ENABLED                 = True      # Re-enter after Trail-TP if price drops below signal cost
+
 # --- Market Data ---
 SPY_GAUGE_ENABLED               = True      # SPY as market health indicator
 
@@ -514,6 +518,36 @@ BACKTEST_CONFIG = {
         # --- Price Momentum (ROC) ---
         # Rate of change over lookback to quantify 30-min trend strength
         'roc_period': 30,                  # 30-bar ROC for trend strength
+
+        # --- ATR-SL Trend Gate ---
+        # Uses ATR-SL as a trend filter for trailing TP.  When the underlying
+        # trend is intact (stock on the right side of ATR-SL), the trailing TP
+        # exit is suppressed — the trade rides the trend.  Only when ATR-SL
+        # flips against the position (trend break) does Trail-TP become active.
+        #
+        # PUTS: stock_price < ATR-SL = Downtrend (hold) → ATR-SL < stock_price = sell
+        # CALLS: stock_price > ATR-SL = Uptrend (hold) → ATR-SL > stock_price = sell
+        # Sideways: ATR-SL between last 5-bar high and low (no trend bias)
+        'atr_sl_trend_gate_enabled': ATR_SL_TREND_GATE_ENABLED,
+        'atr_sl_trend_sideways_bars': 5,   # Bars to compute high/low for sideways detection
+    },
+
+    # --- Re-entry System ---
+    # After a Trail-TP exit, if the option price drops back below the original
+    # signal cost, re-enter the same contract.  All trades under the same
+    # Discord signal are grouped as a SignalGroup (parent → child trades).
+    #
+    # Limit: 1 re-entry per signal (max 2 trades per signal).
+    #
+    # Re-entry conditions:
+    #   1. Trade 1 exited via Trail-TP (profitable exit, trend may resume)
+    #   2. Option price has dropped below original signaled cost
+    #   3. ATR-SL trend is still intact (for the contract direction)
+    'reentry': {
+        'enabled': REENTRY_ENABLED,
+        'max_reentries': 1,                # Max re-entries per signal (1 = 2 trades total)
+        'trigger_exit_reasons': ['Trail-TP'],  # Exit reasons that qualify for re-entry
+        'price_below_signal_cost': True,   # Option price must be below original signal cost
     },
 }
 
@@ -624,6 +658,7 @@ DATAFRAME_COLUMNS = {
         'contracts', 'highest_price', 'lowest_price',
         'pnl', 'pnl_pct', 'minutes_held',
         'max_price_to_eod', 'delayed_entry',
+        'trade_number', 'signal_group_id',
     ],
 
     # Per-bar tracking data from Databook (Test.py)
@@ -664,6 +699,8 @@ DATAFRAME_COLUMNS = {
         'tp_trend_30m',            # 30-min trend: Uptrend / Downtrend / Sideways
         'sl_ema_reversal',         # EMA reversal flag (True/False)
         'tp_confirmed',            # Post-entry confirmation: Confirmed / Denied / Pending
+        'atr_sl_trend',            # ATR-SL trend state: Uptrend / Downtrend / Sideways
+        'atr_sl_trend_gate',       # True = trend gate is suppressing Trail-TP
         # Exit signal flags (per-bar boolean: which signals would fire)
         'exit_sig_sb', 'exit_sig_mp', 'exit_sig_ai',
         'exit_sig_closure_peak',
@@ -682,6 +719,7 @@ DATAFRAME_COLUMNS = {
     'databook_metadata': [
         'trade_label', 'ticker', 'strike', 'option_type', 'expiration',
         'contracts', 'entry_time', 'exit_time', 'exit_reason',
+        'trade_number', 'signal_group_id',
     ],
 
     # DataSummary: 2-minute aggregated summary of DataBook for dashboard display
