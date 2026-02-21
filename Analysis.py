@@ -8,6 +8,8 @@ INTERNAL - Indicator Calculations
 ================================================================================
 """
 
+import random
+
 import pandas as pd
 import numpy as np
 
@@ -1001,16 +1003,25 @@ def estimate_option_price_bs(stock_price, strike, option_type, days_to_expiry,
     return max(min_price, theoretical_price)
 
 
-def extrapolate_bar_prices(open_price, high_price, low_price, close_price, n=60):
+def extrapolate_bar_prices(open_price, high_price, low_price, close_price,
+                           n=60, high_span_max=None, low_span_max=None,
+                           min_segment=1):
     """
     Extrapolate a single OHLC bar into n per-second price points.
 
     Creates a realistic intra-bar price path that visits the high and low
-    within the bar, distributed in equal thirds (20-20-20 for n=60).
+    within the bar. Segment durations are randomized each call for realistic
+    variation in when the high/low occur within the bar.
 
     Path logic:
       - Bearish bar (open > close): open → high → low → close
       - Bullish bar (open <= close): open → low → high → close
+
+    Timing:
+      - high_span: random(min_segment, high_span_max) seconds to reach the high
+      - low_span:  random(min_segment, low_span_max) seconds to reach the low
+      - close_span: remaining seconds (n - high_span - low_span)
+      Example: high=25, low=20 → close_span = 60 - 25 - 20 = 15 seconds
 
     Args:
         open_price: Bar open price
@@ -1018,6 +1029,9 @@ def extrapolate_bar_prices(open_price, high_price, low_price, close_price, n=60)
         low_price: Bar low price
         close_price: Bar close price
         n: Number of points to generate (default: 60 for 1 point/second)
+        high_span_max: Max seconds for segment reaching the high (None = n//3)
+        low_span_max: Max seconds for segment reaching the low (None = n//3)
+        min_segment: Minimum seconds per segment (default: 1)
 
     Returns:
         numpy array of n interpolated prices
@@ -1043,10 +1057,31 @@ def extrapolate_bar_prices(open_price, high_price, low_price, close_price, n=60)
         # Bullish: open → low → high → close
         waypoints = [open_price, low_price, high_price, close_price]
 
-    # Split n points into 3 equal segments
-    seg1 = n // 3           # First segment length
-    seg2 = n // 3           # Second segment length
-    seg3 = n - seg1 - seg2  # Third segment gets remainder
+    # Randomize segment durations (high_span, low_span, close gets the rest)
+    # For bearish: seg1=high_span, seg2=low_span, seg3=close_span
+    # For bullish: seg1=low_span, seg2=high_span, seg3=close_span
+    if high_span_max is not None and low_span_max is not None:
+        min_seg = max(1, min_segment)
+        # Cap maximums so all 3 segments can fit with at least min_seg each
+        eff_high_max = min(high_span_max, n - 2 * min_seg)
+        eff_low_max = min(low_span_max, n - 2 * min_seg)
+
+        if open_price > close_price:
+            # Bearish: seg1 = high, seg2 = low
+            seg1 = random.randint(min_seg, max(min_seg, eff_high_max))
+            seg2_max = min(eff_low_max, n - seg1 - min_seg)
+            seg2 = random.randint(min_seg, max(min_seg, seg2_max))
+        else:
+            # Bullish: seg1 = low, seg2 = high
+            seg1 = random.randint(min_seg, max(min_seg, eff_low_max))
+            seg2_max = min(eff_high_max, n - seg1 - min_seg)
+            seg2 = random.randint(min_seg, max(min_seg, seg2_max))
+        seg3 = n - seg1 - seg2
+    else:
+        # Fallback: equal thirds (legacy behavior)
+        seg1 = n // 3
+        seg2 = n // 3
+        seg3 = n - seg1 - seg2
 
     # Generate linear interpolation for each segment
     # endpoint=False on first two segments to avoid duplicating boundary points
