@@ -70,7 +70,7 @@ def _load_pickle(path, _mtime):
     """Load and cache pickle data. _mtime param busts cache on file change."""
     with open(path, 'rb') as f:
         data = pickle.load(f)
-    return data.get('matrices', {}), data.get('statsbooks', {})
+    return data.get('matrices', {}), data.get('statsbooks', {}), data.get('signal_groups', {})
 
 
 def load_data():
@@ -79,8 +79,9 @@ def load_data():
         return {}
     try:
         mtime = os.path.getmtime(DATA_PATH)
-        matrices, statsbooks = _load_pickle(DATA_PATH, mtime)
+        matrices, statsbooks, signal_groups = _load_pickle(DATA_PATH, mtime)
         st.session_state.statsbooks = statsbooks
+        st.session_state.signal_groups = signal_groups
         return matrices
     except Exception as e:
         st.error(f"Error loading data: {e}")
@@ -389,6 +390,32 @@ def create_trade_chart(df, trade_label, market_hours_only=False, show_ewo=True, 
             ),
             row=1, col=1, secondary_y=False
         )
+
+        # ATR-SL Trend Gate shading: color background based on trend state
+        if 'atr_sl_trend' in df.columns and df['atr_sl_trend'].notna().any():
+            trend_data = df[['time', 'atr_sl_trend']].dropna(subset=['atr_sl_trend']).copy()
+            if not trend_data.empty:
+                trend_data['group'] = (trend_data['atr_sl_trend'] != trend_data['atr_sl_trend'].shift()).cumsum()
+                trend_bounds = trend_data.groupby('group').agg(
+                    x0=('time', 'first'),
+                    x1=('time', 'last'),
+                    val=('atr_sl_trend', 'first')
+                )
+                trend_colors = {
+                    'Uptrend': 'rgba(0, 200, 83, 0.06)',     # Faint green
+                    'Downtrend': 'rgba(255, 23, 68, 0.06)',   # Faint red
+                    'Sideways': 'rgba(255, 235, 59, 0.06)',   # Faint yellow
+                }
+                shapes = list(fig.layout.shapes or [])
+                for _, row_data in trend_bounds.iterrows():
+                    color = trend_colors.get(row_data['val'])
+                    if color:
+                        shapes.append(dict(
+                            type='rect', xref='x', yref='paper',
+                            x0=row_data['x0'], x1=row_data['x1'], y0=0, y1=1,
+                            fillcolor=color, layer='below', line_width=0,
+                        ))
+                fig.update_layout(shapes=shapes)
 
     # Ichimoku Cloud (left y-axis) - cloud fill between Senkou spans + Tenkan/Kijun lines
     if show_ichimoku:
@@ -778,6 +805,24 @@ def create_trade_chart(df, trade_label, market_hours_only=False, show_ewo=True, 
             row=spy_row, col=1, secondary_y=False
         )
 
+        # Cumulative P&L on secondary y-axis of SPY subplot
+        if 'pnl' in df.columns and df['pnl'].notna().any():
+            holding_mask = df['holding'] == True if 'holding' in df.columns else pd.Series(True, index=df.index)
+            pnl_data = df.loc[holding_mask, ['time', 'pnl']].dropna()
+            if not pnl_data.empty:
+                fig.add_trace(
+                    go.Scatter(
+                        x=pnl_data['time'],
+                        y=pnl_data['pnl'],
+                        name='P&L ($)',
+                        line=dict(color='#00E5FF', width=2),
+                        fill='tozeroy',
+                        fillcolor='rgba(0, 229, 255, 0.08)',
+                        hovertemplate='P&L: $%{y:+.2f}<extra></extra>'
+                    ),
+                    row=spy_row, col=1, secondary_y=True
+                )
+
         # SPY gauge sentiment as color-coded markers on secondary axis
         # Map gauge columns to display
         spy_gauge_cols = {
@@ -907,6 +952,9 @@ def create_trade_chart(df, trade_label, market_hours_only=False, show_ewo=True, 
         else:
             fig.update_yaxes(title_text="SPY ($)", secondary_y=False, tickformat='$.2f', row=spy_row, col=1)
 
+        # P&L secondary y-axis label
+        fig.update_yaxes(title_text="P&L ($)", secondary_y=True, tickformat='$+.0f', row=spy_row, col=1)
+
     return fig
 
 
@@ -987,6 +1035,18 @@ def get_trade_summary(df):
                 count = int((holding_df[sig_col] == True).sum())
                 exit_signal_counts[sig_label] = count
 
+    # ATR-SL trend gate tracking
+    atr_sl_trend_at_exit = 'N/A'
+    trend_gate_bars = 0
+    if not holding_df.empty:
+        if 'atr_sl_trend' in holding_df.columns and holding_df['atr_sl_trend'].notna().any():
+            atr_sl_trend_at_exit = str(holding_df['atr_sl_trend'].iloc[-1])
+        if 'atr_sl_trend_gate' in holding_df.columns:
+            trend_gate_bars = int((holding_df['atr_sl_trend_gate'] == True).sum())
+
+    # Trade number (for re-entry tracking)
+    trade_number = int(df['trade_number'].iloc[0]) if 'trade_number' in df.columns and df['trade_number'].notna().any() else 1
+
     return {
         'entry': entry_price,
         'exit': exit_price,
@@ -1003,6 +1063,9 @@ def get_trade_summary(df):
         'risk_reasons': risk_reasons,
         'risk_trend': risk_trend,
         'exit_signal_counts': exit_signal_counts,
+        'atr_sl_trend': atr_sl_trend_at_exit,
+        'trend_gate_bars': trend_gate_bars,
+        'trade_number': trade_number,
     }
 
 
@@ -1101,26 +1164,22 @@ def main():
         st.header("Trades")
 
         # Compute all trade summaries once and reuse
-        trade_list = []
         summaries = {}
         total_profit_dollars = 0.0
         total_investment = 0.0
         potential_profit_dollars = 0.0
 
+        # Group trades by signal_group_id for multi-trade signals
+        # signal_group_map: group_id -> list of (pos_id, tdf, summary)
+        signal_group_map = {}
+        ungrouped = []
+
         for pos_id, tdf in matrices.items():
             if tdf.empty:
                 continue
-            # Build label as "Ticker : strike : c/p"
-            ticker = tdf['ticker'].iloc[0] if 'ticker' in tdf.columns else 'UNK'
-            strike = tdf['strike'].iloc[0] if 'strike' in tdf.columns else 0
-            opt_type = tdf['option_type'].iloc[0] if 'option_type' in tdf.columns else '?'
-            cp = opt_type[0].upper() if opt_type else '?'
-            label = f"{ticker} : {strike:.0f} : {cp}"
 
             summary = get_trade_summary(tdf)
             summaries[pos_id] = summary
-            pnl = summary['pnl_pct']
-            trade_list.append((label, pos_id, pnl))
 
             # Accumulate totals in the same pass
             entry_p = summary['entry']
@@ -1132,6 +1191,61 @@ def main():
                 total_investment += inv
                 total_profit_dollars += (exit_p - entry_p) * contracts * 100
                 potential_profit_dollars += (max_p - entry_p) * contracts * 100
+
+            # Check for signal_group_id
+            group_id = None
+            if 'signal_group_id' in tdf.columns and tdf['signal_group_id'].notna().any():
+                group_id = tdf['signal_group_id'].iloc[0]
+
+            if group_id:
+                if group_id not in signal_group_map:
+                    signal_group_map[group_id] = []
+                signal_group_map[group_id].append((pos_id, tdf, summary))
+            else:
+                ungrouped.append((pos_id, tdf, summary))
+
+        # Build trade_list: each entry is (label, pos_ids_list, total_pnl)
+        # For grouped signals: single entry with combined P&L
+        # For ungrouped: single entry per trade
+        trade_list = []
+
+        for group_id, trades in signal_group_map.items():
+            # Sort trades by trade_number within group
+            trades.sort(key=lambda t: int(t[1]['trade_number'].iloc[0]) if 'trade_number' in t[1].columns and t[1]['trade_number'].notna().any() else 1)
+            first_tdf = trades[0][1]
+            ticker = first_tdf['ticker'].iloc[0] if 'ticker' in first_tdf.columns else 'UNK'
+            strike = first_tdf['strike'].iloc[0] if 'strike' in first_tdf.columns else 0
+            opt_type = first_tdf['option_type'].iloc[0] if 'option_type' in first_tdf.columns else '?'
+            cp = opt_type[0].upper() if opt_type else '?'
+
+            pos_ids = [t[0] for t in trades]
+
+            if len(trades) > 1:
+                # Multi-trade signal: compute total P&L across all trades
+                total_pnl_dollars = 0.0
+                total_entry_cost = 0.0
+                for _, tdf, s in trades:
+                    contracts = int(tdf['contracts'].iloc[0]) if 'contracts' in tdf.columns else 1
+                    entry_cost = s['entry'] * contracts * 100
+                    total_entry_cost += entry_cost
+                    total_pnl_dollars += (s['exit'] - s['entry']) * contracts * 100
+                total_pnl_pct = (total_pnl_dollars / total_entry_cost * 100) if total_entry_cost > 0 else 0
+                label = f"{ticker} : {strike:.0f} : {cp}"
+                trade_list.append((label, pos_ids, total_pnl_pct))
+            else:
+                # Single trade in group
+                label = f"{ticker} : {strike:.0f} : {cp}"
+                pnl = trades[0][2]['pnl_pct']
+                trade_list.append((label, pos_ids, pnl))
+
+        for pos_id, tdf, summary in ungrouped:
+            ticker = tdf['ticker'].iloc[0] if 'ticker' in tdf.columns else 'UNK'
+            strike = tdf['strike'].iloc[0] if 'strike' in tdf.columns else 0
+            opt_type = tdf['option_type'].iloc[0] if 'option_type' in tdf.columns else '?'
+            cp = opt_type[0].upper() if opt_type else '?'
+            label = f"{ticker} : {strike:.0f} : {cp}"
+            pnl = summary['pnl_pct']
+            trade_list.append((label, [pos_id], pnl))
 
         # Sort by P&L descending (winners first, losers last)
         trade_list.sort(key=lambda x: x[2], reverse=True)
@@ -1148,6 +1262,7 @@ def main():
 
         if st.button("Reload Data"):
             st.session_state.pop('statsbooks', None)
+            st.session_state.pop('signal_groups', None)
             _load_pickle.clear()
             create_trade_chart.clear()
             get_trade_summary.clear()
@@ -1177,65 +1292,90 @@ def main():
         st.markdown("---")
         st.caption(f"{len(matrices)} trades loaded")
 
-    # Display selected trade
-    trade_label, pos_id, _ = trade_list[selected_idx]
-    df = matrices[pos_id]
+    # Display selected trade(s) — grouped signals show all trades on same page
+    trade_label, pos_ids, _ = trade_list[selected_idx]
+    is_multi_trade = len(pos_ids) > 1
 
-    # Chart first (no summary above)
-    fig = create_trade_chart(df, trade_label, market_hours_only, show_ewo, show_rsi, show_supertrend, show_ichimoku, show_atr_sl, show_market_trend)
-    if fig:
-        st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.error("Could not create chart")
+    for trade_idx, pos_id in enumerate(pos_ids):
+        df = matrices[pos_id]
 
-    # Trade Summary below chart (two rows) - only render when toggle is on
-    if show_trade_summary:
-        st.subheader("Trade Summary")
-        summary = summaries[pos_id]
+        # For multi-trade signals, add trade number header
+        if is_multi_trade:
+            trade_num = int(df['trade_number'].iloc[0]) if 'trade_number' in df.columns and df['trade_number'].notna().any() else trade_idx + 1
+            chart_label = f"{trade_label} [T{trade_num}]"
+        else:
+            chart_label = trade_label
 
-        # Row 1: Entry | Exit | P&L | Market | Risk | Risk Trend | Profit[min]
-        row1 = st.columns(7)
-        row1[0].metric("Entry", f"${summary['entry']:.2f}")
-        row1[1].metric("Exit", f"${summary['exit']:.2f}")
-        row1[2].metric("P&L", f"{summary['pnl_pct']:+.1f}%")
-        row1[3].metric("Trend", summary['market_trend'])
-        row1[4].metric("Risk", summary['risk'])
-        row1[5].metric("Risk Trend", summary['risk_trend'] or 'N/A')
-        row1[6].metric("Profit[min]", f"${summary['profit_min']:+.2f}")
+        # Chart
+        fig = create_trade_chart(df, chart_label, market_hours_only, show_ewo, show_rsi, show_supertrend, show_ichimoku, show_atr_sl, show_market_trend)
+        if fig:
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.error(f"Could not create chart for {chart_label}")
 
-        # Row 2: Min Profit | Exit Reason | Max Profit | Risk Reasons
-        row2 = st.columns(7)
-        row2[0].metric("Min Profit", f"{summary['min_profit_pct']:+.1f}%")
-        row2[1].metric("Exit Reason", summary['exit_reason'])
-        row2[2].metric("Max Profit", f"{summary['max_profit_pct']:+.1f}%")
-        row2[3].metric("Risk Reasons", summary['risk_reasons'] or 'N/A')
-
-        # Show exit signal counts in remaining columns
-        sig_counts = summary.get('exit_signal_counts', {})
-        active_sigs = {k: v for k, v in sig_counts.items() if v > 0}
-        active_sig_items = list(active_sigs.items())
-        for col_idx in range(3):
-            if col_idx < len(active_sig_items):
-                sig_name, sig_count = active_sig_items[col_idx]
-                row2[4 + col_idx].metric(f"Sig: {sig_name}", f"{sig_count} bars")
+        # Trade Summary below chart (two rows) - only render when toggle is on
+        if show_trade_summary:
+            if is_multi_trade:
+                st.subheader(f"Trade Summary — T{trade_num if is_multi_trade else ''}")
             else:
-                # Show combined summary if more signals exist
-                if col_idx == 0 and not active_sig_items:
-                    row2[4].metric("Signals", "None")
-                elif col_idx == 0 and len(active_sig_items) > 3:
-                    remaining = len(active_sig_items) - 3
-                    row2[4 + col_idx].metric(f"+{remaining} more", "...")
-                else:
-                    row2[4 + col_idx].metric("", "")
+                st.subheader("Trade Summary")
+            summary = summaries[pos_id]
 
-        # Row 3: Exit signal bar counts (all signals that fired during holding)
-        if active_sig_items:
-            st.subheader("Exit Signals")
-            # Show all exit signal counts in a dynamic row
-            num_sigs = len(active_sig_items)
-            sig_cols = st.columns(max(num_sigs, 1))
-            for i, (sig_name, sig_count) in enumerate(active_sig_items):
-                sig_cols[i].metric(sig_name, f"{sig_count} bars")
+            # Row 1: Entry | Exit | P&L | ATR-SL Trend | Risk | Risk Trend | Profit[min]
+            row1 = st.columns(7)
+            trade_label_display = f"${summary['entry']:.2f}"
+            if summary.get('trade_number', 1) > 1:
+                trade_label_display += f" (T{summary['trade_number']})"
+            row1[0].metric("Entry", trade_label_display)
+            row1[1].metric("Exit", f"${summary['exit']:.2f}")
+            row1[2].metric("P&L", f"{summary['pnl_pct']:+.1f}%")
+            row1[3].metric("ATR Trend", summary.get('atr_sl_trend', 'N/A'))
+            row1[4].metric("Risk", summary['risk'])
+            row1[5].metric("Risk Trend", summary['risk_trend'] or 'N/A')
+            row1[6].metric("Profit[min]", f"${summary['profit_min']:+.2f}")
+
+            # Row 2: Min Profit | Exit Reason | Max Profit | Risk Reasons | Trend Gate | Signal Counts
+            row2 = st.columns(7)
+            row2[0].metric("Min Profit", f"{summary['min_profit_pct']:+.1f}%")
+            row2[1].metric("Exit Reason", summary['exit_reason'])
+            row2[2].metric("Max Profit", f"{summary['max_profit_pct']:+.1f}%")
+            row2[3].metric("Risk Reasons", summary['risk_reasons'] or 'N/A')
+
+            # Show trend gate info + exit signal counts
+            trend_gate_bars = summary.get('trend_gate_bars', 0)
+            if trend_gate_bars > 0:
+                row2[4].metric("Gate Held", f"{trend_gate_bars} bars")
+            else:
+                row2[4].metric("Gate Held", "N/A")
+
+            sig_counts = summary.get('exit_signal_counts', {})
+            active_sigs = {k: v for k, v in sig_counts.items() if v > 0}
+            active_sig_items = list(active_sigs.items())
+            for col_idx in range(2):
+                if col_idx < len(active_sig_items):
+                    sig_name, sig_count = active_sig_items[col_idx]
+                    row2[5 + col_idx].metric(f"Sig: {sig_name}", f"{sig_count} bars")
+                else:
+                    if col_idx == 0 and not active_sig_items:
+                        row2[5].metric("Signals", "None")
+                    else:
+                        row2[5 + col_idx].metric("", "")
+
+            # Row 3: Exit signal bar counts (all signals that fired during holding)
+            if active_sig_items:
+                st.subheader("Exit Signals")
+                # Show all exit signal counts in a dynamic row
+                num_sigs = len(active_sig_items)
+                sig_cols = st.columns(max(num_sigs, 1))
+                for i, (sig_name, sig_count) in enumerate(active_sig_items):
+                    sig_cols[i].metric(sig_name, f"{sig_count} bars")
+
+        # Separator between trades in multi-trade view
+        if is_multi_trade and trade_idx < len(pos_ids) - 1:
+            st.markdown("---")
+
+    # Use last trade's df for StatsBook and Databook display
+    df = matrices[pos_ids[-1]]
 
     # StatsBook table - only render when toggle is on
     if show_stats_book:

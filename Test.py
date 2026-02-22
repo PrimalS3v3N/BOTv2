@@ -527,7 +527,8 @@ class HistoricalDataFetcher:
 class Position:
     """Represents a trading position with state tracking."""
 
-    def __init__(self, signal, entry_price, entry_time, contracts=1):
+    def __init__(self, signal, entry_price, entry_time, contracts=1,
+                 trade_number=1, signal_group_id=None):
         # Signal data
         self.ticker = signal.get('ticker')
         self.strike = signal.get('strike')
@@ -558,6 +559,10 @@ class Position:
 
         # Max profit tracking (entry to end of market day)
         self.max_price_to_eod = entry_price  # Track max price from entry to end of day
+
+        # Re-entry / SignalGroup tracking
+        self.trade_number = trade_number          # 1 = first trade, 2 = re-entry, etc.
+        self.signal_group_id = signal_group_id    # Shared ID across trades from same signal
 
     def update(self, timestamp, price, stock_price=None):
         """Update position with new price data during holding period."""
@@ -622,7 +627,89 @@ class Position:
             'minutes_held': self.get_minutes_held(self.exit_time) if self.exit_time else None,
             'max_price_to_eod': self.max_price_to_eod,
             'delayed_entry': self.delayed_entry_reason,
+            'trade_number': self.trade_number,
+            'signal_group_id': self.signal_group_id,
         }
+
+
+# =============================================================================
+# INTERNAL - SignalGroup (Parent-child trade tracking)
+# =============================================================================
+
+class SignalGroup:
+    """
+    Groups multiple trades under a single Discord signal.
+
+    Signal A (parent) → Trade 1 (entry+exit) → Trade 2 (re-entry+exit)
+
+    Tracks cumulative P&L across all trades for the same signal.
+    Used by the re-entry system to manage multi-trade positions.
+    """
+
+    def __init__(self, signal, group_id=None):
+        self.signal = signal
+        self.group_id = group_id or f"{signal.get('ticker')}:{signal.get('strike')}:{signal.get('option_type')}:{id(self)}"
+        self.positions = []      # List of Position objects (trade 1, trade 2, ...)
+        self.databooks = []      # List of Databook objects (one per trade)
+        self.reentry_count = 0   # Number of re-entries executed
+
+    def add_trade(self, position, databook):
+        """Add a trade (position + databook) to this signal group."""
+        self.positions.append(position)
+        self.databooks.append(databook)
+
+    @property
+    def latest_position(self):
+        """Get the most recent position."""
+        return self.positions[-1] if self.positions else None
+
+    @property
+    def latest_databook(self):
+        """Get the most recent databook."""
+        return self.databooks[-1] if self.databooks else None
+
+    @property
+    def trade_count(self):
+        """Total number of trades in this group."""
+        return len(self.positions)
+
+    def get_cumulative_pnl(self):
+        """Get cumulative P&L in dollars across all closed trades."""
+        total = 0.0
+        for pos in self.positions:
+            if pos.is_closed and pos.exit_price is not None:
+                total += pos.get_pnl(pos.exit_price)
+        return total
+
+    def get_cumulative_pnl_pct(self):
+        """Get cumulative P&L % relative to first trade's entry price."""
+        if not self.positions or self.positions[0].entry_price <= 0:
+            return 0.0
+        first_entry = self.positions[0].entry_price
+        total_pnl = self.get_cumulative_pnl()
+        return (total_pnl / (first_entry * 100 * self.positions[0].contracts)) * 100
+
+    def get_combined_label(self):
+        """Get a label for the entire signal group."""
+        if not self.positions:
+            return 'unknown'
+        base = self.positions[0].get_trade_label()
+        if self.trade_count > 1:
+            return f"{base} ({self.trade_count} trades)"
+        return base
+
+    def get_per_bar_cumulative_pnl(self, bar_timestamp):
+        """
+        Get the cumulative P&L at a specific timestamp across all trades.
+        Includes realized P&L from closed trades + unrealized from open trade.
+        """
+        realized = 0.0
+        for pos in self.positions:
+            if pos.is_closed and pos.exit_time and pos.exit_time <= bar_timestamp:
+                realized += pos.get_pnl(pos.exit_price)
+            elif not pos.is_closed and pos.entry_time and pos.entry_time <= bar_timestamp:
+                realized += pos.get_pnl(pos.current_price)
+        return realized
 
 
 # =============================================================================
@@ -666,6 +753,7 @@ class Databook:
                    exit_sig_oe=None,
                    exit_sig_vc=None, exit_sig_ts=None, exit_sig_vwap=None,
                    exit_sig_st=None, exit_sig_mt=None,
+                   exit_sig_pp=None,
                    deferred_active=False, deferred_trigger=None):
         """Add a tracking record."""
         pnl_pct = self.position.get_pnl_pct(option_price) if holding else np.nan
@@ -766,6 +854,9 @@ class Databook:
             'tp_trend_30m': (oe_state or {}).get('tp_trend_30m'),
             'sl_ema_reversal': (oe_state or {}).get('sl_ema_reversal'),
             'tp_confirmed': (oe_state or {}).get('tp_confirmed'),
+            # ATR-SL Trend Gate columns
+            'atr_sl_trend': (oe_state or {}).get('atr_sl_trend'),
+            'atr_sl_trend_gate': (oe_state or {}).get('atr_sl_trend_gate'),
             # Exit signal flags (per-bar: which signals would fire)
             'exit_sig_sb': exit_sig_sb,
             'exit_sig_mp': exit_sig_mp,
@@ -777,6 +868,7 @@ class Databook:
             'exit_sig_vwap': exit_sig_vwap,
             'exit_sig_st': exit_sig_st,
             'exit_sig_mt': exit_sig_mt,
+            'exit_sig_pp': exit_sig_pp,
             # Deferred entry columns
             'deferred_active': deferred_active,
             'deferred_trigger': deferred_trigger,
@@ -799,6 +891,8 @@ class Databook:
             df['entry_time'] = self.position.entry_time
             df['exit_time'] = self.position.exit_time
             df['exit_reason'] = self.position.exit_reason
+            df['trade_number'] = self.position.trade_number
+            df['signal_group_id'] = self.position.signal_group_id
 
             # Reorder columns per Config source of truth
             col_order = Config.DATAFRAME_COLUMNS['databook'] + Config.DATAFRAME_COLUMNS['databook_metadata']
@@ -1442,15 +1536,21 @@ class SimulationEngine:
         """
         Create a Position from a signal.
 
+        Uses the best available entry price: min(signal_cost, market_price).
+        Signal cost is the alert's listed price; market price comes from BS
+        model (backtest) or live quotes. Slippage is applied after selection.
+
         Args:
             signal: Signal dict/series with ticker, strike, option_type, expiration, cost
             entry_stock_price: Stock price at entry
             entry_time: Timestamp of entry
-            entry_option_price: Option price at entry (if None, uses BS model or signal cost)
+            entry_option_price: Market/explicit option price (if None, uses BS model)
 
         Returns:
             (Position, entry_option_price)
         """
+        signal_cost = signal.get('cost')
+
         if entry_option_price is None:
             if signal.get('expiration'):
                 expiry_dt = dt.datetime.combine(
@@ -1460,15 +1560,24 @@ class SimulationEngine:
             else:
                 days_to_expiry = 30
 
-            if signal.get('cost'):
-                entry_option_price = signal.get('cost')
+            bs_price = Analysis.estimate_option_price_bs(
+                stock_price=entry_stock_price,
+                strike=signal['strike'],
+                option_type=signal['option_type'],
+                days_to_expiry=days_to_expiry
+            )
+
+            # Aim for signal price or better (whichever is lower)
+            if signal_cost and signal_cost > 0 and bs_price and bs_price > 0:
+                entry_option_price = min(signal_cost, bs_price)
+            elif signal_cost and signal_cost > 0:
+                entry_option_price = signal_cost
             else:
-                entry_option_price = Analysis.estimate_option_price_bs(
-                    stock_price=entry_stock_price,
-                    strike=signal['strike'],
-                    option_type=signal['option_type'],
-                    days_to_expiry=days_to_expiry
-                )
+                entry_option_price = bs_price
+        else:
+            # Caller provided market price — still aim for signal price or better
+            if signal_cost and signal_cost > 0 and entry_option_price > 0:
+                entry_option_price = min(signal_cost, entry_option_price)
 
         entry_option_price *= (1 + self.slippage_pct)
 
@@ -1788,6 +1897,9 @@ class SimulationEngine:
         st_flip_strategy = Strategy.SupertrendFlipExit(self.config.get('supertrend_flip_exit', {}))
         st_flip_detector = st_flip_strategy.create_detector(position.option_type)
 
+        pp_strategy = Strategy.PeakPeakExit(self.config.get('peak_peak_exit', {}))
+        pp_detector = pp_strategy.create_detector()
+
         # Deferred entry filter (for HIGH risk entries)
         de_strategy = Strategy.DeferredEntry(self.config.get('deferred_entry', {}))
         de_filter = de_strategy.create_filter(position.option_type)
@@ -1997,8 +2109,10 @@ class SimulationEngine:
                     de_trigger_reason = de_filter.trigger_reason
                     de_new_entry_idx = i
 
-                    # Re-enter at the current bar's price
-                    new_entry_option_price = option_price * (1 + self.slippage_pct)
+                    # Re-enter at the best available price (signal price or better)
+                    signal_cost = signal.get('cost')
+                    best_price = min(signal_cost, option_price) if signal_cost and signal_cost > 0 else option_price
+                    new_entry_option_price = best_price * (1 + self.slippage_pct)
                     position.entry_price = new_entry_option_price
                     position.entry_time = timestamp
                     position.current_price = new_entry_option_price
@@ -2038,8 +2152,12 @@ class SimulationEngine:
                 # OptionsExit is checked at each data point for precise SL/TP
                 # detection. All other detectors run once per minute (indicator-based).
                 # =============================================================
+                _bar_extrap = self.config.get('bar_extrapolation', {})
                 sub_prices = Analysis.extrapolate_bar_prices(
-                    stock_open, stock_high, stock_low, stock_price)
+                    stock_open, stock_high, stock_low, stock_price,
+                    high_span_max=_bar_extrap.get('high_span_max'),
+                    low_span_max=_bar_extrap.get('low_span_max'),
+                    min_segment=_bar_extrap.get('min_segment', 1))
 
                 # Track whether OptionsExit triggered during intra-minute scan
                 oe_exit = False
@@ -2073,6 +2191,9 @@ class SimulationEngine:
                             stock_price=sub_stock,
                             ema_values=ema_vals,
                             timestamp=sub_ts,
+                            atr_sl_value=atr_sl_value,
+                            stock_high=stock_high,
+                            stock_low=stock_low,
                         )
 
                         if oe_exit:
@@ -2213,6 +2334,13 @@ class SimulationEngine:
                     st_flip_pnl = position.get_pnl_pct(option_price)
                     st_flip_exit, st_flip_reason = st_flip_detector.update(st_flip_pnl, st_direction, timestamp=timestamp)
 
+                # Update Peak-Peak detector
+                pp_exit = False
+                pp_reason = None
+                if pp_detector and not position.is_closed:
+                    pp_pnl = position.get_pnl_pct(option_price)
+                    pp_exit, pp_reason = pp_detector.update(option_price, pp_pnl, timestamp)
+
                 # Update MarketTrend detector
                 mt_exit = False
                 mt_reason = None
@@ -2267,6 +2395,7 @@ class SimulationEngine:
                     exit_sig_vc=vc_exit, exit_sig_ts=ts_exit, exit_sig_vwap=vwap_exit,
                     exit_sig_st=st_flip_exit,
                     exit_sig_mt=mt_exit or (mt_reason is not None),
+                    exit_sig_pp=pp_exit,
                     deferred_active=de_active,
                     deferred_trigger=de_trigger_reason if (de_triggered and i == de_new_entry_idx) else None,
                 )
@@ -2281,6 +2410,9 @@ class SimulationEngine:
                 elif mp_exit and not position.is_closed:
                     exit_price = option_price * (1 - self.slippage_pct)
                     position.close(exit_price, timestamp, mp_reason)
+                elif pp_exit and not position.is_closed:
+                    exit_price = option_price * (1 - self.slippage_pct)
+                    position.close(exit_price, timestamp, pp_reason)
                 elif vc_exit and not position.is_closed:
                     exit_price = option_price * (1 - self.slippage_pct)
                     position.close(exit_price, timestamp, vc_reason)
@@ -2444,12 +2576,35 @@ class SimulationEngine:
             'average_minutes_held': closed_trades['minutes_held'].mean() if len(closed_trades) > 0 else 0,
             'profit_factor': abs(winners['pnl'].sum() / losers['pnl'].sum()) if len(losers) > 0 and losers['pnl'].sum() != 0 else float('inf'),
             'exit_reasons': closed_trades['exit_reason'].value_counts().to_dict() if len(closed_trades) > 0 else {},
+            'exit_reason_pnl': self._compute_exit_reason_pnl(closed_trades) if len(closed_trades) > 0 else {},
             'initial_capital': self.config.get('initial_capital', 10000.0),
             'total_capital_utilized': total_capital_utilized,
             'max_capital_held': max_capital_held,
             'capitalized_pnl': capitalized_pnl,
             'profit_min': total_profit_min,
         }
+
+    def _compute_exit_reason_pnl(self, closed_trades):
+        """
+        Compute per-exit-reason P&L breakdown.
+
+        Returns:
+            dict: {reason: {'pnl': total_$, 'count': N, 'total_spent': $, 'pnl_pct': %}}
+            where pnl_pct = total P&L / total capital spent on those trades * 100
+        """
+        result = {}
+        for reason, group in closed_trades.groupby('exit_reason'):
+            total_pnl = group['pnl'].sum()
+            count = len(group)
+            total_spent = (group['entry_price'] * 100 * group['contracts']).sum()
+            pnl_pct = (total_pnl / total_spent * 100) if total_spent > 0 else 0
+            result[reason] = {
+                'pnl': total_pnl,
+                'count': count,
+                'total_spent': total_spent,
+                'pnl_pct': pnl_pct,
+            }
+        return result
 
     def _calculate_max_capital_held(self, positions_df):
         """Calculate maximum capital held at any one time."""
@@ -2583,6 +2738,7 @@ class Backtest:
         self.positions = []
         self.databooks = {}
         self.statsbooks = {}
+        self.signal_groups = []
 
         for idx, signal in self.signals_df.iterrows():
             print(f"\n  [{idx+1}/{len(self.signals_df)}] {signal['ticker']} "
@@ -2594,14 +2750,34 @@ class Backtest:
                 print(f"    Building StatsBook for {ticker}...")
                 self.statsbooks[ticker] = self.statsbook_builder.build(ticker)
 
-            position, matrix = self._process_signal(signal)
+            group = self._process_signal(signal)
 
-            if position:
-                self.positions.append(position)
-                self.databooks[position.get_trade_label()] = matrix
+            if group and group.positions:
+                self.signal_groups.append(group)
 
-                pnl = position.get_pnl(position.exit_price) if position.exit_price else 0
-                print(f"    Exit: {position.exit_reason} | P&L: ${pnl:+.2f}")
+                # Unpack all trades from the signal group
+                for pos in group.positions:
+                    self.positions.append(pos)
+                    # Use trade-number-aware label to avoid key collisions
+                    label = pos.get_trade_label()
+                    if pos.trade_number > 1:
+                        label = f"{label}:T{pos.trade_number}"
+
+                for i, (pos, db) in enumerate(zip(group.positions, group.databooks)):
+                    label = pos.get_trade_label()
+                    if pos.trade_number > 1:
+                        label = f"{label}:T{pos.trade_number}"
+                    self.databooks[label] = db
+
+                # Print first trade P&L
+                first_pos = group.positions[0]
+                pnl = first_pos.get_pnl(first_pos.exit_price) if first_pos.exit_price else 0
+                print(f"    Exit: {first_pos.exit_reason} | P&L: ${pnl:+.2f}")
+
+                # Print cumulative P&L if multi-trade
+                if group.trade_count > 1:
+                    cum_pnl = group.get_cumulative_pnl()
+                    print(f"    Signal Group ({group.trade_count} trades) | Cumulative P&L: ${cum_pnl:+.2f}")
 
         # Step 4: Compile results
         print(f"\n{'='*60}")
@@ -2647,7 +2823,11 @@ class Backtest:
         return None
 
     def _process_signal(self, signal):
-        """Process a single signal through the backtest using SimulationEngine."""
+        """
+        Process a single signal through the backtest using SimulationEngine.
+
+        Returns a SignalGroup containing one or more trades (original + re-entries).
+        """
         ticker = signal['ticker']
         signal_time = signal['signal_time']
 
@@ -2661,14 +2841,14 @@ class Backtest:
 
         if stock_data is None or stock_data.empty:
             print(f"    No data available for {ticker}")
-            return None, None
+            return None
 
         # Find entry point
         entry_idx = stock_data.index.searchsorted(signal_time)
 
         if entry_idx >= len(stock_data):
             print(f"    No data after signal time")
-            return None, None
+            return None
 
         # Get entry bar
         entry_bar = stock_data.iloc[entry_idx]
@@ -2680,7 +2860,7 @@ class Backtest:
         delayed_entry_reason = None
         if delay_result is False:
             # Delay needed but no valid entry found — skip trade
-            return None, None
+            return None
         elif delay_result is not None:
             # Delayed entry found — use new entry point
             entry_idx = delay_result['entry_idx']
@@ -2689,7 +2869,10 @@ class Backtest:
             entry_stock_price = delay_result['entry_stock_price']
             delayed_entry_reason = delay_result['delay_reason']
 
-        # Create position via engine
+        # Create SignalGroup for this signal
+        group = SignalGroup(signal)
+
+        # Create position via engine (Trade 1)
         entry_option_price_override = delay_result.get('entry_option_price') if delay_result and delay_result is not False else None
         position, entry_option_price = self.engine.create_position(
             signal=signal,
@@ -2697,6 +2880,8 @@ class Backtest:
             entry_time=entry_time,
             entry_option_price=entry_option_price_override,
         )
+        position.trade_number = 1
+        position.signal_group_id = group.group_id
 
         # Store delay info on position for tracking
         if delayed_entry_reason:
@@ -2720,7 +2905,131 @@ class Backtest:
             spy_data=spy_data,
         )
 
-        return position, matrix
+        group.add_trade(position, matrix)
+
+        # --- Re-entry check ---
+        reentry_config = self.config.get('reentry', {})
+        if reentry_config.get('enabled', False) and position.is_closed:
+            reentry_result = self._attempt_reentry(
+                signal=signal,
+                group=group,
+                stock_data=stock_data,
+                spy_data=spy_data,
+                reentry_config=reentry_config,
+            )
+            # reentry_result is handled inside _attempt_reentry (adds to group)
+
+        return group
+
+    def _attempt_reentry(self, signal, group, stock_data, spy_data, reentry_config):
+        """
+        Check if re-entry conditions are met after Trade 1 exits.
+
+        Conditions:
+          1. Trade 1 exited via a qualifying reason (e.g., Trail-TP)
+          2. Re-entry limit not reached
+          3. Option price dropped below original signal cost
+          4. Enough time left in the trading day
+
+        If conditions met, creates Trade 2 and simulates it.
+        """
+        max_reentries = reentry_config.get('max_reentries', 1)
+        trigger_reasons = reentry_config.get('trigger_exit_reasons', ['Trail-TP'])
+        require_below_cost = reentry_config.get('price_below_signal_cost', True)
+
+        prev_position = group.latest_position
+        if not prev_position or not prev_position.is_closed:
+            return
+
+        # Check re-entry limit
+        if group.reentry_count >= max_reentries:
+            return
+
+        # Check if exit reason qualifies
+        if prev_position.exit_reason not in trigger_reasons:
+            return
+
+        # Find re-entry point: scan bars after Trade 1 exit
+        exit_time = prev_position.exit_time
+        exit_idx = stock_data.index.searchsorted(exit_time)
+        signal_cost = signal.get('cost', 0)
+
+        if signal_cost <= 0:
+            return
+
+        # Scan for option price dropping below signal cost
+        for scan_idx in range(exit_idx + 1, len(stock_data)):
+            scan_ts = stock_data.index[scan_idx]
+
+            # Don't re-enter in last 30 minutes
+            if scan_ts.time() >= dt.time(15, 30):
+                break
+
+            scan_bar = stock_data.iloc[scan_idx]
+            scan_stock_price = scan_bar['close']
+
+            # Estimate option price at this bar
+            try:
+                expiry_dt = pd.Timestamp(signal.get('expiration'))
+                if expiry_dt.tzinfo is None:
+                    expiry_dt = expiry_dt.tz_localize(EASTERN)
+                days_to_expiry = max(0, (expiry_dt - scan_ts).total_seconds() / 86400)
+
+                scan_option_price = Analysis.estimate_option_price_bs(
+                    stock_price=scan_stock_price,
+                    strike=signal.get('strike'),
+                    option_type=signal.get('option_type'),
+                    days_to_expiry=days_to_expiry,
+                    entry_price=prev_position.entry_price,
+                    entry_stock_price=scan_bar['close'],
+                    entry_days_to_expiry=days_to_expiry + 1
+                )
+            except Exception:
+                continue
+
+            # Check: option price below signal cost
+            if require_below_cost and scan_option_price >= signal_cost:
+                continue
+
+            # Re-entry conditions met
+            reentry_stock_price = scan_stock_price
+            reentry_time = scan_ts
+            reentry_idx = scan_idx
+
+            # Create re-entry position (Trade 2)
+            reentry_position, reentry_option_price = self.engine.create_position(
+                signal=signal,
+                entry_stock_price=reentry_stock_price,
+                entry_time=reentry_time,
+                entry_option_price=scan_option_price,
+            )
+            reentry_position.trade_number = group.trade_count + 1
+            reentry_position.signal_group_id = group.group_id
+
+            # Create tracking matrix for re-entry
+            reentry_matrix = Databook(reentry_position)
+
+            print(f"    RE-ENTRY: Trade {reentry_position.trade_number} at "
+                  f"${scan_option_price:.2f} (signal cost: ${signal_cost:.2f})")
+
+            # Simulate re-entry trade
+            self.engine.simulate_position(
+                position=reentry_position,
+                matrix=reentry_matrix,
+                stock_data=stock_data,
+                signal=signal,
+                entry_idx=reentry_idx,
+                entry_stock_price=reentry_stock_price,
+                statsbooks=self.statsbooks,
+                spy_data=spy_data,
+            )
+
+            group.add_trade(reentry_position, reentry_matrix)
+            group.reentry_count += 1
+
+            pnl = reentry_position.get_pnl(reentry_position.exit_price) if reentry_position.exit_price else 0
+            print(f"    RE-ENTRY Exit: {reentry_position.exit_reason} | P&L: ${pnl:+.2f}")
+            break  # Only one re-entry per signal
 
     def _compile_results(self):
         """Compile backtest results via SimulationEngine."""
@@ -2753,36 +3062,65 @@ class Backtest:
             return
 
         print(f"\nCAPITAL:")
-        print(f"  Initial Capital: ${summary.get('initial_capital', 0):,.2f}")
-        print(f"  Capital Utilized: ${summary.get('total_capital_utilized', 0):,.2f}")
-        print(f"  Max Capital Held: ${summary.get('max_capital_held', 0):,.2f}")
-        print(f"  Capitalized P&L: {summary.get('capitalized_pnl', 0):.2%}")
+        cap_rows = [
+            ("Initial Capital", f"${summary.get('initial_capital', 0):,.2f}"),
+            ("Capital Utilized", f"${summary.get('total_capital_utilized', 0):,.2f}"),
+            ("Max Capital Held", f"${summary.get('max_capital_held', 0):,.2f}"),
+            ("Capitalized P&L", f"{summary.get('capitalized_pnl', 0):.2%}"),
+        ]
+        cw = max(len(r[0]) for r in cap_rows)
+        for label, val in cap_rows:
+            print(f"  {label:<{cw}} : {val}")
 
         print(f"\nTRADE STATISTICS:")
-        print(f"  Total Signals: {len(self.signals_df) if self.signals_df is not None else 0}")
-        print(f"  Total Trades: {summary.get('total_trades', 0)}")
-        print(f"  Closed Trades: {summary.get('closed_trades', 0)}")
-        print(f"  Winners: {summary.get('winners', 0)}")
-        print(f"  Losers: {summary.get('losers', 0)}")
-        print(f"  Win Rate: {summary.get('win_rate', 0):.1f}%")
+        ts_rows = [
+            ("Total Signals", f"{len(self.signals_df) if self.signals_df is not None else 0}"),
+            ("Total Trades", f"{summary.get('total_trades', 0)}"),
+            ("Closed Trades", f"{summary.get('closed_trades', 0)}"),
+            ("Winners", f"{summary.get('winners', 0)}"),
+            ("Losers", f"{summary.get('losers', 0)}"),
+            ("Win Rate", f"{summary.get('win_rate', 0):.1f}%"),
+        ]
+        tw = max(len(r[0]) for r in ts_rows)
+        for label, val in ts_rows:
+            print(f"  {label:<{tw}} : {val}")
 
         print(f"\nPROFITABILITY:")
-        print(f"  Total P&L: ${summary.get('total_pnl', 0):+,.2f}")
-        print(f"  Commissions: ${summary.get('commission_total', 0):,.2f}")
-        print(f"  Net P&L: ${summary.get('net_pnl', 0):+,.2f}")
-        print(f"  Best Trade: ${summary.get('best_trade', 0):+,.2f}")
-        print(f"  Worst Trade: ${summary.get('worst_trade', 0):+,.2f}")
-        print(f"  Profit Factor: {summary.get('profit_factor', 0):.2f}")
+        pr_rows = [
+            ("Total P&L", f"${summary.get('total_pnl', 0):+,.2f}"),
+            ("Commissions", f"${summary.get('commission_total', 0):,.2f}"),
+            ("Net P&L", f"${summary.get('net_pnl', 0):+,.2f}"),
+            ("Best Trade", f"${summary.get('best_trade', 0):+,.2f}"),
+            ("Worst Trade", f"${summary.get('worst_trade', 0):+,.2f}"),
+            ("Profit Factor", f"{summary.get('profit_factor', 0):.2f}"),
+        ]
+        pw = max(len(r[0]) for r in pr_rows)
+        for label, val in pr_rows:
+            print(f"  {label:<{pw}} : {val}")
 
         print(f"\nTIMING:")
-        print(f"  Avg Hold Time: {summary.get('average_minutes_held', 0):.1f} minutes")
+        print(f"  Avg Hold Time : {summary.get('average_minutes_held', 0):.1f} minutes")
 
         print(f"\nSTATISTICS:")
-        print(f"  Profit[min]: ${summary.get('profit_min', 0):+,.2f}")
+        print(f"  Profit[min] : ${summary.get('profit_min', 0):+,.2f}")
 
         print(f"\nEXIT REASONS:")
-        for reason, count in summary.get('exit_reasons', {}).items():
-            print(f"  {reason}: {count}")
+        exit_pnl = summary.get('exit_reason_pnl', {})
+        exit_reasons = summary.get('exit_reasons', {})
+        reason_list = []
+        for reason, count in exit_reasons.items():
+            if reason in exit_pnl:
+                data = exit_pnl[reason]
+                reason_list.append((reason, count, data['pnl'], data['pnl_pct']))
+            else:
+                reason_list.append((reason, count, 0, 0))
+        reason_list.sort(key=lambda x: x[2], reverse=True)
+        rows = [(f"${pnl:+,.2f}", f"{pnl_pct:+.1f}%", f"{count}x", reason)
+                for reason, count, pnl, pnl_pct in reason_list]
+        if rows:
+            w = [max(len(r[i]) for r in rows) for i in range(3)]
+            for c0, c1, c2, name in rows:
+                print(f"  {c0:>{w[0]}} : {c1:>{w[1]}} : {c2:>{w[2]}} : {name}")
 
         print(f"{'='*60}\n")
 
@@ -2828,9 +3166,25 @@ class Backtest:
 
         try:
             # Format data for Dashboard.py which expects 'matrices' key
+            # Also include signal_groups for multi-trade tracking
+            signal_group_data = {}
+            for group in getattr(self, 'signal_groups', []):
+                signal_group_data[group.group_id] = {
+                    'group_id': group.group_id,
+                    'trade_count': group.trade_count,
+                    'cumulative_pnl': group.get_cumulative_pnl(),
+                    'cumulative_pnl_pct': group.get_cumulative_pnl_pct(),
+                    'trade_labels': [
+                        (p.get_trade_label() if p.trade_number == 1
+                         else f"{p.get_trade_label()}:T{p.trade_number}")
+                        for p in group.positions
+                    ],
+                }
+
             dashboard_data = {
                 'matrices': self.results.get('Databooks', {}),
                 'statsbooks': self.results.get('StatsBooks', {}),
+                'signal_groups': signal_group_data,
             }
             with open(filepath, 'wb') as f:
                 pickle.dump(dashboard_data, f)
@@ -3130,7 +3484,8 @@ class LiveTest:
 
             # Create position on first data point (if not already created)
             if signal_id not in self.positions:
-                entry_price = signal.get('cost', option_price)
+                # Market price; create_position picks min(signal_cost, market)
+                entry_price = option_price if option_price and option_price > 0 else signal.get('cost', 0)
                 if entry_price and entry_price > 0:
                     # Check if this signal needs delayed entry
                     if signal_id in self._pending_delays:
@@ -3166,7 +3521,7 @@ class LiveTest:
                         # Delay conditions met — create position
                         del self._pending_delays[signal_id]
                         print(f"    DELAY: {delay_reason} — entering {signal_id} @ ${option_price:.2f}")
-                        position, _ = self.engine.create_position(
+                        position, actual_entry = self.engine.create_position(
                             signal=signal,
                             entry_stock_price=stock_price,
                             entry_time=timestamp,
@@ -3176,14 +3531,14 @@ class LiveTest:
                         self.positions[signal_id] = position
                         self.databooks[signal_id] = Databook(position)
                         self._signal_last_bar[signal_id] = -1
-                        print(f"    Position opened (delayed): {signal_id} @ ${option_price:.2f}")
+                        print(f"    Position opened (delayed): {signal_id} @ ${actual_entry:.2f}")
 
                     elif self._should_delay_live_entry(signal, stock_price, timestamp):
                         # New signal that needs delay — register as pending
                         pass  # _should_delay_live_entry already registered it
                     else:
                         # Normal entry — no delay needed
-                        position, _ = self.engine.create_position(
+                        position, actual_entry = self.engine.create_position(
                             signal=signal,
                             entry_stock_price=stock_price,
                             entry_time=timestamp,
@@ -3192,7 +3547,7 @@ class LiveTest:
                         self.positions[signal_id] = position
                         self.databooks[signal_id] = Databook(position)
                         self._signal_last_bar[signal_id] = -1
-                        print(f"    Position opened: {signal_id} @ ${entry_price:.2f}")
+                        print(f"    Position opened: {signal_id} @ ${actual_entry:.2f}")
 
             # Update position if open
             position = self.positions.get(signal_id)
@@ -3304,6 +3659,9 @@ class LiveTest:
         st_flip_strategy = Strategy.SupertrendFlipExit(config.get('supertrend_flip_exit', {}))
         st_flip_detector = st_flip_strategy.create_detector(position.option_type)
 
+        pp_strategy = Strategy.PeakPeakExit(config.get('peak_peak_exit', {}))
+        pp_detector = pp_strategy.create_detector()
+
         mt_strategy = Strategy.MarketTrend(config.get('market_trend', {}))
         mt_detector = mt_strategy.create_detector(position.option_type)
         mt_exit_enabled = config.get('market_trend', {}).get('exit_enabled', False)
@@ -3321,6 +3679,7 @@ class LiveTest:
             'ts_detector': ts_detector,
             'vwap_detector': vwap_detector,
             'st_flip_detector': st_flip_detector,
+            'pp_detector': pp_detector,
             'mt_detector': mt_detector,
             'mt_exit_enabled': mt_exit_enabled,
             'oe_favorability_assessed': False,
@@ -3633,6 +3992,13 @@ class LiveTest:
             st_flip_pnl = position.get_pnl_pct(option_price)
             st_flip_exit, st_flip_reason = st_flip_detector.update(st_flip_pnl, st_direction, timestamp=timestamp)
 
+        # Update Peak-Peak detector
+        pp_exit, pp_reason = False, None
+        pp_detector = state['pp_detector']
+        if pp_detector and not position.is_closed:
+            pp_pnl = position.get_pnl_pct(option_price)
+            pp_exit, pp_reason = pp_detector.update(option_price, pp_pnl, timestamp)
+
         # Compute ticker/SPY trends for this bar (live single-bar calculation)
         bias_band_pct = self.engine.config.get('bias_sideways_band', 0.05)
         ticker_trend_val = np.nan
@@ -3725,6 +4091,7 @@ class LiveTest:
             exit_sig_vc=vc_exit, exit_sig_ts=ts_exit, exit_sig_vwap=vwap_exit,
             exit_sig_st=st_flip_exit,
             exit_sig_mt=mt_exit or (mt_reason is not None),
+            exit_sig_pp=pp_exit,
         )
 
         # === EXIT PRIORITY CHAIN ===
@@ -3735,6 +4102,8 @@ class LiveTest:
             position.close(option_price * (1 - slippage), timestamp, sb_reason)
         elif mp_exit and not position.is_closed:
             position.close(option_price * (1 - slippage), timestamp, mp_reason)
+        elif pp_exit and not position.is_closed:
+            position.close(option_price * (1 - slippage), timestamp, pp_reason)
         elif vc_exit and not position.is_closed:
             position.close(option_price * (1 - slippage), timestamp, vc_reason)
         elif vwap_exit and not position.is_closed:
@@ -3897,21 +4266,55 @@ class LiveTest:
         print("LIVE TEST SUMMARY")
         print(f"{'='*60}")
 
-        print(f"\n  Signals: {len(self.signals)}")
         closed = sum(1 for p in self.positions.values() if p.is_closed)
         active = sum(1 for p in self.positions.values() if not p.is_closed)
-        print(f"  Closed positions: {closed}")
-        print(f"  Active positions: {active}")
-        print(f"  Cycles: {self._cycle_count}")
+        lt_rows = [
+            ("Signals", f"{len(self.signals)}"),
+            ("Closed positions", f"{closed}"),
+            ("Active positions", f"{active}"),
+            ("Cycles", f"{self._cycle_count}"),
+        ]
+        lw = max(len(r[0]) for r in lt_rows)
+        print()
+        for label, val in lt_rows:
+            print(f"  {label:<{lw}} : {val}")
 
         if not stats_df.empty and 'pnl_pct' in stats_df.columns:
             completed = stats_df[stats_df['pnl_pct'].notna()]
             if not completed.empty:
                 winners = completed[completed['pnl_pct'] > 0]
-                print(f"\n  Win rate: {len(winners)/len(completed)*100:.1f}%")
-                print(f"  Avg PnL: {completed['pnl_pct'].mean():+.1f}%")
-                print(f"  Best: {completed['pnl_pct'].max():+.1f}%")
-                print(f"  Worst: {completed['pnl_pct'].min():+.1f}%")
+                perf_rows = [
+                    ("Win rate", f"{len(winners)/len(completed)*100:.1f}%"),
+                    ("Avg PnL", f"{completed['pnl_pct'].mean():+.1f}%"),
+                    ("Best", f"{completed['pnl_pct'].max():+.1f}%"),
+                    ("Worst", f"{completed['pnl_pct'].min():+.1f}%"),
+                ]
+                perfw = max(len(r[0]) for r in perf_rows)
+                print()
+                for label, val in perf_rows:
+                    print(f"  {label:<{perfw}} : {val}")
+
+        # Exit reason breakdown with P&L
+        closed_positions = [p for p in self.positions.values() if p.is_closed]
+        if closed_positions:
+            reason_data = {}
+            for p in closed_positions:
+                reason = p.exit_reason or 'unknown'
+                if reason not in reason_data:
+                    reason_data[reason] = {'pnl': 0, 'count': 0, 'total_spent': 0}
+                reason_data[reason]['pnl'] += p.get_pnl(p.exit_price)
+                reason_data[reason]['count'] += 1
+                reason_data[reason]['total_spent'] += p.entry_price * 100 * p.contracts
+            print(f"\n  EXIT REASONS:")
+            sorted_reasons = sorted(reason_data.items(), key=lambda x: x[1]['pnl'], reverse=True)
+            rows = []
+            for reason, data in sorted_reasons:
+                pnl_pct = (data['pnl'] / data['total_spent'] * 100) if data['total_spent'] > 0 else 0
+                rows.append((f"${data['pnl']:+,.2f}", f"{pnl_pct:+.1f}%", f"{data['count']}x", reason))
+            if rows:
+                w = [max(len(r[i]) for r in rows) for i in range(3)]
+                for c0, c1, c2, name in rows:
+                    print(f"    {c0:>{w[0]}} : {c1:>{w[1]}} : {c2:>{w[2]}} : {name}")
 
         print(f"{'='*60}\n")
 
@@ -4183,23 +4586,47 @@ class LiveRerun:
             return
 
         data_source = "Live Data" if self._has_live_data else "Backtest (yfinance)"
-        print(f"\n  Data Source: {data_source}")
+        print(f"\n  Data Source : {data_source}")
 
         print(f"\n  TRADES:")
-        print(f"    Total: {summary.get('total_trades', 0)}")
-        print(f"    Winners: {summary.get('winners', 0)}")
-        print(f"    Losers: {summary.get('losers', 0)}")
-        print(f"    Win Rate: {summary.get('win_rate', 0):.1f}%")
+        tr_rows = [
+            ("Total", f"{summary.get('total_trades', 0)}"),
+            ("Winners", f"{summary.get('winners', 0)}"),
+            ("Losers", f"{summary.get('losers', 0)}"),
+            ("Win Rate", f"{summary.get('win_rate', 0):.1f}%"),
+        ]
+        trw = max(len(r[0]) for r in tr_rows)
+        for label, val in tr_rows:
+            print(f"    {label:<{trw}} : {val}")
 
         print(f"\n  P&L:")
-        print(f"    Total: ${summary.get('total_pnl', 0):+,.2f}")
-        print(f"    Net: ${summary.get('net_pnl', 0):+,.2f}")
-        print(f"    Best: ${summary.get('best_trade', 0):+,.2f}")
-        print(f"    Worst: ${summary.get('worst_trade', 0):+,.2f}")
+        pl_rows = [
+            ("Total", f"${summary.get('total_pnl', 0):+,.2f}"),
+            ("Net", f"${summary.get('net_pnl', 0):+,.2f}"),
+            ("Best", f"${summary.get('best_trade', 0):+,.2f}"),
+            ("Worst", f"${summary.get('worst_trade', 0):+,.2f}"),
+        ]
+        plw = max(len(r[0]) for r in pl_rows)
+        for label, val in pl_rows:
+            print(f"    {label:<{plw}} : {val}")
 
         print(f"\n  EXIT REASONS:")
-        for reason, count in summary.get('exit_reasons', {}).items():
-            print(f"    {reason}: {count}")
+        exit_pnl = summary.get('exit_reason_pnl', {})
+        exit_reasons = summary.get('exit_reasons', {})
+        reason_list = []
+        for reason, count in exit_reasons.items():
+            if reason in exit_pnl:
+                data = exit_pnl[reason]
+                reason_list.append((reason, count, data['pnl'], data['pnl_pct']))
+            else:
+                reason_list.append((reason, count, 0, 0))
+        reason_list.sort(key=lambda x: x[2], reverse=True)
+        rows = [(f"${pnl:+,.2f}", f"{pnl_pct:+.1f}%", f"{count}x", reason)
+                for reason, count, pnl, pnl_pct in reason_list]
+        if rows:
+            w = [max(len(r[i]) for r in rows) for i in range(3)]
+            for c0, c1, c2, name in rows:
+                print(f"    {c0:>{w[0]}} : {c1:>{w[1]}} : {c2:>{w[2]}} : {name}")
 
         print(f"{'='*60}\n")
 

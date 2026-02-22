@@ -22,7 +22,8 @@ __all__ = ['DeferredEntry', 'DeferredEntryFilter',
            'TimeStop', 'TimeStopDetector',
            'VWAPCrossExit', 'VWAPCrossDetector',
            'SupertrendFlipExit', 'SupertrendFlipDetector',
-           'MarketTrend', 'MarketTrendDetector']
+           'MarketTrend', 'MarketTrendDetector',
+           'PeakPeakExit', 'PeakPeakDetector']
 
 
 # =============================================================================
@@ -1025,12 +1026,18 @@ class OptionsExitDetector:
         self.is_call = option_type.upper() in ['CALL', 'CALLS', 'C']
 
         # Hard SL
+        self.hard_sl_enabled = config.get('hard_sl_enabled', True)
         self.initial_sl_pct = config.get('initial_sl_pct', 20)
         self.hard_sl_price = entry_option_price * (1 - self.initial_sl_pct / 100)
         self.hard_sl_tighten_on_peak = config.get('hard_sl_tighten_on_peak', True)
 
         # Trailing SL parameters
+        self.trail_tp_enabled = config.get('trail_tp_enabled', True)
         self.trail_activation_pct = config.get('trail_activation_pct', 10)
+        # Cheap options have amplified % swings — require more profit before trailing
+        cheap_threshold = config.get('trail_cheap_option_threshold', 0.40)
+        if cheap_threshold and entry_option_price < cheap_threshold:
+            self.trail_activation_pct *= 2
         self.trail_base_floor_pct = config.get('trail_base_floor_pct', 5)
         self.trail_early_floor_minutes = config.get('trail_early_floor_minutes', 5)
         self.trail_scale = config.get('trail_scale', 20.0)
@@ -1065,6 +1072,14 @@ class OptionsExitDetector:
 
         # ATR-SL
         self.atr_sl_enabled = config.get('atr_sl_enabled', True)
+
+        # ATR-SL Trend Gate: suppress Trail-TP while trend is intact
+        self.atr_sl_trend_gate_enabled = config.get('atr_sl_trend_gate_enabled', False)
+        self.atr_sl_trend_sideways_bars = config.get('atr_sl_trend_sideways_bars', 5)
+        self._recent_highs = []    # Rolling window of stock highs for sideways detection
+        self._recent_lows = []     # Rolling window of stock lows for sideways detection
+        self.atr_sl_trend = None   # Current ATR-SL trend: 'Uptrend' / 'Downtrend' / 'Sideways'
+        self.atr_sl_trend_gate_active = False  # True = Trail-TP suppressed by trend
 
         # MACD
         self.macd_enabled = config.get('macd_enabled', True)
@@ -1164,6 +1179,70 @@ class OptionsExitDetector:
             return self._adaptive_buffer_base / decay_factor
         # Fallback: use minimum buffer
         return self.trail_buffer_min_pct
+
+    # ------------------------------------------------------------------
+    # ATR-SL trend classification
+    # ------------------------------------------------------------------
+
+    def _classify_atr_sl_trend(self, stock_price, stock_high, stock_low, atr_sl_value):
+        """
+        Classify the current ATR-SL trend state.
+
+        For PUTS (inverse logic for CALLS):
+          - Downtrend: stock_price < ATR-SL (good for puts, hold)
+          - Uptrend:   stock_price lows > ATR-SL (bad for puts, sell signal)
+          - Sideways:  ATR-SL is between the last N-bar high and low
+
+        Returns:
+            str: 'Uptrend', 'Downtrend', or 'Sideways'
+        """
+        if np.isnan(atr_sl_value) or np.isnan(stock_price):
+            return self.atr_sl_trend  # Keep previous state
+
+        # Track rolling highs/lows for sideways detection
+        if not np.isnan(stock_high):
+            self._recent_highs.append(stock_high)
+        if not np.isnan(stock_low):
+            self._recent_lows.append(stock_low)
+
+        # Trim to window size
+        window = self.atr_sl_trend_sideways_bars
+        if len(self._recent_highs) > window:
+            self._recent_highs = self._recent_highs[-window:]
+        if len(self._recent_lows) > window:
+            self._recent_lows = self._recent_lows[-window:]
+
+        # Sideways: ATR-SL is between the recent N-bar high and low
+        if self._recent_highs and self._recent_lows:
+            recent_high = max(self._recent_highs)
+            recent_low = min(self._recent_lows)
+            if recent_low <= atr_sl_value <= recent_high:
+                return 'Sideways'
+
+        # Directional classification
+        if stock_price > atr_sl_value:
+            return 'Uptrend'    # Stock above ATR-SL = bullish
+        else:
+            return 'Downtrend'  # Stock below ATR-SL = bearish
+
+    def _is_trend_favorable(self):
+        """
+        Check if the ATR-SL trend is favorable for holding the position.
+
+        CALLS: Uptrend is favorable (stock above ATR-SL → hold)
+        PUTS:  Downtrend is favorable (stock below ATR-SL → hold)
+        Sideways: Not favorable (no clear trend → allow exit)
+
+        Returns:
+            bool: True if trend supports holding, False if exit is OK.
+        """
+        if self.atr_sl_trend is None:
+            return False  # No data yet, don't gate
+
+        if self.is_call:
+            return self.atr_sl_trend == 'Uptrend'
+        else:
+            return self.atr_sl_trend == 'Downtrend'
 
     # ------------------------------------------------------------------
     # Velocity deceleration detection
@@ -1477,7 +1556,8 @@ class OptionsExitDetector:
     # Per-tick update (called 60x per minute during extrapolated simulation)
     # ------------------------------------------------------------------
 
-    def update(self, option_price, stock_price, ema_values=None, timestamp=None):
+    def update(self, option_price, stock_price, ema_values=None, timestamp=None,
+               atr_sl_value=np.nan, stock_high=np.nan, stock_low=np.nan):
         """
         Per-tick update: check hard SL, update trailing TP, check EMA reversal.
 
@@ -1488,6 +1568,9 @@ class OptionsExitDetector:
             stock_price: Current stock price
             ema_values: dict mapping period -> EMA value (for reversal detection)
             timestamp: Current timestamp for time-based tracking
+            atr_sl_value: Current ATR-SL value (for trend gate)
+            stock_high: Current bar high (for sideways detection)
+            stock_low: Current bar low (for sideways detection)
 
         Returns:
             (should_exit, exit_reason, state_dict)
@@ -1524,6 +1607,12 @@ class OptionsExitDetector:
                 emas_against += 1
         self.ema_reversal = emas_against >= self.ema_reversal_sensitivity
 
+        # --- ATR-SL trend classification ---
+        if self.atr_sl_trend_gate_enabled and not np.isnan(atr_sl_value):
+            self.atr_sl_trend = self._classify_atr_sl_trend(
+                stock_price, stock_high, stock_low, atr_sl_value)
+            self.atr_sl_trend_gate_active = self._is_trend_favorable()
+
         # --- Update profit watermark (needed before hard SL adjustment) ---
         if profit_pct > self.highest_profit_pct:
             self.highest_profit_pct = profit_pct
@@ -1550,7 +1639,7 @@ class OptionsExitDetector:
             if new_hard_sl > self.hard_sl_price:
                 self.hard_sl_price = new_hard_sl
 
-        if option_price <= self.hard_sl_price:
+        if self.hard_sl_enabled and option_price <= self.hard_sl_price:
             state = self._build_state(option_price, profit_pct)
             return True, 'Hard-SL', state
 
@@ -1568,9 +1657,17 @@ class OptionsExitDetector:
                 self.trailing_tp_price = new_trailing_tp
 
             # Check if price hit trailing TP
-            if option_price <= self.trailing_tp_price:
-                state = self._build_state(option_price, profit_pct)
-                return True, 'Trail-TP', state
+            # Trend gate: suppress Trail-TP exit while ATR-SL trend is favorable
+            if self.trail_tp_enabled and option_price <= self.trailing_tp_price:
+                if self.atr_sl_trend_gate_active:
+                    # Trend is intact — hold the position, don't exit yet.
+                    # The trailing TP price continues to ratchet up, so when
+                    # the trend eventually breaks, the exit will capture the
+                    # higher trailing level.
+                    pass
+                else:
+                    state = self._build_state(option_price, profit_pct)
+                    return True, 'Trail-TP', state
 
         # --- Velocity deceleration exit (proactive peak detection) ---
         if self._check_velocity_exit(stock_price, profit_pct, ema_values, timestamp):
@@ -1626,6 +1723,8 @@ class OptionsExitDetector:
             'tp_trend_30m': self.trend_30m,
             'sl_ema_reversal': self.ema_reversal,
             'tp_confirmed': self.confirmed,
+            'atr_sl_trend': self.atr_sl_trend,
+            'atr_sl_trend_gate': self.atr_sl_trend_gate_active,
         }
 
 
@@ -2288,3 +2387,150 @@ class MarketTrendDetector:
 
         self.prev_spy_trend = spy_trend
         return False, None, self.state
+
+
+# =============================================================================
+# INTERNAL - Peak-Peak Exit Strategy
+# =============================================================================
+
+class PeakPeakExit:
+    """
+    Factory for creating PeakPeakDetector instances.
+
+    Captures a specific missed opportunity pattern: after the option reaches
+    a peak price, if at least min_hold_minutes pass and the option price
+    returns to that peak (or higher), the detector **engages**.
+
+    Once engaged, the detector tracks the price upward — letting it run
+    as long as it keeps increasing. When the price starts decreasing from
+    the engaged high, exit.
+
+    This improves on a simple double-top exit by allowing continuation
+    moves to play out while still capturing the reversal.
+
+    Config: BACKTEST_CONFIG['peak_peak_exit']
+        {
+            'enabled': True,
+            'min_hold_minutes': 10,        # Minimum minutes between peak and re-touch
+            'min_profit_pct': 5,           # Minimum option profit % to consider exit
+        }
+    """
+
+    def __init__(self, config=None):
+        pp_config = config or Config.get_setting('backtest', 'peak_peak_exit', {})
+        self.enabled = pp_config.get('enabled', False)
+        self.config = pp_config
+
+    def create_detector(self):
+        """Create a new PeakPeakDetector for a position. Returns None if disabled."""
+        if not self.enabled:
+            return None
+        return PeakPeakDetector(self.config)
+
+
+class PeakPeakDetector:
+    """
+    Tracks option price peaks and detects return-to-peak after a time delay.
+
+    Logic:
+    1. Track the maximum option price seen since entry (the "peak").
+    2. Once price drops below the peak, the peak is "confirmed" (real).
+    3. If at least min_hold_minutes have elapsed since the confirmed peak,
+       and the option price returns to the peak level (or higher), the
+       detector becomes **engaged**.
+    4. While engaged, continue tracking the price upward (new running high).
+       As long as price keeps increasing, keep following it.
+    5. When price starts decreasing from the engaged high, exit.
+
+    This catches the "second touch" of a peak and lets the price run
+    higher if momentum continues, only exiting when it turns back down.
+
+    Config: BACKTEST_CONFIG['peak_peak_exit']
+        {
+            'enabled': True,
+            'min_hold_minutes': 10,        # Minimum minutes between peak and re-touch
+            'min_profit_pct': 5,           # Minimum option profit % to consider exit
+        }
+    """
+
+    def __init__(self, config):
+        self.min_hold_minutes = config.get('min_hold_minutes', 10)
+        self.min_profit_pct = config.get('min_profit_pct', 5)
+
+        # Peak tracking
+        self.peak_price = None          # Highest option price seen
+        self.peak_time = None           # Timestamp when peak was set
+        self.peak_confirmed = False     # True once price has moved below peak (peak is "real")
+        self.entry_price = None         # Set on first update
+
+        # Engaged state: activated when price re-touches the confirmed peak
+        self.engaged = False            # True once peak is re-touched
+        self.engaged_high = None        # Highest price seen while engaged
+
+    def update(self, option_price, pnl_pct, timestamp):
+        """
+        Check for Peak-Peak exit signal.
+
+        Args:
+            option_price: Current option contract price
+            pnl_pct: Current P&L percentage
+            timestamp: Current timestamp
+
+        Returns:
+            (should_exit, exit_reason): Tuple. exit_reason is None if no exit.
+        """
+        if np.isnan(option_price) or np.isnan(pnl_pct) or timestamp is None:
+            return False, None
+
+        # Initialize on first call
+        if self.entry_price is None:
+            self.entry_price = option_price
+            self.peak_price = option_price
+            self.peak_time = timestamp
+            return False, None
+
+        # --- Engaged mode: price already re-touched the peak ---
+        if self.engaged:
+            if option_price > self.engaged_high:
+                # Price still increasing — keep tracking
+                self.engaged_high = option_price
+                return False, None
+            else:
+                # Price started decreasing from engaged high — exit
+                return True, 'Peak-Peak'
+
+        # --- Pre-engaged: tracking peaks and waiting for re-touch ---
+
+        # Update peak if we have a new high (before confirmation)
+        if option_price > self.peak_price:
+            if self.peak_confirmed and pnl_pct >= self.min_profit_pct:
+                # Price returned to or exceeded the confirmed peak —
+                # check if enough time has passed since that peak
+                minutes_since_peak = (timestamp - self.peak_time).total_seconds() / 60
+                if minutes_since_peak >= self.min_hold_minutes:
+                    # Engage: start tracking the upward run
+                    self.engaged = True
+                    self.engaged_high = option_price
+                    return False, None
+
+            # Update peak regardless (track the true high)
+            self.peak_price = option_price
+            self.peak_time = timestamp
+            self.peak_confirmed = False
+            return False, None
+
+        # Price is below peak — confirm that a peak has formed
+        if not self.peak_confirmed and self.peak_price > self.entry_price:
+            self.peak_confirmed = True
+
+        # Check if price is returning to the confirmed peak level (at or above)
+        if self.peak_confirmed and self.peak_time is not None:
+            minutes_since_peak = (timestamp - self.peak_time).total_seconds() / 60
+            if minutes_since_peak >= self.min_hold_minutes:
+                if option_price >= self.peak_price and pnl_pct >= self.min_profit_pct:
+                    # Engage: start tracking the upward run
+                    self.engaged = True
+                    self.engaged_high = option_price
+                    return False, None
+
+        return False, None
