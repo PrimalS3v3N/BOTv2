@@ -2034,14 +2034,14 @@ class SimulationEngine:
 
             if holding:
                 # =============================================================
-                # Per-second extrapolation: generate 60 sub-prices per minute
-                # OptionsExit is checked per-second for precise SL/TP detection.
-                # All other detectors run once per minute (indicator-based).
+                # Intra-minute extrapolation: generate 60 data points per minute
+                # OptionsExit is checked at each data point for precise SL/TP
+                # detection. All other detectors run once per minute (indicator-based).
                 # =============================================================
                 sub_prices = Analysis.extrapolate_bar_prices(
                     stock_open, stock_high, stock_low, stock_price)
 
-                # Track whether OptionsExit triggered during sub-second scan
+                # Track whether OptionsExit triggered during intra-minute scan
                 oe_exit = False
                 oe_reason = None
                 oe_state = {}

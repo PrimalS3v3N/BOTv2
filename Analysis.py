@@ -111,7 +111,7 @@ def EWO(df, column='close', fast_period=5, slow_period=35):
 
 def true_price(stock_price, stock_high, stock_low):
     """Deprecated: Previously calculated (high+low+close)/3.
-    Now replaced by per-second extrapolation which naturally incorporates high/low."""
+    Now replaced by intra-minute extrapolation which naturally incorporates high/low."""
     return stock_price
 
 
@@ -720,7 +720,7 @@ def add_indicators(df, ema_periods=None, ewo_fast=5, ewo_slow=35, ewo_avg_period
     df = df.copy()
 
     # All indicators use close price directly.
-    # (Previously used true_price = (high+low+close)/3, now replaced by per-second
+    # (Previously used true_price = (high+low+close)/3, now replaced by intra-minute
     # extrapolation which naturally incorporates high/low into the price path.)
 
     # Add EMAs at multiple periods
@@ -1003,10 +1003,10 @@ def estimate_option_price_bs(stock_price, strike, option_type, days_to_expiry,
 
 def extrapolate_bar_prices(open_price, high_price, low_price, close_price, n=60):
     """
-    Extrapolate a single OHLC bar into n per-second price points.
+    Extrapolate a single 1-minute OHLC bar into n intra-minute price points.
 
     Creates a realistic intra-bar price path that visits the high and low
-    within the bar, distributed in equal thirds (20-20-20 for n=60).
+    within the minute, distributed in equal thirds (20-20-20 for n=60).
 
     Path logic:
       - Bearish bar (open > close): open → high → low → close
@@ -1017,7 +1017,7 @@ def extrapolate_bar_prices(open_price, high_price, low_price, close_price, n=60)
         high_price: Bar high price
         low_price: Bar low price
         close_price: Bar close price
-        n: Number of points to generate (default: 60 for 1 point/second)
+        n: Number of points to generate per minute (default: 60)
 
     Returns:
         numpy array of n interpolated prices

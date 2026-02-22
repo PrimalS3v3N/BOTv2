@@ -1235,7 +1235,7 @@ class OptionsExitDetector:
             return False
 
         # Confirmation: deceleration must persist for N minutes
-        # In per-second mode, _decel_count tracks consecutive ticks of deceleration.
+        # In intra-minute mode, _decel_count tracks consecutive ticks of deceleration.
         # Convert to time-based: check if deceleration started >= N minutes ago.
         if timestamp and self._decel_start_time:
             decel_minutes = (timestamp - self._decel_start_time).total_seconds() / 60
@@ -1474,14 +1474,14 @@ class OptionsExitDetector:
         return self.favorability, self.favorability_reasons
 
     # ------------------------------------------------------------------
-    # Per-tick update (called per-second during extrapolated simulation)
+    # Per-tick update (called 60x per minute during extrapolated simulation)
     # ------------------------------------------------------------------
 
     def update(self, option_price, stock_price, ema_values=None, timestamp=None):
         """
         Per-tick update: check hard SL, update trailing TP, check EMA reversal.
 
-        Called per-second during extrapolated backtesting, per-minute in live.
+        Called 60x per minute during extrapolated backtesting, once per minute in live.
 
         Args:
             option_price: Current estimated option price
