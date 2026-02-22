@@ -586,7 +586,7 @@ class Position:
     def get_pnl(self, price=None):
         """Get P&L in dollars per contract."""
         price = price or self.current_price
-        return (price - self.entry_price) * 100 * self.contracts
+        return round((price - self.entry_price) * 100 * self.contracts, 2)
 
     def get_pnl_pct(self, price=None):
         """Get P&L as percentage."""
