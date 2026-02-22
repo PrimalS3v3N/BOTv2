@@ -652,6 +652,7 @@ class SignalGroup:
         self.positions = []      # List of Position objects (trade 1, trade 2, ...)
         self.databooks = []      # List of Databook objects (one per trade)
         self.reentry_count = 0   # Number of re-entries executed
+        self.bs_calibration = None  # T1's BS calibration params (anchors option price curve)
 
     def add_trade(self, position, databook):
         """Add a trade (position + databook) to this signal group."""
@@ -1749,7 +1750,7 @@ class SimulationEngine:
         return False
 
     def simulate_position(self, position, matrix, stock_data, signal, entry_idx, entry_stock_price,
-                          statsbooks=None, spy_data=None):
+                          statsbooks=None, spy_data=None, bs_calibration=None):
         """
         Simulate position through bar data (shared logic).
 
@@ -1765,6 +1766,10 @@ class SimulationEngine:
             entry_stock_price: Stock price at entry
             statsbooks: Dict of {ticker: statsbook_df} for StatsBook exits
             spy_data: DataFrame of SPY intraday data for gauge
+            bs_calibration: Optional dict with T1's BS calibration params
+                (entry_price, entry_stock_price, entry_days_to_expiry).
+                When provided, anchors option price curve to T1 so re-entries
+                share the same price curve as the original trade.
         """
         statsbooks = statsbooks or {}
 
@@ -1777,6 +1782,11 @@ class SimulationEngine:
             expiry_dt = position.entry_time + dt.timedelta(days=30)
 
         entry_days_to_expiry = max(0, (expiry_dt - position.entry_time).total_seconds() / 86400)
+
+        # Use T1's BS calibration for re-entry trades (same contract = same price curve)
+        _bs_entry_price = bs_calibration['entry_price'] if bs_calibration else position.entry_price
+        _bs_entry_stock = bs_calibration['entry_stock_price'] if bs_calibration else entry_stock_price
+        _bs_entry_dte = bs_calibration['entry_days_to_expiry'] if bs_calibration else entry_days_to_expiry
 
         # Get indicator settings from config
         indicator_config = self.config.get('indicators', {})
@@ -2054,15 +2064,15 @@ class SimulationEngine:
 
             current_days_to_expiry = max(0, (expiry_dt - timestamp).total_seconds() / 86400)
 
-            # Estimate option price (at bar close for initial computation)
+            # Estimate option price (anchored to T1's calibration for re-entries)
             option_price = Analysis.estimate_option_price_bs(
                 stock_price=stock_price,
                 strike=position.strike,
                 option_type=position.option_type,
                 days_to_expiry=current_days_to_expiry,
-                entry_price=position.entry_price,
-                entry_stock_price=entry_stock_price,
-                entry_days_to_expiry=entry_days_to_expiry
+                entry_price=_bs_entry_price,
+                entry_stock_price=_bs_entry_stock,
+                entry_days_to_expiry=_bs_entry_dte
             )
 
             # Determine holding status
@@ -2205,9 +2215,9 @@ class SimulationEngine:
                         strike=position.strike,
                         option_type=position.option_type,
                         days_to_expiry=_sub_days,
-                        entry_price=position.entry_price,
-                        entry_stock_price=entry_stock_price,
-                        entry_days_to_expiry=entry_days_to_expiry
+                        entry_price=_bs_entry_price,
+                        entry_stock_price=_bs_entry_stock,
+                        entry_days_to_expiry=_bs_entry_dte
                     )
 
                 # Interpolate all continuous indicators (prev bar close → current bar close)
@@ -2982,6 +2992,19 @@ class Backtest:
             spy_data=spy_data,
         )
 
+        # Anchor BS calibration from Trade 1 (same contract = same price curve)
+        if signal['expiration']:
+            _calib_expiry = dt.datetime.combine(
+                signal['expiration'], dt.time(16, 0), tzinfo=EASTERN
+            )
+        else:
+            _calib_expiry = position.entry_time + dt.timedelta(days=30)
+        group.bs_calibration = {
+            'entry_price': position.entry_price,
+            'entry_stock_price': entry_stock_price,
+            'entry_days_to_expiry': max(0, (_calib_expiry - position.entry_time).total_seconds() / 86400),
+        }
+
         group.add_trade(position, matrix)
 
         # --- Re-entry check ---
@@ -3045,21 +3068,22 @@ class Backtest:
             scan_bar = stock_data.iloc[scan_idx]
             scan_stock_price = scan_bar['close']
 
-            # Estimate option price at this bar
+            # Estimate option price at this bar (anchored to T1's calibration)
             try:
                 expiry_dt = pd.Timestamp(signal.get('expiration'))
                 if expiry_dt.tzinfo is None:
                     expiry_dt = expiry_dt.tz_localize(EASTERN)
                 days_to_expiry = max(0, (expiry_dt - scan_ts).total_seconds() / 86400)
 
+                _cal = group.bs_calibration
                 scan_option_price = Analysis.estimate_option_price_bs(
                     stock_price=scan_stock_price,
                     strike=signal.get('strike'),
                     option_type=signal.get('option_type'),
                     days_to_expiry=days_to_expiry,
-                    entry_price=prev_position.entry_price,
-                    entry_stock_price=scan_bar['close'],
-                    entry_days_to_expiry=days_to_expiry + 1
+                    entry_price=_cal['entry_price'],
+                    entry_stock_price=_cal['entry_stock_price'],
+                    entry_days_to_expiry=_cal['entry_days_to_expiry']
                 )
             except Exception:
                 continue
@@ -3089,7 +3113,7 @@ class Backtest:
             print(f"    RE-ENTRY: Trade {reentry_position.trade_number} at "
                   f"${scan_option_price:.2f} (signal cost: ${signal_cost:.2f})")
 
-            # Simulate re-entry trade
+            # Simulate re-entry trade (anchored to T1's option price curve)
             self.engine.simulate_position(
                 position=reentry_position,
                 matrix=reentry_matrix,
@@ -3099,6 +3123,7 @@ class Backtest:
                 entry_stock_price=reentry_stock_price,
                 statsbooks=self.statsbooks,
                 spy_data=spy_data,
+                bs_calibration=group.bs_calibration,
             )
 
             group.add_trade(reentry_position, reentry_matrix)
