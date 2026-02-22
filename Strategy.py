@@ -1032,6 +1032,10 @@ class OptionsExitDetector:
 
         # Trailing SL parameters
         self.trail_activation_pct = config.get('trail_activation_pct', 10)
+        # Cheap options have amplified % swings — require more profit before trailing
+        cheap_threshold = config.get('trail_cheap_option_threshold', 0.40)
+        if cheap_threshold and entry_option_price < cheap_threshold:
+            self.trail_activation_pct *= 2
         self.trail_base_floor_pct = config.get('trail_base_floor_pct', 5)
         self.trail_early_floor_minutes = config.get('trail_early_floor_minutes', 5)
         self.trail_scale = config.get('trail_scale', 20.0)
