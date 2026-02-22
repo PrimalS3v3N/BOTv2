@@ -1938,6 +1938,43 @@ class SimulationEngine:
 
         max_vwap_ema_avg = np.nan
 
+        # Previous-bar indicator values for 1-second interpolation
+        prev_rsi = np.nan
+        prev_rsi_10min_avg = np.nan
+        prev_ewo = np.nan
+        prev_ewo_15min_avg = np.nan
+        prev_stoch_k = np.nan
+        prev_stoch_d = np.nan
+        prev_vwap = np.nan
+        prev_ema_10 = np.nan
+        prev_ema_21 = np.nan
+        prev_ema_50 = np.nan
+        prev_ema_100 = np.nan
+        prev_ema_200 = np.nan
+        prev_atr_sl = np.nan
+        prev_vwap_ema_avg = np.nan
+        prev_emavwap = np.nan
+        prev_ichi_tenkan = np.nan
+        prev_ichi_kijun = np.nan
+        prev_ichi_senkou_a = np.nan
+        prev_ichi_senkou_b = np.nan
+        prev_macd_line = np.nan
+        prev_macd_signal = np.nan
+        prev_macd_hist = np.nan
+        prev_roc = np.nan
+
+        def _interp_60(prev_val, curr_val):
+            """Linearly interpolate between previous and current bar values (60 pts)."""
+            p = prev_val if not np.isnan(prev_val) else curr_val
+            c = curr_val if not np.isnan(curr_val) else prev_val
+            if np.isnan(p) and np.isnan(c):
+                return np.full(60, np.nan)
+            if np.isnan(p):
+                return np.full(60, c)
+            if np.isnan(c):
+                return np.full(60, p)
+            return np.linspace(p, c, 60)
+
         # Pre-extract column arrays for fast indexed access (avoids iterrows overhead)
         _col_close = stock_data['close'].values
         _col_open = stock_data['open'].values if 'open' in stock_data.columns else _col_close
@@ -2149,8 +2186,8 @@ class SimulationEngine:
             if holding:
                 # =============================================================
                 # Intra-minute extrapolation: generate 60 data points per minute
-                # OptionsExit is checked at each data point for precise SL/TP
-                # detection. All other detectors run once per minute (indicator-based).
+                # ALL exit detectors run at each 1-second data point with
+                # interpolated indicator values for precise exit detection.
                 # =============================================================
                 _bar_extrap = self.config.get('bar_extrapolation', {})
                 sub_prices = Analysis.extrapolate_bar_prices(
@@ -2159,61 +2196,41 @@ class SimulationEngine:
                     low_span_max=_bar_extrap.get('low_span_max'),
                     min_segment=_bar_extrap.get('min_segment', 1))
 
-                # Track whether OptionsExit triggered during intra-minute scan
-                oe_exit = False
-                oe_reason = None
-                oe_state = {}
-                _sub_exit_ts = None
-                _sub_exit_stock = None
-                _sub_exit_option = None
+                # Pre-compute 60 sub-second option prices via Black-Scholes
+                _sub_options = np.empty(60)
+                for _j in range(60):
+                    _sub_days = max(0, (expiry_dt - (timestamp + timedelta(seconds=_j))).total_seconds() / 86400)
+                    _sub_options[_j] = Analysis.estimate_option_price_bs(
+                        stock_price=float(sub_prices[_j]),
+                        strike=position.strike,
+                        option_type=position.option_type,
+                        days_to_expiry=_sub_days,
+                        entry_price=position.entry_price,
+                        entry_stock_price=entry_stock_price,
+                        entry_days_to_expiry=entry_days_to_expiry
+                    )
 
-                if oe_detector and not position.is_closed:
-                    ema_vals = {10: ema_10, 21: ema_21, 50: ema_50, 100: ema_100, 200: ema_200}
-                    for j in range(60):
-                        sub_ts = timestamp + timedelta(seconds=j)
-                        sub_stock = float(sub_prices[j])
-                        sub_days = max(0, (expiry_dt - sub_ts).total_seconds() / 86400)
-                        sub_option = Analysis.estimate_option_price_bs(
-                            stock_price=sub_stock,
-                            strike=position.strike,
-                            option_type=position.option_type,
-                            days_to_expiry=sub_days,
-                            entry_price=position.entry_price,
-                            entry_stock_price=entry_stock_price,
-                            entry_days_to_expiry=entry_days_to_expiry
-                        )
-
-                        position.update(sub_ts, sub_option, sub_stock)
-                        position.update_eod_price(sub_option)
-
-                        oe_exit, oe_reason, oe_state = oe_detector.update(
-                            option_price=sub_option,
-                            stock_price=sub_stock,
-                            ema_values=ema_vals,
-                            timestamp=sub_ts,
-                            atr_sl_value=atr_sl_value,
-                            stock_high=stock_high,
-                            stock_low=stock_low,
-                        )
-
-                        if oe_exit:
-                            _sub_exit_ts = sub_ts
-                            _sub_exit_stock = sub_stock
-                            _sub_exit_option = sub_option
-                            break
-                    else:
-                        # No intra-minute exit — ensure position is up to date at bar close
-                        bar_end_ts = timestamp + timedelta(seconds=59)
-                        position.update(bar_end_ts, option_price, stock_price)
-                else:
-                    # No OptionsExit detector — just update at bar close
-                    position.update(timestamp, option_price, stock_price)
-
-                # If OptionsExit triggered mid-minute, override bar values for recording
-                if _sub_exit_ts:
-                    timestamp = _sub_exit_ts
-                    stock_price = _sub_exit_stock
-                    option_price = _sub_exit_option
+                # Interpolate all continuous indicators (prev bar close → current bar close)
+                _s_rsi = _interp_60(prev_rsi, rsi)
+                _s_rsi_avg = _interp_60(prev_rsi_10min_avg, rsi_10min_avg)
+                _s_ewo = _interp_60(prev_ewo, ewo)
+                _s_ewo_avg = _interp_60(prev_ewo_15min_avg, ewo_15min_avg)
+                _s_stoch_k = _interp_60(prev_stoch_k, stoch_k_val)
+                _s_stoch_d = _interp_60(prev_stoch_d, stoch_d_val)
+                _s_vwap = _interp_60(prev_vwap, vwap)
+                _s_ema_10 = _interp_60(prev_ema_10, ema_10)
+                _s_ema_21 = _interp_60(prev_ema_21, ema_21)
+                _s_ema_50 = _interp_60(prev_ema_50, ema_50)
+                _s_ema_100 = _interp_60(prev_ema_100, ema_100)
+                _s_ema_200 = _interp_60(prev_ema_200, ema_200)
+                _s_atr_sl = _interp_60(prev_atr_sl, atr_sl_value)
+                _s_vwap_ema_avg = _interp_60(prev_vwap_ema_avg, vwap_ema_avg)
+                _s_emavwap = _interp_60(prev_emavwap, emavwap)
+                _s_ichi_tenkan = _interp_60(prev_ichi_tenkan, ichi_tenkan)
+                _s_ichi_kijun = _interp_60(prev_ichi_kijun, ichi_kijun)
+                _s_ichi_senkou_a = _interp_60(prev_ichi_senkou_a, ichi_senkou_a)
+                _s_ichi_senkou_b = _interp_60(prev_ichi_senkou_b, ichi_senkou_b)
+                # Discrete indicators (constant within bar): st_direction, ticker_trend_val, spy_trend_val
 
                 # --- Risk Assessment (once at entry, if not already done above) ---
                 if not risk_assessed and risk_enabled:
@@ -2226,138 +2243,209 @@ class SimulationEngine:
                     if risk_level == 'HIGH':
                         print(f"    RISK: HIGH [{risk_reasons}]")
 
-                # --- Risk trend monitoring (time-based) ---
-                if risk_level == 'HIGH' and not position.is_closed and position.get_minutes_held(timestamp) >= risk_downtrend_delay_min:
-                    pnl_pct_now = position.get_pnl_pct(option_price)
-
-                    if option_price >= position.entry_price:
-                        risk_trend = 'Uptrend'
-                    else:
-                        risk_trend = 'Downtrend'
-
-                    if risk_trend == 'Downtrend':
-                        if pnl_pct_now < 0:
-                            risk_negative_bar_count += 1
-                            if risk_negative_start_time is None:
-                                risk_negative_start_time = timestamp
-                        else:
-                            risk_negative_bar_count = 0
-                            risk_negative_start_time = None
-
-                        if not position.is_closed:
-                            # Time-based downtrend check
-                            if risk_negative_start_time:
-                                risk_negative_minutes = (timestamp - risk_negative_start_time).total_seconds() / 60
-                            else:
-                                risk_negative_minutes = risk_negative_bar_count
-                            if risk_negative_minutes >= risk_downtrend_bars:
-                                exit_price = option_price * (1 - self.slippage_pct)
-                                position.close(exit_price, timestamp, risk_downtrend_reason)
-                            elif pnl_pct_now <= -risk_downtrend_drop_pct:
-                                exit_price = option_price * (1 - self.slippage_pct)
-                                position.close(exit_price, timestamp, risk_downtrend_reason)
-
-                # Update momentum peak detector
-                mp_exit = False
-                mp_reason = None
-                if mp_detector and not position.is_closed:
-                    mp_pnl = position.get_pnl_pct(option_price)
-                    mp_exit, mp_reason = mp_detector.update(mp_pnl, rsi, rsi_10min_avg, ewo, stoch_k_val, stoch_d_val, option_price)
-
-                # Update StatsBook detector
-                sb_exit = False
-                sb_reason = None
-                if sb_detector and not position.is_closed:
-                    sb_pnl = position.get_pnl_pct(option_price)
-                    sb_exit, sb_reason = sb_detector.update(sb_pnl, ewo, stock_high, stock_low, timestamp=timestamp)
-
-                # Update AI exit signal detector
-                ai_exit = False
-                ai_reason = None
-                ai_signal_data = {}
-                if ai_detector and not position.is_closed:
-                    ai_bar_data = {
-                        'stock_price': stock_price,
-                        'stock_high': stock_high,
-                        'stock_low': stock_low,
-                        'volume': volume,
-                        'option_price': option_price,
-                        'pnl_pct': position.get_pnl_pct(option_price),
-                        'vwap': vwap,
-                        'ema_21': ema_21,
-                        'ewo': ewo,
-                        'ewo_15min_avg': ewo_15min_avg,
-                        'rsi': rsi,
-                        'rsi_10min_avg': rsi_10min_avg,
-                        'supertrend_direction': st_direction,
-                        'market_bias': matrix.records[-1]['ticker_trend'] if matrix.records else np.nan,
-                        'ichimoku_tenkan': ichi_tenkan,
-                        'ichimoku_kijun': ichi_kijun,
-                        'ichimoku_senkou_a': ichi_senkou_a,
-                        'ichimoku_senkou_b': ichi_senkou_b,
-                    }
-                    ai_exit, ai_reason = ai_detector.update(
-                        bar_data=ai_bar_data,
-                        pnl_pct=position.get_pnl_pct(option_price),
-                        minutes_held=position.get_minutes_held(timestamp),
-                        option_price=option_price,
-                        timestamp=timestamp,
-                    )
-                    ai_signal_data = ai_detector.current_signal
-
-                # Update Volume Climax detector
-                vc_exit = False
-                vc_reason = None
-                if vc_detector and not position.is_closed:
-                    vc_pnl = position.get_pnl_pct(option_price)
-                    vc_exit, vc_reason = vc_detector.update(vc_pnl, volume, stock_price, stock_open, stoch_k_val, timestamp=timestamp)
-
-                # Update Time Stop detector
-                ts_exit = False
-                ts_reason = None
-                if ts_detector and not position.is_closed:
-                    ts_pnl = position.get_pnl_pct(option_price)
-                    ts_minutes = position.get_minutes_held(timestamp)
-                    ts_exit, ts_reason = ts_detector.update(ts_pnl, ts_minutes)
-
-                # Update VWAP Cross detector
-                vwap_exit = False
-                vwap_reason = None
-                if vwap_detector and not position.is_closed:
-                    vwap_pnl = position.get_pnl_pct(option_price)
-                    vwap_exit, vwap_reason = vwap_detector.update(vwap_pnl, stock_price, vwap, timestamp=timestamp)
-
-                # Update Supertrend Flip detector
-                st_flip_exit = False
-                st_flip_reason = None
-                if st_flip_detector and not position.is_closed:
-                    st_flip_pnl = position.get_pnl_pct(option_price)
-                    st_flip_exit, st_flip_reason = st_flip_detector.update(st_flip_pnl, st_direction, timestamp=timestamp)
-
-                # Update Peak-Peak detector
-                pp_exit = False
-                pp_reason = None
-                if pp_detector and not position.is_closed:
-                    pp_pnl = position.get_pnl_pct(option_price)
-                    pp_exit, pp_reason = pp_detector.update(option_price, pp_pnl, timestamp)
-
-                # Update MarketTrend detector
-                mt_exit = False
-                mt_reason = None
-                mt_state = None
-                if mt_detector and not position.is_closed:
-                    mt_pnl = position.get_pnl_pct(option_price)
-                    mt_exit, mt_reason, mt_state = mt_detector.update(ticker_trend_val, spy_trend_val, mt_pnl, timestamp=timestamp)
-
-                # Compute Closure-Peak signal flag
+                # Initialize exit flags (updated by the 60-point loop)
+                oe_exit = False; oe_reason = None; oe_state = {}
+                mp_exit = False; mp_reason = None
+                sb_exit = False; sb_reason = None
+                ai_exit = False; ai_reason = None; ai_signal_data = {}
+                vc_exit = False; vc_reason = None
+                ts_exit = False; ts_reason = None
+                vwap_exit = False; vwap_reason = None
+                st_flip_exit = False; st_flip_reason = None
+                pp_exit = False; pp_reason = None
+                mt_exit = False; mt_reason = None; mt_state = None
                 cp_signal = False
-                if CP_enabled and not np.isnan(rsi_10min_avg) and timestamp.time() >= CP_start_time:
-                    if position.option_type.upper() in ['CALL', 'CALLS', 'C'] and rsi_10min_avg >= CP_rsi_call:
-                        cp_signal = True
-                    elif position.option_type.upper() in ['PUT', 'PUTS', 'P'] and rsi_10min_avg <= CP_rsi_put:
-                        cp_signal = True
 
-                # Record tracking data
+                # =============================================================
+                # Unified 1-second exit detection loop
+                # =============================================================
+                for j in range(60):
+                    sub_ts = timestamp + timedelta(seconds=j)
+                    sub_stock = float(sub_prices[j])
+                    sub_option = float(_sub_options[j])
+                    sub_pnl = position.get_pnl_pct(sub_option)
+                    sub_minutes = position.get_minutes_held(sub_ts)
+
+                    # Running high/low within bar up to this second
+                    sub_high = float(np.max(sub_prices[:j + 1]))
+                    sub_low = float(np.min(sub_prices[:j + 1]))
+
+                    # Interpolated indicator values at this second
+                    j_rsi = float(_s_rsi[j])
+                    j_rsi_avg = float(_s_rsi_avg[j])
+                    j_ewo = float(_s_ewo[j])
+                    j_stoch_k = float(_s_stoch_k[j])
+                    j_stoch_d = float(_s_stoch_d[j])
+                    j_vwap = float(_s_vwap[j])
+                    j_atr_sl = float(_s_atr_sl[j])
+
+                    # Update position at this second
+                    position.update(sub_ts, sub_option, sub_stock)
+                    position.update_eod_price(sub_option)
+
+                    # --- OptionsExit ---
+                    if oe_detector and not position.is_closed:
+                        ema_vals_j = {
+                            10: float(_s_ema_10[j]), 21: float(_s_ema_21[j]),
+                            50: float(_s_ema_50[j]), 100: float(_s_ema_100[j]),
+                            200: float(_s_ema_200[j]),
+                        }
+                        oe_exit, oe_reason, oe_state = oe_detector.update(
+                            option_price=sub_option, stock_price=sub_stock,
+                            ema_values=ema_vals_j, timestamp=sub_ts,
+                            atr_sl_value=j_atr_sl,
+                            stock_high=sub_high, stock_low=sub_low,
+                        )
+
+                    # --- MomentumPeak ---
+                    if mp_detector and not position.is_closed:
+                        mp_exit, mp_reason = mp_detector.update(
+                            sub_pnl, j_rsi, j_rsi_avg, j_ewo,
+                            j_stoch_k, j_stoch_d, sub_option)
+
+                    # --- StatsBook ---
+                    if sb_detector and not position.is_closed:
+                        sb_exit, sb_reason = sb_detector.update(
+                            sub_pnl, j_ewo, sub_high, sub_low, timestamp=sub_ts)
+
+                    # --- AI Exit (respects its internal eval_interval) ---
+                    if ai_detector and not position.is_closed:
+                        ai_bar_data = {
+                            'stock_price': sub_stock,
+                            'stock_high': sub_high,
+                            'stock_low': sub_low,
+                            'volume': volume,
+                            'option_price': sub_option,
+                            'pnl_pct': sub_pnl,
+                            'vwap': j_vwap,
+                            'ema_21': float(_s_ema_21[j]),
+                            'ewo': j_ewo,
+                            'ewo_15min_avg': float(_s_ewo_avg[j]),
+                            'rsi': j_rsi,
+                            'rsi_10min_avg': j_rsi_avg,
+                            'supertrend_direction': st_direction,
+                            'market_bias': matrix.records[-1]['ticker_trend'] if matrix.records else np.nan,
+                            'ichimoku_tenkan': float(_s_ichi_tenkan[j]),
+                            'ichimoku_kijun': float(_s_ichi_kijun[j]),
+                            'ichimoku_senkou_a': float(_s_ichi_senkou_a[j]),
+                            'ichimoku_senkou_b': float(_s_ichi_senkou_b[j]),
+                        }
+                        ai_exit, ai_reason = ai_detector.update(
+                            bar_data=ai_bar_data, pnl_pct=sub_pnl,
+                            minutes_held=sub_minutes, option_price=sub_option,
+                            timestamp=sub_ts)
+                        ai_signal_data = ai_detector.current_signal
+
+                    # --- VolumeClimax ---
+                    if vc_detector and not position.is_closed:
+                        vc_exit, vc_reason = vc_detector.update(
+                            sub_pnl, volume, sub_stock, stock_open,
+                            j_stoch_k, timestamp=sub_ts)
+
+                    # --- TimeStop ---
+                    if ts_detector and not position.is_closed:
+                        ts_exit, ts_reason = ts_detector.update(sub_pnl, sub_minutes)
+
+                    # --- VWAPCross ---
+                    if vwap_detector and not position.is_closed:
+                        vwap_exit, vwap_reason = vwap_detector.update(
+                            sub_pnl, sub_stock, j_vwap, timestamp=sub_ts)
+
+                    # --- SupertrendFlip ---
+                    if st_flip_detector and not position.is_closed:
+                        st_flip_exit, st_flip_reason = st_flip_detector.update(
+                            sub_pnl, st_direction, timestamp=sub_ts)
+
+                    # --- PeakPeak ---
+                    if pp_detector and not position.is_closed:
+                        pp_exit, pp_reason = pp_detector.update(
+                            sub_option, sub_pnl, sub_ts)
+
+                    # --- MarketTrend ---
+                    if mt_detector and not position.is_closed:
+                        mt_exit, mt_reason, mt_state = mt_detector.update(
+                            ticker_trend_val, spy_trend_val, sub_pnl, timestamp=sub_ts)
+
+                    # --- ClosurePeak ---
+                    if CP_enabled and not np.isnan(j_rsi_avg) and sub_ts.time() >= CP_start_time:
+                        if position.option_type.upper() in ['CALL', 'CALLS', 'C'] and j_rsi_avg >= CP_rsi_call:
+                            cp_signal = True
+                        elif position.option_type.upper() in ['PUT', 'PUTS', 'P'] and j_rsi_avg <= CP_rsi_put:
+                            cp_signal = True
+
+                    # --- Risk trend monitoring (time-based) ---
+                    if risk_level == 'HIGH' and not position.is_closed and sub_minutes >= risk_downtrend_delay_min:
+                        if sub_option >= position.entry_price:
+                            risk_trend = 'Uptrend'
+                        else:
+                            risk_trend = 'Downtrend'
+
+                        if risk_trend == 'Downtrend':
+                            if sub_pnl < 0:
+                                risk_negative_bar_count += 1
+                                if risk_negative_start_time is None:
+                                    risk_negative_start_time = sub_ts
+                            else:
+                                risk_negative_bar_count = 0
+                                risk_negative_start_time = None
+
+                            if not position.is_closed:
+                                if risk_negative_start_time:
+                                    risk_negative_minutes = (sub_ts - risk_negative_start_time).total_seconds() / 60
+                                else:
+                                    risk_negative_minutes = risk_negative_bar_count
+                                if risk_negative_minutes >= risk_downtrend_bars:
+                                    exit_price = sub_option * (1 - self.slippage_pct)
+                                    position.close(exit_price, sub_ts, risk_downtrend_reason)
+                                elif sub_pnl <= -risk_downtrend_drop_pct:
+                                    exit_price = sub_option * (1 - self.slippage_pct)
+                                    position.close(exit_price, sub_ts, risk_downtrend_reason)
+
+                    # === EXIT PRIORITY CHAIN (checked each second) ===
+                    if not position.is_closed:
+                        _exit_reason = None
+                        _exit_label = None
+                        if oe_exit:
+                            _exit_reason = oe_reason
+                        elif sb_exit:
+                            _exit_reason = sb_reason
+                        elif mp_exit:
+                            _exit_reason = mp_reason
+                        elif pp_exit:
+                            _exit_reason = pp_reason
+                        elif vc_exit:
+                            _exit_reason = vc_reason
+                        elif vwap_exit:
+                            _exit_reason = vwap_reason
+                        elif st_flip_exit:
+                            _exit_reason = st_flip_reason
+                        elif mt_exit and mt_exit_enabled:
+                            _exit_reason = mt_reason
+                        elif ts_exit:
+                            _exit_reason = ts_reason
+                        elif ai_exit:
+                            _exit_reason = 'AI Exit Signal'
+                        elif cp_signal:
+                            _exit_reason = 'Closure - Peak'
+                        elif sub_ts.time() >= dt.time(15, 55):
+                            _exit_reason = 'Closure-Market'
+
+                        if _exit_reason:
+                            exit_price = sub_option * (1 - self.slippage_pct)
+                            position.close(exit_price, sub_ts, _exit_reason)
+
+                    # If position closed this second, capture values and break
+                    if position.is_closed:
+                        timestamp = sub_ts
+                        stock_price = sub_stock
+                        option_price = sub_option
+                        break
+                else:
+                    # No exit during this bar — position is up to date at last second
+                    bar_end_ts = timestamp + timedelta(seconds=59)
+                    position.update(bar_end_ts, option_price, stock_price)
+
+                # Record tracking data (one row per minute, using exit-point or bar-close values)
                 matrix.add_record(
                     timestamp=timestamp,
                     stock_price=stock_price,
@@ -2399,48 +2487,6 @@ class SimulationEngine:
                     deferred_active=de_active,
                     deferred_trigger=de_trigger_reason if (de_triggered and i == de_new_entry_idx) else None,
                 )
-
-                # === EXIT PRIORITY CHAIN ===
-                if oe_exit and not position.is_closed:
-                    exit_price = option_price * (1 - self.slippage_pct)
-                    position.close(exit_price, timestamp, oe_reason)
-                elif sb_exit and not position.is_closed:
-                    exit_price = option_price * (1 - self.slippage_pct)
-                    position.close(exit_price, timestamp, sb_reason)
-                elif mp_exit and not position.is_closed:
-                    exit_price = option_price * (1 - self.slippage_pct)
-                    position.close(exit_price, timestamp, mp_reason)
-                elif pp_exit and not position.is_closed:
-                    exit_price = option_price * (1 - self.slippage_pct)
-                    position.close(exit_price, timestamp, pp_reason)
-                elif vc_exit and not position.is_closed:
-                    exit_price = option_price * (1 - self.slippage_pct)
-                    position.close(exit_price, timestamp, vc_reason)
-                elif vwap_exit and not position.is_closed:
-                    exit_price = option_price * (1 - self.slippage_pct)
-                    position.close(exit_price, timestamp, vwap_reason)
-                elif st_flip_exit and not position.is_closed:
-                    exit_price = option_price * (1 - self.slippage_pct)
-                    position.close(exit_price, timestamp, st_flip_reason)
-                elif mt_exit and mt_exit_enabled and not position.is_closed:
-                    exit_price = option_price * (1 - self.slippage_pct)
-                    position.close(exit_price, timestamp, mt_reason)
-                elif ts_exit and not position.is_closed:
-                    exit_price = option_price * (1 - self.slippage_pct)
-                    position.close(exit_price, timestamp, ts_reason)
-                elif ai_exit and not position.is_closed:
-                    exit_price = option_price * (1 - self.slippage_pct)
-                    position.close(exit_price, timestamp, 'AI Exit Signal')
-                elif CP_enabled and not position.is_closed and not np.isnan(rsi_10min_avg) and timestamp.time() >= CP_start_time:
-                    if position.option_type.upper() in ['CALL', 'CALLS', 'C'] and rsi_10min_avg >= CP_rsi_call:
-                        exit_price = option_price * (1 - self.slippage_pct)
-                        position.close(exit_price, timestamp, 'Closure - Peak')
-                    elif position.option_type.upper() in ['PUT', 'PUTS', 'P'] and rsi_10min_avg <= CP_rsi_put:
-                        exit_price = option_price * (1 - self.slippage_pct)
-                        position.close(exit_price, timestamp, 'Closure - Peak')
-                elif timestamp.time() >= dt.time(15, 55) and not position.is_closed:
-                    exit_price = option_price * (1 - self.slippage_pct)
-                    position.close(exit_price, timestamp, 'Closure-Market')
             else:
                 # Record tracking data for non-holding periods
                 matrix.add_record(
@@ -2470,6 +2516,31 @@ class SimulationEngine:
                     deferred_active=de_active,
                     deferred_trigger=de_trigger_reason if (de_triggered and i == de_new_entry_idx) else None,
                 )
+
+            # Update previous-bar indicator values for next bar's interpolation
+            prev_rsi = rsi
+            prev_rsi_10min_avg = rsi_10min_avg
+            prev_ewo = ewo
+            prev_ewo_15min_avg = ewo_15min_avg
+            prev_stoch_k = stoch_k_val
+            prev_stoch_d = stoch_d_val
+            prev_vwap = vwap
+            prev_ema_10 = ema_10
+            prev_ema_21 = ema_21
+            prev_ema_50 = ema_50
+            prev_ema_100 = ema_100
+            prev_ema_200 = ema_200
+            prev_atr_sl = atr_sl_value
+            prev_vwap_ema_avg = vwap_ema_avg
+            prev_emavwap = emavwap
+            prev_ichi_tenkan = ichi_tenkan
+            prev_ichi_kijun = ichi_kijun
+            prev_ichi_senkou_a = ichi_senkou_a
+            prev_ichi_senkou_b = ichi_senkou_b
+            prev_macd_line = macd_line_val
+            prev_macd_signal = macd_signal_val
+            prev_macd_hist = macd_histogram_val
+            prev_roc = roc_val
 
         # Close at end of data if still open
         if not position.is_closed:
