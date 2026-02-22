@@ -22,6 +22,13 @@ DATA_PATH = os.path.join(SCRIPT_DIR, 'BT_DATA.pkl')
 
 st.set_page_config(page_title="Trade Dashboard", layout="wide")
 
+# Auto-refresh every 60 seconds
+try:
+    from streamlit_autorefresh import st_autorefresh
+    st_autorefresh(interval=60 * 1000, key="data_refresh")
+except ImportError:
+    pass
+
 COLORS = {
     'stock': '#2962FF',
     'option': '#FF6D00',
@@ -1444,8 +1451,8 @@ def main():
         if is_multi_trade and trade_idx < len(pos_ids) - 1:
             st.markdown("---")
 
-    # Use last trade's df for StatsBook and Databook display
-    df = matrices[pos_ids[-1]]
+    # Use first trade's df for StatsBook display (per-ticker, same across signal group)
+    df = matrices[pos_ids[0]]
 
     # StatsBook table - only render when toggle is on
     if show_stats_book:
@@ -1510,92 +1517,103 @@ def main():
     # Column order from Config (source of truth)
     matrix_cols = Config.DATAFRAME_COLUMNS['dashboard_databook']
 
-    # Filter to columns that exist in the dataframe
-    available_cols = [col for col in matrix_cols if col in df.columns]
+    # Show databook for each trade in the signal group
+    for trade_idx, pos_id in enumerate(pos_ids):
+        trade_df = matrices[pos_id]
+        trade_num = int(trade_df['trade_number'].iloc[0]) if 'trade_number' in trade_df.columns and trade_df['trade_number'].notna().any() else trade_idx + 1
 
-    if available_cols:
-        matrix_df = df[available_cols].copy()
+        if is_multi_trade:
+            st.markdown(f"**T{trade_num}**")
 
-        # Filter based on toggle:
-        # ON (market_hours_only=True): Show full market hours (9:00 AM - 4:00 PM)
-        # OFF (market_hours_only=False): Show only holding period (where holding=True)
-        if market_hours_only and 'timestamp' in matrix_df.columns:
-            import datetime as dt
-            parsed_times = pd.to_datetime(matrix_df['timestamp'].astype(str).str.replace(' : ', ' '), errors='coerce')
-            time_mask = (parsed_times.dt.time >= dt.time(9, 0)) & (parsed_times.dt.time <= dt.time(16, 0))
-            matrix_df = matrix_df[time_mask]
-        elif not market_hours_only and 'holding' in df.columns:
-            # Filter to holding period only
-            matrix_df = matrix_df[df['holding'] == True]
+        # Filter to columns that exist in the dataframe
+        available_cols = [col for col in matrix_cols if col in trade_df.columns]
 
-        # Vectorized formatting — uses numpy/pandas ops instead of per-cell lambdas
+        if available_cols:
+            matrix_df = trade_df[available_cols].copy()
 
-        # Format price columns as $X.XX using vectorized string concatenation
-        price_cols = [c for c in ['stock_price', 'stock_high', 'stock_low', 'option_price',
-                     'entry_price', 'highest_price', 'lowest_price',
-                     'vwap', 'ema_10', 'ema_21', 'ema_50', 'ema_100', 'ema_200',
-                     'vwap_ema_avg', 'emavwap', 'supertrend',
-                     'ichimoku_tenkan', 'ichimoku_kijun', 'ichimoku_senkou_a', 'ichimoku_senkou_b',
-                     'atr_sl', 'spy_price'] if c in matrix_df.columns]
-        for col in price_cols:
-            mask = matrix_df[col].notna()
-            if mask.any():
-                matrix_df.loc[mask, col] = '$' + matrix_df.loc[mask, col].round(2).astype(str)
-            matrix_df[col] = matrix_df[col].where(mask, '')
+            # Filter based on toggle:
+            # ON (market_hours_only=True): Show full market hours (9:00 AM - 4:00 PM)
+            # OFF (market_hours_only=False): Show only holding period (where holding=True)
+            if market_hours_only and 'timestamp' in matrix_df.columns:
+                import datetime as dt
+                parsed_times = pd.to_datetime(matrix_df['timestamp'].astype(str).str.replace(' : ', ' '), errors='coerce')
+                time_mask = (parsed_times.dt.time >= dt.time(9, 0)) & (parsed_times.dt.time <= dt.time(16, 0))
+                matrix_df = matrix_df[time_mask]
+            elif not market_hours_only and 'holding' in trade_df.columns:
+                # Filter to holding period only
+                matrix_df = matrix_df[trade_df['holding'] == True]
 
-        # Format volume as integer with commas
-        if 'volume' in matrix_df.columns:
-            mask = matrix_df['volume'].notna()
-            if mask.any():
-                matrix_df.loc[mask, 'volume'] = matrix_df.loc[mask, 'volume'].astype(int).map('{:,}'.format)
-            matrix_df['volume'] = matrix_df['volume'].where(mask, '')
+            # Vectorized formatting — uses numpy/pandas ops instead of per-cell lambdas
 
-        # Format P&L dollar amount
-        if 'pnl' in matrix_df.columns:
-            mask = matrix_df['pnl'].notna()
-            if mask.any():
-                vals = matrix_df.loc[mask, 'pnl']
-                sign = np.where(vals >= 0, '+', '')
-                matrix_df.loc[mask, 'pnl'] = '$' + pd.Series(sign, index=vals.index) + vals.round(2).astype(str)
-            matrix_df['pnl'] = matrix_df['pnl'].where(mask, '')
-
-        if 'pnl_pct' in matrix_df.columns:
-            mask = matrix_df['pnl_pct'].notna()
-            if mask.any():
-                vals = matrix_df.loc[mask, 'pnl_pct']
-                sign = np.where(vals >= 0, '+', '')
-                matrix_df.loc[mask, 'pnl_pct'] = pd.Series(sign, index=vals.index) + vals.round(1).astype(str) + '%'
-            matrix_df['pnl_pct'] = matrix_df['pnl_pct'].where(mask, '')
-
-        # Format minutes held as integer
-        if 'minutes_held' in matrix_df.columns:
-            mask = matrix_df['minutes_held'].notna()
-            if mask.any():
-                matrix_df.loc[mask, 'minutes_held'] = matrix_df.loc[mask, 'minutes_held'].astype(int).astype(str)
-            matrix_df['minutes_held'] = matrix_df['minutes_held'].where(mask, '')
-
-        if 'ticker_trend' in matrix_df.columns:
-            matrix_df['ticker_trend'] = matrix_df['ticker_trend'].map({1: 'Bullish', 0: 'Sideways', -1: 'Bearish'}).fillna('')
-        if 'spy_trend' in matrix_df.columns:
-            matrix_df['spy_trend'] = matrix_df['spy_trend'].map({1: 'Bullish', 0: 'Sideways', -1: 'Bearish'}).fillna('')
-
-        # Format decimal columns using vectorized round + astype
-        decimal_fmts = [('ewo', 3), ('ewo_15min_avg', 3), ('rsi', 1), ('rsi_10min_avg', 1)]
-        for col, decimals in decimal_fmts:
-            if col in matrix_df.columns:
+            # Format price columns as $X.XX using vectorized string concatenation
+            price_cols = [c for c in ['stock_price', 'stock_high', 'stock_low', 'option_price',
+                         'entry_price', 'highest_price', 'lowest_price',
+                         'vwap', 'ema_10', 'ema_21', 'ema_50', 'ema_100', 'ema_200',
+                         'vwap_ema_avg', 'emavwap', 'supertrend',
+                         'ichimoku_tenkan', 'ichimoku_kijun', 'ichimoku_senkou_a', 'ichimoku_senkou_b',
+                         'atr_sl', 'spy_price'] if c in matrix_df.columns]
+            for col in price_cols:
                 mask = matrix_df[col].notna()
                 if mask.any():
-                    matrix_df.loc[mask, col] = matrix_df.loc[mask, col].round(decimals).astype(str)
+                    matrix_df.loc[mask, col] = '$' + matrix_df.loc[mask, col].round(2).astype(str)
                 matrix_df[col] = matrix_df[col].where(mask, '')
 
-        # Format exit signal flags as Y/blank
-        for sig_col in EXIT_SIGNAL_DEFS:
-            if sig_col in matrix_df.columns:
-                matrix_df[sig_col] = np.where(matrix_df[sig_col] == True, 'Y', '')
+            # Format volume as integer with commas
+            if 'volume' in matrix_df.columns:
+                mask = matrix_df['volume'].notna()
+                if mask.any():
+                    matrix_df.loc[mask, 'volume'] = matrix_df.loc[mask, 'volume'].astype(int).map('{:,}'.format)
+                matrix_df['volume'] = matrix_df['volume'].where(mask, '')
 
-        st.dataframe(matrix_df, use_container_width=True, hide_index=True)
-    else:
-        st.info("No databook data available for this trade.")
+            # Format P&L dollar amount
+            if 'pnl' in matrix_df.columns:
+                mask = matrix_df['pnl'].notna()
+                if mask.any():
+                    vals = matrix_df.loc[mask, 'pnl']
+                    sign = np.where(vals >= 0, '+', '')
+                    matrix_df.loc[mask, 'pnl'] = '$' + pd.Series(sign, index=vals.index) + vals.round(2).astype(str)
+                matrix_df['pnl'] = matrix_df['pnl'].where(mask, '')
+
+            if 'pnl_pct' in matrix_df.columns:
+                mask = matrix_df['pnl_pct'].notna()
+                if mask.any():
+                    vals = matrix_df.loc[mask, 'pnl_pct']
+                    sign = np.where(vals >= 0, '+', '')
+                    matrix_df.loc[mask, 'pnl_pct'] = pd.Series(sign, index=vals.index) + vals.round(1).astype(str) + '%'
+                matrix_df['pnl_pct'] = matrix_df['pnl_pct'].where(mask, '')
+
+            # Format minutes held as integer
+            if 'minutes_held' in matrix_df.columns:
+                mask = matrix_df['minutes_held'].notna()
+                if mask.any():
+                    matrix_df.loc[mask, 'minutes_held'] = matrix_df.loc[mask, 'minutes_held'].astype(int).astype(str)
+                matrix_df['minutes_held'] = matrix_df['minutes_held'].where(mask, '')
+
+            if 'ticker_trend' in matrix_df.columns:
+                matrix_df['ticker_trend'] = matrix_df['ticker_trend'].map({1: 'Bullish', 0: 'Sideways', -1: 'Bearish'}).fillna('')
+            if 'spy_trend' in matrix_df.columns:
+                matrix_df['spy_trend'] = matrix_df['spy_trend'].map({1: 'Bullish', 0: 'Sideways', -1: 'Bearish'}).fillna('')
+
+            # Format decimal columns using vectorized round + astype
+            decimal_fmts = [('ewo', 3), ('ewo_15min_avg', 3), ('rsi', 1), ('rsi_10min_avg', 1)]
+            for col, decimals in decimal_fmts:
+                if col in matrix_df.columns:
+                    mask = matrix_df[col].notna()
+                    if mask.any():
+                        matrix_df.loc[mask, col] = matrix_df.loc[mask, col].round(decimals).astype(str)
+                    matrix_df[col] = matrix_df[col].where(mask, '')
+
+            # Format exit signal flags as Y/blank
+            for sig_col in EXIT_SIGNAL_DEFS:
+                if sig_col in matrix_df.columns:
+                    matrix_df[sig_col] = np.where(matrix_df[sig_col] == True, 'Y', '')
+
+            st.dataframe(matrix_df, use_container_width=True, hide_index=True)
+        else:
+            st.info(f"No databook data available for trade T{trade_num}.")
+
+        if is_multi_trade and trade_idx < len(pos_ids) - 1:
+            st.markdown("---")
 
 
 if __name__ == "__main__":
