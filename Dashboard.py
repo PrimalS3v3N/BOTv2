@@ -265,7 +265,7 @@ def create_trade_chart(df, trade_label, market_hours_only=False, show_ewo=True, 
             row=1, col=1, secondary_y=True
         )
 
-    # Stock Price (left y-axis) - blue with high/low error bars
+    # Stock Price (left y-axis) - blue line
     if 'stock_price' in df.columns and df['stock_price'].notna().any():
         price_trace = go.Scatter(
             x=df['time'],
@@ -274,20 +274,6 @@ def create_trade_chart(df, trade_label, market_hours_only=False, show_ewo=True, 
             line=dict(color='#2196F3', width=2),
             hovertemplate='Price: $%{y:.2f}<extra></extra>'
         )
-
-        # Add error bars showing high/low range relative to stock price
-        if 'stock_high' in df.columns and 'stock_low' in df.columns:
-            error_plus = df['stock_high'] - df['stock_price']
-            error_minus = df['stock_price'] - df['stock_low']
-            price_trace.error_y = dict(
-                type='data',
-                symmetric=False,
-                array=error_plus,
-                arrayminus=error_minus,
-                color='rgba(255, 255, 255, 0.8)',
-                thickness=3,
-                width=0
-            )
 
         fig.add_trace(price_trace, row=1, col=1, secondary_y=False)
 

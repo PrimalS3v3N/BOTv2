@@ -162,7 +162,7 @@ Config.py ───────────────────────�
 - Streamlit-based web dashboard
 - Dual-axis charts (stock price vs option price)
 - Entry/exit markers with annotations
-- Stop loss tracking visualization (trailing TP, hard SL lines)
+- Stop loss tracking visualization (trailing TP, StopLoss lines)
 - Technical indicator overlays (EMAs, VWAP, Supertrend, Ichimoku)
 - EWO and RSI subplots
 - SPY and ticker gauge background shading
@@ -200,7 +200,7 @@ a Factory class creates per-position Detector instances that track state bar-by-
 
 | Priority | Strategy | Exit Reasons | Description |
 |----------|----------|-------------|-------------|
-| 1 | **Options Exit (Primary TP/SL)** | `OE-Hard-SL`, `OE-Trail-TP` | Hard stop loss + trailing take profit on option contract price |
+| 1 | **Options Exit (Primary TP/SL)** | `ATR-SL`, `StopLoss`, `Trail-TP` | ATR-SL stock-level exit + option stop loss + trailing take profit |
 | 2 | **Risk Downtrend** | `DownTrend-SL` | HIGH-risk trades: 3 negative bars or -10% drop |
 | 3 | **StatsBook Exit** | `StatsBook - EWO Max`, `StatsBook - Range Max` | EWO or H-L range hits historical extreme |
 | 4 | **Momentum Peak** | `Momentum Peak` | RSI overbought reversal + EWO decline |
@@ -219,9 +219,22 @@ a Factory class creates per-position Detector instances that track state bar-by-
 The primary exit system. Operates entirely on **option contract price** and differentiates
 between CALLs and PUTs — a rising stock is good for calls but bad for puts.
 
-#### Hard Stop Loss
+#### ATR-SL Exit
 
-On entry, a hard SL is placed at `entry_option_price * (1 - sl_pct / 100)`.
+Checked **before** StopLoss. Uses the stock price vs the ATR-SL line:
+
+- **Calls:** if stock was above ATR-SL at entry, hold while `stock_price > ATR-SL`. Exit when stock drops below.
+- **Puts:** if stock was below ATR-SL at entry, hold while `stock_price < ATR-SL`. Exit when stock rises above.
+
+Exit reason: `ATR-SL`
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `atr_sl_exit_enabled` | True | Enable ATR-SL stock-level exit |
+
+#### StopLoss
+
+On entry, a SL is placed at `entry_option_price * (1 - sl_pct / 100)`.
 
 By default, `sl_pct` is **adaptive** — it scales with the option's entry price so
 that cheaper contracts (which swing harder in %) get wider stops.  Uses piecewise
@@ -288,7 +301,7 @@ At 10% profit the addon is ~+2%, at 100% profit it's ~+15%.
 | `risk_addon_scale` | 5.0 | Slope of high-risk addon curve |
 | `risk_addon_norm` | 30.0 | Normalisation for high-risk addon |
 
-Exit reason: `OE-Trail-TP`
+Exit reason: `Trail-TP`
 
 #### RiskOutlook (Entry Favorability Assessment)
 

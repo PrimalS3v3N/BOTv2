@@ -52,7 +52,7 @@ BOOK_IMBALANCE_ENABLED          = False     # Order book imbalance (placeholder:
 
 # --- Options Exit System (Primary TP/SL) ---
 OPTIONS_EXIT_ENABLED            = True      # Master toggle for options TP/SL system
-HARD_SL_EXIT_ENABLED            = True      # Hard stop loss exit (initial_sl_pct below entry)
+HARD_SL_EXIT_ENABLED            = True      # StopLoss exit (initial_sl_pct below entry)
 TRAIL_TP_EXIT_ENABLED           = True      # Trailing take profit exit (scales with profit)
 VELOCITY_EXIT_ENABLED           = True      # Proactive peak detection via deceleration
 ATR_SL_ENABLED                  = True      # ATR-SL favorability at entry
@@ -254,15 +254,11 @@ BACKTEST_CONFIG = {
         'confirm_bars': 2,                 # Bars price must stay on adverse side of VWAP
     },
 
-    # Supertrend Flip Exit: Exit when Supertrend direction flips against position
-    # Supertrend uses ATR-based bands to define trend direction. A flip from
-    # favorable to adverse means price broke through a volatility-adjusted
-    # support/resistance level — a mechanical trend reversal confirmation.
+    # Supertrend Flip Exit: Exit when Supertrend direction flips against position.
+    # CALLs want bullish (direction=1); PUTs want bearish (direction=-1).
+    # Exits immediately on direction change — no delay, no min profit.
     'supertrend_flip_exit': {
         'enabled': SUPERTREND_FLIP_EXIT_ENABLED,
-        'min_profit_pct': 5,               # Minimum option profit % to consider exit
-        'min_hold_bars': 5,                # Minimum bars held before checking
-        'confirm_bars': 1,                 # Bars adverse direction must persist (1 = immediate)
     },
 
     # Peak-Peak Exit: Capture missed opportunity on option price double-top.
@@ -434,7 +430,7 @@ BACKTEST_CONFIG = {
     # good for calls / bad for puts, and vice-versa.
     #
     # Flow:
-    #   1. At entry → set initial hard SL at -20 % of option price
+    #   1. At entry → set initial StopLoss at -20 % of option price
     #   2. Assess entry favorability (30-min lookback, EMA positioning, ATR-SL)
     #   3. Once profit >= trail_activation_pct → engage trailing TP
     #   4. Trailing TP scales continuously with profit margin
@@ -443,10 +439,17 @@ BACKTEST_CONFIG = {
         'enabled': OPTIONS_EXIT_ENABLED,
 
         # --- Initial Stop Loss ---
-        'hard_sl_enabled': HARD_SL_EXIT_ENABLED,  # Toggle hard stop loss exit on/off
-        'initial_sl_pct': 20,              # Hard SL: exit if option drops X% below entry (fallback when adaptive off)
-        'hard_sl_tighten_on_peak': True,   # Tighten hard SL based on peak gain before trailing activates
-                                            # E.g. entry=100, peak=105 → SL% shrinks 20→15%, hard SL 80→85
+        'hard_sl_enabled': HARD_SL_EXIT_ENABLED,  # Toggle StopLoss exit on/off
+        'initial_sl_pct': 20,              # StopLoss: exit if option drops X% below entry (fallback when adaptive off)
+        'hard_sl_tighten_on_peak': True,   # Tighten StopLoss based on peak gain before trailing activates
+                                            # E.g. entry=100, peak=105 → SL% shrinks 20→15%, SL 80→85
+
+        # --- ATR-SL Exit ---
+        # Exit when stock price crosses ATR-SL line against position.
+        # Calls: hold while stock > ATR-SL, exit when stock < ATR-SL.
+        # Puts:  hold while stock < ATR-SL, exit when stock > ATR-SL.
+        # Checked before StopLoss in the exit priority chain.
+        'atr_sl_exit_enabled': True,
 
         # --- Adaptive Stop Loss (price-scaled) ---
         # Cheaper options swing harder in %, so wider SL is needed.

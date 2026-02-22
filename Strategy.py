@@ -1001,7 +1001,7 @@ class OptionsExit:
 
 class OptionsExitDetector:
     """
-    Per-position detector that tracks trailing TP, hard SL, entry favorability,
+    Per-position detector that tracks ATR-SL, StopLoss, trailing TP, entry favorability,
     and reversal detection.
 
     Trailing TP uses a continuous logarithmic scaling function so the stop
@@ -1067,11 +1067,15 @@ class OptionsExitDetector:
         self.entry_option_price = entry_option_price
         self.is_call = option_type.upper() in ['CALL', 'CALLS', 'C']
 
-        # Hard SL
+        # StopLoss
         self.hard_sl_enabled = config.get('hard_sl_enabled', True)
         self.initial_sl_pct = self.compute_adaptive_sl_pct(entry_option_price, config)
         self.hard_sl_price = entry_option_price * (1 - self.initial_sl_pct / 100)
         self.hard_sl_tighten_on_peak = config.get('hard_sl_tighten_on_peak', True)
+
+        # ATR-SL exit: exit when stock crosses ATR-SL against position
+        self.atr_sl_exit_enabled = config.get('atr_sl_exit_enabled', True)
+        self._atr_sl_was_favorable = False  # Track if ATR-SL was favorable at entry
 
         # Trailing SL parameters
         self.trail_tp_enabled = config.get('trail_tp_enabled', True)
@@ -1601,7 +1605,7 @@ class OptionsExitDetector:
     def update(self, option_price, stock_price, ema_values=None, timestamp=None,
                atr_sl_value=np.nan, stock_high=np.nan, stock_low=np.nan):
         """
-        Per-tick update: check hard SL, update trailing TP, check EMA reversal.
+        Per-tick update: check ATR-SL, StopLoss, trailing TP, EMA reversal.
 
         Called 60x per minute during extrapolated backtesting, once per minute in live.
 
@@ -1655,17 +1659,34 @@ class OptionsExitDetector:
                 stock_price, stock_high, stock_low, atr_sl_value)
             self.atr_sl_trend_gate_active = self._is_trend_favorable()
 
-        # --- Update profit watermark (needed before hard SL adjustment) ---
+        # --- ATR-SL exit (stock price vs ATR-SL line) ---
+        # Calls: if stock was above ATR-SL at entry, hold while above; exit when below.
+        # Puts:  if stock was below ATR-SL at entry, hold while below; exit when above.
+        if self.atr_sl_exit_enabled and not np.isnan(atr_sl_value):
+            call_favorable = stock_price > atr_sl_value
+            is_favorable = call_favorable if self.is_call else not call_favorable
+
+            if not self._atr_sl_was_favorable:
+                # First time we see a favorable reading, arm the exit
+                if is_favorable:
+                    self._atr_sl_was_favorable = True
+            else:
+                # Was favorable → now adverse → exit
+                if not is_favorable:
+                    state = self._build_state(option_price, profit_pct)
+                    return True, 'ATR-SL', state
+
+        # --- Update profit watermark (needed before StopLoss adjustment) ---
         if profit_pct > self.highest_profit_pct:
             self.highest_profit_pct = profit_pct
 
-        # --- Hard stop loss (dynamic tightening before trailing TP activates) ---
+        # --- StopLoss (dynamic tightening before trailing TP activates) ---
         # If the option price hasn't yet hit the trailing activation threshold,
-        # tighten the hard SL based on the peak gain seen so far.
+        # tighten the SL based on the peak gain seen so far.
         # Peak gain scales up to just under trail_activation_pct (9.99%).
         # HIGH risk entries double the peak gain effect for faster tightening.
-        # E.g. buy at 100, peak at 105 → SL% shrinks 20→15%, hard SL 80→85
-        #      HIGH risk same scenario → SL% shrinks 20→10%, hard SL 80→90
+        # E.g. buy at 100, peak at 105 → SL% shrinks 20→15%, SL 80→85
+        #      HIGH risk same scenario → SL% shrinks 20→10%, SL 80→90
         if self.hard_sl_tighten_on_peak and not self.trailing_active and self.highest_profit_pct > 0:
             # Cap peak gain just under trailing activation to avoid overlap
             peak_gain = min(self.highest_profit_pct, self.trail_activation_pct - 0.01)
@@ -1683,7 +1704,7 @@ class OptionsExitDetector:
 
         if self.hard_sl_enabled and option_price <= self.hard_sl_price:
             state = self._build_state(option_price, profit_pct)
-            return True, 'Hard-SL', state
+            return True, 'StopLoss', state
 
         # --- Trailing stop loss ---
 
@@ -2116,20 +2137,12 @@ class SupertrendFlipExit:
     The Supertrend indicator produces a binary direction signal (1 = bullish,
     -1 = bearish) based on ATR-derived support/resistance bands. When the
     direction flips from favorable to adverse mid-trade, the underlying
-    trend has mechanically reversed — a strong exit signal.
+    trend has mechanically reversed — exit immediately.
 
-    Unlike oscillator-based strategies (RSI, EWO) that detect exhaustion,
-    Supertrend flips confirm that price has already broken through a
-    volatility-adjusted support/resistance level, making false signals
-    less frequent.
+    CALLs want bullish (direction=1); PUTs want bearish (direction=-1).
 
     Config: BACKTEST_CONFIG['supertrend_flip_exit']
-        {
-            'enabled': True,
-            'min_profit_pct': 5,           # Minimum option profit %
-            'min_hold_bars': 5,            # Minimum bars before checking
-            'confirm_bars': 1,             # Bars adverse direction must persist
-        }
+        { 'enabled': True }
     """
 
     def __init__(self, config=None):
@@ -2152,80 +2165,32 @@ class SupertrendFlipDetector:
       - CALLs want direction = 1 (bullish / uptrend)
       - PUTs  want direction = -1 (bearish / downtrend)
 
-    Conditions (ALL must be met to trigger exit):
-    1. Position held >= min_hold_bars
-    2. Option profit >= min_profit_pct
-    3. Direction was favorable at some point (established trend)
-    4. Direction flipped to adverse and stayed for confirm_bars
+    Exit triggers immediately when direction flips from favorable to adverse.
     """
 
     def __init__(self, config, option_type):
-        self.min_profit_pct = config.get('min_profit_pct', 5)
-        self.min_hold_minutes = config.get('min_hold_minutes', config.get('min_hold_bars', 5))
-        self.confirm_minutes = config.get('confirm_minutes', config.get('confirm_bars', 1))
         self.is_call = option_type.upper() in ['CALL', 'CALLS', 'C']
-
-        # Favorable direction for this position type
         self.favorable_direction = 1.0 if self.is_call else -1.0
-
-        self.bar_count = 0
-        self._entry_time = None
-        self.was_favorable = False       # Direction was favorable at some point
-        self.adverse_bar_count = 0       # Consecutive bars in adverse direction
-        self._adverse_start_time = None  # When adverse streak started
+        self.was_favorable = False
 
     def update(self, pnl_pct, supertrend_direction, timestamp=None):
         """
         Check for Supertrend flip exit signal.
 
-        Args:
-            pnl_pct: Current P&L percentage
-            supertrend_direction: Current Supertrend direction (1.0 or -1.0)
-            timestamp: Current timestamp for time-based tracking
-
         Returns:
             (should_exit, exit_reason): Tuple. exit_reason is None if no exit.
         """
-        self.bar_count += 1
-        if timestamp and self._entry_time is None:
-            self._entry_time = timestamp
-
-        if np.isnan(pnl_pct) or np.isnan(supertrend_direction):
+        if np.isnan(supertrend_direction):
             return False, None
 
-        # Track if direction is currently favorable
         is_favorable = supertrend_direction == self.favorable_direction
 
         if is_favorable:
             self.was_favorable = True
-            self.adverse_bar_count = 0
-            self._adverse_start_time = None
             return False, None
 
-        # Direction is adverse — count consecutive bars
+        # Direction flipped adverse — exit immediately
         if self.was_favorable:
-            self.adverse_bar_count += 1
-            if self._adverse_start_time is None and timestamp:
-                self._adverse_start_time = timestamp
-
-        # Need minimum time held
-        if timestamp and self._entry_time:
-            minutes_elapsed = (timestamp - self._entry_time).total_seconds() / 60
-        else:
-            minutes_elapsed = self.bar_count
-        if minutes_elapsed < self.min_hold_minutes:
-            return False, None
-
-        # Need minimum profit
-        if pnl_pct < self.min_profit_pct:
-            return False, None
-
-        # Check confirmation: must be adverse for N consecutive minutes
-        if timestamp and self._adverse_start_time:
-            adverse_minutes = (timestamp - self._adverse_start_time).total_seconds() / 60
-        else:
-            adverse_minutes = self.adverse_bar_count
-        if self.was_favorable and adverse_minutes >= self.confirm_minutes:
             return True, 'Supertrend Flip'
 
         return False, None

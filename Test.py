@@ -2181,6 +2181,7 @@ class SimulationEngine:
                     oe_detector._entry_time = None
                     oe_detector._confirmation_bars = []
                     oe_detector.confirmed = 'Pending'
+                    oe_detector._atr_sl_was_favorable = False
 
                     holding = True
                     entry_stock_price = stock_price
