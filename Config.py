@@ -52,6 +52,8 @@ BOOK_IMBALANCE_ENABLED          = False     # Order book imbalance (placeholder:
 
 # --- Options Exit System (Primary TP/SL) ---
 OPTIONS_EXIT_ENABLED            = True      # Master toggle for options TP/SL system
+HARD_SL_EXIT_ENABLED            = True      # Hard stop loss exit (initial_sl_pct below entry)
+TRAIL_TP_EXIT_ENABLED           = True      # Trailing take profit exit (scales with profit)
 VELOCITY_EXIT_ENABLED           = True      # Proactive peak detection via deceleration
 ATR_SL_ENABLED                  = True      # ATR-SL favorability at entry
 MACD_ENABLED                    = True      # MACD histogram trend confirmation
@@ -441,11 +443,13 @@ BACKTEST_CONFIG = {
         'enabled': OPTIONS_EXIT_ENABLED,
 
         # --- Initial Stop Loss ---
+        'hard_sl_enabled': HARD_SL_EXIT_ENABLED,  # Toggle hard stop loss exit on/off
         'initial_sl_pct': 20,              # Hard SL: exit if option drops X% below entry (adjustable)
         'hard_sl_tighten_on_peak': True,   # Tighten hard SL based on peak gain before trailing activates
                                             # E.g. entry=100, peak=105 → SL% shrinks 20→15%, hard SL 80→85
 
         # --- Trailing Stop Loss ---
+        'trail_tp_enabled': TRAIL_TP_EXIT_ENABLED,  # Toggle trailing take profit exit on/off
         'trail_activation_pct': 10,        # Engage trailing TP when profit margin >= X%
         'trail_cheap_option_threshold': 0.40,  # Options priced below this: double trail_activation_pct
                                                 # Cheap options have amplified % swings on small moves
