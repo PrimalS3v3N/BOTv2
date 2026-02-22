@@ -11,7 +11,7 @@ Three Testing Modes:
 All three modes share SimulationEngine for identical exit strategy logic.
 
 Data Output (signal-based, not trade-based):
-- DataBook:    Full bar-by-bar stock + option + indicator data per signal
+- DataBook:    Per-second stock + option + indicator data during holding periods (per-bar otherwise)
 - DataSummary: 2-minute aggregated summary for dashboard display
 - DataStats:   Per-signal trade statistics
 
@@ -2230,6 +2230,10 @@ class SimulationEngine:
                 _s_ichi_kijun = _interp_60(prev_ichi_kijun, ichi_kijun)
                 _s_ichi_senkou_a = _interp_60(prev_ichi_senkou_a, ichi_senkou_a)
                 _s_ichi_senkou_b = _interp_60(prev_ichi_senkou_b, ichi_senkou_b)
+                _s_macd_line = _interp_60(prev_macd_line, macd_line_val)
+                _s_macd_signal = _interp_60(prev_macd_signal, macd_signal_val)
+                _s_macd_hist = _interp_60(prev_macd_hist, macd_histogram_val)
+                _s_roc = _interp_60(prev_roc, roc_val)
                 # Discrete indicators (constant within bar): st_direction, ticker_trend_val, spy_trend_val
 
                 # --- Risk Assessment (once at entry, if not already done above) ---
@@ -2434,6 +2438,51 @@ class SimulationEngine:
                             exit_price = sub_option * (1 - self.slippage_pct)
                             position.close(exit_price, sub_ts, _exit_reason)
 
+                    # Record per-second tracking data
+                    matrix.add_record(
+                        timestamp=sub_ts,
+                        stock_price=sub_stock,
+                        option_price=sub_option,
+                        volume=volume,
+                        holding=True,
+                        vwap=float(_s_vwap[j]),
+                        ema_10=float(_s_ema_10[j]), ema_21=float(_s_ema_21[j]),
+                        ema_50=float(_s_ema_50[j]), ema_100=float(_s_ema_100[j]),
+                        ema_200=float(_s_ema_200[j]),
+                        vwap_ema_avg=float(_s_vwap_ema_avg[j]), emavwap=float(_s_emavwap[j]),
+                        stock_high=sub_high, stock_low=sub_low,
+                        ewo=j_ewo, ewo_15min_avg=float(_s_ewo_avg[j]),
+                        rsi=j_rsi, rsi_10min_avg=j_rsi_avg,
+                        supertrend=st_value, supertrend_direction=st_direction,
+                        ichimoku_tenkan=float(_s_ichi_tenkan[j]), ichimoku_kijun=float(_s_ichi_kijun[j]),
+                        ichimoku_senkou_a=float(_s_ichi_senkou_a[j]), ichimoku_senkou_b=float(_s_ichi_senkou_b[j]),
+                        atr_sl=j_atr_sl,
+                        macd_line=float(_s_macd_line[j]), macd_signal_line=float(_s_macd_signal[j]),
+                        macd_histogram=float(_s_macd_hist[j]),
+                        roc=float(_s_roc[j]),
+                        stoch_k=j_stoch_k, stoch_d=j_stoch_d,
+                        vpoc=vpoc_val, book_imbalance=np.nan,
+                        risk=risk_level, risk_reasons=risk_reasons, risk_trend=risk_trend,
+                        ticker_trend=ticker_trend_val, spy_trend=spy_trend_val,
+                        market_trend=market_trend_val, mt_state=mt_state,
+                        spy_price=spy_price, spy_gauge=spy_gauge_data, ticker_gauge=ticker_gauge_data,
+                        ai_outlook_1m=ai_signal_data.get('outlook_1m'),
+                        ai_outlook_5m=ai_signal_data.get('outlook_5m'),
+                        ai_outlook_30m=ai_signal_data.get('outlook_30m'),
+                        ai_outlook_1h=ai_signal_data.get('outlook_1h'),
+                        ai_action=ai_signal_data.get('action'),
+                        ai_reason=ai_signal_data.get('reason'),
+                        oe_state=oe_state,
+                        exit_sig_sb=sb_exit, exit_sig_mp=mp_exit,
+                        exit_sig_ai=ai_exit, exit_sig_closure_peak=cp_signal, exit_sig_oe=oe_exit,
+                        exit_sig_vc=vc_exit, exit_sig_ts=ts_exit, exit_sig_vwap=vwap_exit,
+                        exit_sig_st=st_flip_exit,
+                        exit_sig_mt=mt_exit or (mt_reason is not None),
+                        exit_sig_pp=pp_exit,
+                        deferred_active=de_active,
+                        deferred_trigger=de_trigger_reason if (de_triggered and i == de_new_entry_idx and j == 0) else None,
+                    )
+
                     # If position closed this second, capture values and break
                     if position.is_closed:
                         timestamp = sub_ts
@@ -2444,49 +2493,6 @@ class SimulationEngine:
                     # No exit during this bar — position is up to date at last second
                     bar_end_ts = timestamp + timedelta(seconds=59)
                     position.update(bar_end_ts, option_price, stock_price)
-
-                # Record tracking data (one row per minute, using exit-point or bar-close values)
-                matrix.add_record(
-                    timestamp=timestamp,
-                    stock_price=stock_price,
-                    option_price=option_price,
-                    volume=volume,
-                    holding=True,
-                    vwap=vwap,
-                    ema_10=ema_10, ema_21=ema_21, ema_50=ema_50, ema_100=ema_100, ema_200=ema_200,
-                    vwap_ema_avg=vwap_ema_avg, emavwap=emavwap,
-                    stock_high=stock_high, stock_low=stock_low,
-                    ewo=ewo, ewo_15min_avg=ewo_15min_avg,
-                    rsi=rsi, rsi_10min_avg=rsi_10min_avg,
-                    supertrend=st_value, supertrend_direction=st_direction,
-                    ichimoku_tenkan=ichi_tenkan, ichimoku_kijun=ichi_kijun,
-                    ichimoku_senkou_a=ichi_senkou_a, ichimoku_senkou_b=ichi_senkou_b,
-                    atr_sl=atr_sl_value,
-                    macd_line=macd_line_val, macd_signal_line=macd_signal_val,
-                    macd_histogram=macd_histogram_val,
-                    roc=roc_val,
-                    stoch_k=stoch_k_val, stoch_d=stoch_d_val,
-                    vpoc=vpoc_val, book_imbalance=np.nan,
-                    risk=risk_level, risk_reasons=risk_reasons, risk_trend=risk_trend,
-                    ticker_trend=ticker_trend_val, spy_trend=spy_trend_val,
-                    market_trend=market_trend_val, mt_state=mt_state,
-                    spy_price=spy_price, spy_gauge=spy_gauge_data, ticker_gauge=ticker_gauge_data,
-                    ai_outlook_1m=ai_signal_data.get('outlook_1m'),
-                    ai_outlook_5m=ai_signal_data.get('outlook_5m'),
-                    ai_outlook_30m=ai_signal_data.get('outlook_30m'),
-                    ai_outlook_1h=ai_signal_data.get('outlook_1h'),
-                    ai_action=ai_signal_data.get('action'),
-                    ai_reason=ai_signal_data.get('reason'),
-                    oe_state=oe_state,
-                    exit_sig_sb=sb_exit, exit_sig_mp=mp_exit,
-                    exit_sig_ai=ai_exit, exit_sig_closure_peak=cp_signal, exit_sig_oe=oe_exit,
-                    exit_sig_vc=vc_exit, exit_sig_ts=ts_exit, exit_sig_vwap=vwap_exit,
-                    exit_sig_st=st_flip_exit,
-                    exit_sig_mt=mt_exit or (mt_reason is not None),
-                    exit_sig_pp=pp_exit,
-                    deferred_active=de_active,
-                    deferred_trigger=de_trigger_reason if (de_triggered and i == de_new_entry_idx) else None,
-                )
             else:
                 # Record tracking data for non-holding periods
                 matrix.add_record(
