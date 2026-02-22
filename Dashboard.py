@@ -22,13 +22,6 @@ DATA_PATH = os.path.join(SCRIPT_DIR, 'BT_DATA.pkl')
 
 st.set_page_config(page_title="Trade Dashboard", layout="wide")
 
-# Auto-refresh every 60 seconds
-try:
-    from streamlit_autorefresh import st_autorefresh
-    st_autorefresh(interval=60 * 1000, key="data_refresh")
-except ImportError:
-    pass
-
 COLORS = {
     'stock': '#2962FF',
     'option': '#FF6D00',
@@ -258,24 +251,19 @@ def create_trade_chart(df, trade_label, market_hours_only=False, show_ewo=True, 
     else:
         fig = make_subplots(specs=[[{"secondary_y": True}]])
 
-    # Option price lines (right y-axis) - one per trade
-    for t_idx, ti in enumerate(trades_info):
-        t_num = ti['num']
-        t_opt_col = ti['opt_col']
-        t_df = ti['_filtered_df']
-        if t_opt_col in t_df.columns and t_df[t_opt_col].notna().any():
-            color = TRADE_OPTION_COLORS[t_idx % len(TRADE_OPTION_COLORS)]
-            label = f'Option [{t_num}]' if len(trades_info) > 1 else 'Option'
-            fig.add_trace(
-                go.Scatter(
-                    x=t_df['time'],
-                    y=t_df[t_opt_col],
-                    name=label,
-                    line=dict(color=color, width=2),
-                    hovertemplate=f'{label}: $%{{y:.2f}}<extra></extra>'
-                ),
-                row=1, col=1, secondary_y=True
-            )
+    # Option price line (right y-axis) - single line from combined data
+    # Same-signal re-entries track the same contract, so one line is correct
+    if opt_col in df.columns and df[opt_col].notna().any():
+        fig.add_trace(
+            go.Scatter(
+                x=df['time'],
+                y=df[opt_col],
+                name='Option',
+                line=dict(color=COLORS['option'], width=2),
+                hovertemplate='Option: $%{y:.2f}<extra></extra>'
+            ),
+            row=1, col=1, secondary_y=True
+        )
 
     # Stock Price (left y-axis) - blue with high/low error bars
     if 'stock_price' in df.columns and df['stock_price'].notna().any():
