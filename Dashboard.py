@@ -56,6 +56,9 @@ COLORS = {
     'sig_mt': '#2196F3',           # Blue (MarketTrend)
 }
 
+# Colors for per-trade option price lines (when multiple trades on one chart)
+TRADE_OPTION_COLORS = ['#00C853', '#FF6D00', '#2979FF', '#AA00FF', '#FFD600']
+
 # Exit signal definitions: column name -> (display label, color key, marker symbol)
 EXIT_SIGNAL_DEFS = {
     'exit_sig_sb':           ('StatsBook',    'sig_sb',           'diamond'),
@@ -152,9 +155,14 @@ def find_entry_exit(df):
     return entry_row, exit_row, opt_col
 
 
-@st.cache_data
-def create_trade_chart(df, trade_label, market_hours_only=False, show_ewo=True, show_rsi=True, show_supertrend=False, show_ichimoku=False, show_atr_sl=True, show_market_trend=True):
-    """Create dual-axis chart with stock/option prices, error bars, EWO/RSI subplot, and SPY subplot."""
+def create_trade_chart(df, trade_label, market_hours_only=False, show_ewo=True, show_rsi=True, show_supertrend=False, show_ichimoku=False, show_atr_sl=True, show_market_trend=True, trades_info=None):
+    """Create dual-axis chart with stock/option prices, error bars, EWO/RSI subplot, and SPY subplot.
+
+    Args:
+        trades_info: Optional list of dicts with per-trade data for multi-trade signals.
+            Each dict has: 'num' (trade number), 'entry_row', 'exit_row', 'opt_col', 'df' (trade DF).
+            When None, single-trade behavior is used with markers labeled [1].
+    """
     df = df.copy()
     df['time'] = pd.to_datetime(df['timestamp'].astype(str).str.replace(' : ', ' '), errors='coerce')
     df = df.dropna(subset=['time'])
@@ -176,7 +184,20 @@ def create_trade_chart(df, trade_label, market_hours_only=False, show_ewo=True, 
     if df.empty:
         return None
 
-    entry_row, exit_row, opt_col = find_entry_exit(df)
+    # Build trades_info if not provided (single-trade fallback)
+    if trades_info is None:
+        entry_row, exit_row, opt_col = find_entry_exit(df)
+        trades_info = [{'num': 1, 'entry_row': entry_row, 'exit_row': exit_row, 'opt_col': opt_col, 'df': df}]
+    opt_col = trades_info[0]['opt_col']
+
+    # Prepare per-trade data filtered to visible time window
+    time_min, time_max = df['time'].min(), df['time'].max()
+    for ti in trades_info:
+        ti_df = ti['df'].copy()
+        ti_df['time'] = pd.to_datetime(ti_df['timestamp'].astype(str).str.replace(' : ', ' '), errors='coerce')
+        ti_df = ti_df.dropna(subset=['time'])
+        ti_df = ti_df[(ti_df['time'] >= time_min) & (ti_df['time'] <= time_max)]
+        ti['_filtered_df'] = ti_df
 
     # Check if EWO data is available for subplot (and toggle is on)
     has_ewo = show_ewo and 'ewo' in df.columns and df['ewo'].notna().any()
@@ -230,18 +251,24 @@ def create_trade_chart(df, trade_label, market_hours_only=False, show_ewo=True, 
     else:
         fig = make_subplots(specs=[[{"secondary_y": True}]])
 
-    # Option price (right y-axis) - green
-    if opt_col in df.columns:
-        fig.add_trace(
-            go.Scatter(
-                x=df['time'],
-                y=df[opt_col],
-                name='Option',
-                line=dict(color='#00C853', width=2),
-                hovertemplate='Option: $%{y:.2f}<extra></extra>'
-            ),
-            row=1, col=1, secondary_y=True
-        )
+    # Option price lines (right y-axis) - one per trade
+    for t_idx, ti in enumerate(trades_info):
+        t_num = ti['num']
+        t_opt_col = ti['opt_col']
+        t_df = ti['_filtered_df']
+        if t_opt_col in t_df.columns and t_df[t_opt_col].notna().any():
+            color = TRADE_OPTION_COLORS[t_idx % len(TRADE_OPTION_COLORS)]
+            label = f'Option [{t_num}]' if len(trades_info) > 1 else 'Option'
+            fig.add_trace(
+                go.Scatter(
+                    x=t_df['time'],
+                    y=t_df[t_opt_col],
+                    name=label,
+                    line=dict(color=color, width=2),
+                    hovertemplate=f'{label}: $%{{y:.2f}}<extra></extra>'
+                ),
+                row=1, col=1, secondary_y=True
+            )
 
     # Stock Price (left y-axis) - blue with high/low error bars
     if 'stock_price' in df.columns and df['stock_price'].notna().any():
@@ -478,49 +505,62 @@ def create_trade_chart(df, trade_label, market_hours_only=False, show_ewo=True, 
                 row=1, col=1, secondary_y=False
             )
 
-    # Entry marker
-    if entry_row is not None:
-        entry_time = parse_time(entry_row['timestamp'])
-        entry_price = entry_row[opt_col] if opt_col in entry_row else entry_row['stock_price']
-        fig.add_trace(
-            go.Scatter(
-                x=[entry_time],
-                y=[entry_price],
-                mode='markers',
-                name='Entry',
-                marker=dict(symbol='triangle-down', size=18, color=COLORS['entry'], line=dict(color='white', width=2)),
-                hovertemplate='ENTRY<br>$%{y:.2f}<extra></extra>'
-            ),
-            row=1, col=1, secondary_y=True
-        )
+    # Entry/Exit markers per trade
+    for ti in trades_info:
+        t_num = ti['num']
+        t_opt_col = ti['opt_col']
+        entry_row = ti['entry_row']
+        exit_row = ti['exit_row']
+        prefix = f'[{t_num}]'
 
-    # Exit marker
-    if exit_row is not None:
-        exit_time = parse_time(exit_row['timestamp'])
-        exit_price = exit_row[opt_col] if opt_col in exit_row else exit_row['stock_price']
-        exit_reason = exit_row.get('exit_reason', 'unknown') if hasattr(exit_row, 'get') else exit_row['exit_reason'] if 'exit_reason' in exit_row.index else 'unknown'
-        if pd.isna(exit_reason):
-            exit_reason = 'unknown'
-        fig.add_trace(
-            go.Scatter(
-                x=[exit_time],
-                y=[exit_price],
-                mode='markers+text',
-                name=f'Exit ({exit_reason})',
-                marker=dict(symbol='triangle-up', size=18, color=COLORS['exit'], line=dict(color='white', width=2)),
-                text=[str(exit_reason)],
-                textposition='top center',
-                textfont=dict(size=10, color=COLORS['exit']),
-                hovertemplate=f'EXIT: {exit_reason}<br>$%{{y:.2f}}<extra></extra>'
-            ),
-            row=1, col=1, secondary_y=True
-        )
+        if entry_row is not None:
+            entry_time = parse_time(entry_row['timestamp'])
+            entry_price = entry_row[t_opt_col] if t_opt_col in entry_row else entry_row['stock_price']
+            fig.add_trace(
+                go.Scatter(
+                    x=[entry_time],
+                    y=[entry_price],
+                    mode='markers',
+                    name=f'{prefix} : Entry',
+                    marker=dict(symbol='triangle-down', size=18, color=COLORS['entry'], line=dict(color='white', width=2)),
+                    hovertemplate=f'{prefix} ENTRY<br>$%{{y:.2f}}<extra></extra>'
+                ),
+                row=1, col=1, secondary_y=True
+            )
+
+        if exit_row is not None:
+            exit_time = parse_time(exit_row['timestamp'])
+            exit_price = exit_row[t_opt_col] if t_opt_col in exit_row else exit_row['stock_price']
+            exit_reason = exit_row.get('exit_reason', 'unknown') if hasattr(exit_row, 'get') else exit_row['exit_reason'] if 'exit_reason' in exit_row.index else 'unknown'
+            if pd.isna(exit_reason):
+                exit_reason = 'unknown'
+            fig.add_trace(
+                go.Scatter(
+                    x=[exit_time],
+                    y=[exit_price],
+                    mode='markers+text',
+                    name=f'{prefix} : Exit ({exit_reason})',
+                    marker=dict(symbol='triangle-up', size=18, color=COLORS['exit'], line=dict(color='white', width=2)),
+                    text=[str(exit_reason)],
+                    textposition='top center',
+                    textfont=dict(size=10, color=COLORS['exit']),
+                    hovertemplate=f'{prefix} EXIT: {exit_reason}<br>$%{{y:.2f}}<extra></extra>'
+                ),
+                row=1, col=1, secondary_y=True
+            )
 
     # Exit signal markers on main chart (right y-axis, aligned with option price)
-    # Show diamond markers at the top of the option price axis where each exit signal fires
-    if opt_col in df.columns:
-        opt_max = df[opt_col].max() if df[opt_col].notna().any() else 1
-        opt_min = df[opt_col].min() if df[opt_col].notna().any() else 0
+    # Compute opt_max/min across all trades for signal marker positioning
+    _opt_prices = []
+    for ti in trades_info:
+        t_df = ti['_filtered_df']
+        t_opt_col = ti['opt_col']
+        if t_opt_col in t_df.columns:
+            _opt_prices.append(t_df[t_opt_col].dropna())
+    if _opt_prices:
+        _all_opts = pd.concat(_opt_prices)
+        opt_max = _all_opts.max() if not _all_opts.empty else 1
+        opt_min = _all_opts.min() if not _all_opts.empty else 0
         opt_range = opt_max - opt_min if opt_max > opt_min else opt_max * 0.1
         # Stack signals vertically above the chart area
         sig_offset_step = opt_range * 0.04
@@ -953,7 +993,7 @@ def create_trade_chart(df, trade_label, market_hours_only=False, show_ewo=True, 
             fig.update_yaxes(title_text="SPY ($)", secondary_y=False, tickformat='$.2f', row=spy_row, col=1)
 
         # P&L secondary y-axis label
-        fig.update_yaxes(title_text="P&L ($)", secondary_y=True, tickformat='$+.0f', row=spy_row, col=1)
+        fig.update_yaxes(title_text="P&L ($)", secondary_y=True, tickformat='$+.2f', row=spy_row, col=1)
 
     return fig
 
@@ -1264,7 +1304,6 @@ def main():
             st.session_state.pop('statsbooks', None)
             st.session_state.pop('signal_groups', None)
             _load_pickle.clear()
-            create_trade_chart.clear()
             get_trade_summary.clear()
             get_trade_table.clear()
             st.rerun()
@@ -1292,31 +1331,61 @@ def main():
         st.markdown("---")
         st.caption(f"{len(matrices)} trades loaded")
 
-    # Display selected trade(s) — grouped signals show all trades on same page
+    # Display selected trade(s) — all trades consolidated on one chart
     trade_label, pos_ids, _ = trade_list[selected_idx]
     is_multi_trade = len(pos_ids) > 1
 
+    # Build per-trade info and combined DF for consolidated chart
+    trade_dfs = []
+    trades_info_list = []
+    for trade_idx, pos_id in enumerate(pos_ids):
+        tdf = matrices[pos_id]
+        trade_num = int(tdf['trade_number'].iloc[0]) if 'trade_number' in tdf.columns and tdf['trade_number'].notna().any() else trade_idx + 1
+        entry_row, exit_row, t_opt_col = find_entry_exit(tdf)
+        trade_dfs.append(tdf)
+        trades_info_list.append({
+            'num': trade_num,
+            'entry_row': entry_row,
+            'exit_row': exit_row,
+            'opt_col': t_opt_col,
+            'df': tdf,
+        })
+
+    # Build combined DF: first trade as base, extend with unique timestamps from others
+    combined_df = trade_dfs[0].copy()
+    if len(trade_dfs) > 1:
+        any_holding_ts = set()
+        for tdf in trade_dfs:
+            if 'holding' in tdf.columns:
+                any_holding_ts.update(tdf.loc[tdf['holding'] == True, 'timestamp'].astype(str))
+        for extra_df in trade_dfs[1:]:
+            existing_ts = set(combined_df['timestamp'].astype(str))
+            new_rows = extra_df[~extra_df['timestamp'].astype(str).isin(existing_ts)]
+            if not new_rows.empty:
+                combined_df = pd.concat([combined_df, new_rows], ignore_index=True)
+        combined_df = combined_df.sort_values('timestamp').reset_index(drop=True)
+        if 'holding' in combined_df.columns:
+            combined_df['holding'] = combined_df['timestamp'].astype(str).isin(any_holding_ts)
+
+    # Single consolidated chart for all trades
+    fig = create_trade_chart(
+        combined_df, trade_label, market_hours_only, show_ewo, show_rsi,
+        show_supertrend, show_ichimoku, show_atr_sl, show_market_trend,
+        trades_info=trades_info_list
+    )
+    if fig:
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.error(f"Could not create chart for {trade_label}")
+
+    # Trade summaries below the chart
     for trade_idx, pos_id in enumerate(pos_ids):
         df = matrices[pos_id]
+        trade_num = int(df['trade_number'].iloc[0]) if 'trade_number' in df.columns and df['trade_number'].notna().any() else trade_idx + 1
 
-        # For multi-trade signals, add trade number header
-        if is_multi_trade:
-            trade_num = int(df['trade_number'].iloc[0]) if 'trade_number' in df.columns and df['trade_number'].notna().any() else trade_idx + 1
-            chart_label = f"{trade_label} [T{trade_num}]"
-        else:
-            chart_label = trade_label
-
-        # Chart
-        fig = create_trade_chart(df, chart_label, market_hours_only, show_ewo, show_rsi, show_supertrend, show_ichimoku, show_atr_sl, show_market_trend)
-        if fig:
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.error(f"Could not create chart for {chart_label}")
-
-        # Trade Summary below chart (two rows) - only render when toggle is on
         if show_trade_summary:
             if is_multi_trade:
-                st.subheader(f"Trade Summary — T{trade_num if is_multi_trade else ''}")
+                st.subheader(f"Trade Summary — T{trade_num}")
             else:
                 st.subheader("Trade Summary")
             summary = summaries[pos_id]
@@ -1370,7 +1439,7 @@ def main():
                 for i, (sig_name, sig_count) in enumerate(active_sig_items):
                     sig_cols[i].metric(sig_name, f"{sig_count} bars")
 
-        # Separator between trades in multi-trade view
+        # Separator between trade summaries in multi-trade view
         if is_multi_trade and trade_idx < len(pos_ids) - 1:
             st.markdown("---")
 
