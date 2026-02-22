@@ -3045,32 +3045,47 @@ class Backtest:
             return
 
         print(f"\nCAPITAL:")
-        print(f"  Initial Capital: ${summary.get('initial_capital', 0):,.2f}")
-        print(f"  Capital Utilized: ${summary.get('total_capital_utilized', 0):,.2f}")
-        print(f"  Max Capital Held: ${summary.get('max_capital_held', 0):,.2f}")
-        print(f"  Capitalized P&L: {summary.get('capitalized_pnl', 0):.2%}")
+        cap_rows = [
+            ("Initial Capital", f"${summary.get('initial_capital', 0):,.2f}"),
+            ("Capital Utilized", f"${summary.get('total_capital_utilized', 0):,.2f}"),
+            ("Max Capital Held", f"${summary.get('max_capital_held', 0):,.2f}"),
+            ("Capitalized P&L", f"{summary.get('capitalized_pnl', 0):.2%}"),
+        ]
+        cw = max(len(r[0]) for r in cap_rows)
+        for label, val in cap_rows:
+            print(f"  {label:<{cw}} : {val}")
 
         print(f"\nTRADE STATISTICS:")
-        print(f"  Total Signals: {len(self.signals_df) if self.signals_df is not None else 0}")
-        print(f"  Total Trades: {summary.get('total_trades', 0)}")
-        print(f"  Closed Trades: {summary.get('closed_trades', 0)}")
-        print(f"  Winners: {summary.get('winners', 0)}")
-        print(f"  Losers: {summary.get('losers', 0)}")
-        print(f"  Win Rate: {summary.get('win_rate', 0):.1f}%")
+        ts_rows = [
+            ("Total Signals", f"{len(self.signals_df) if self.signals_df is not None else 0}"),
+            ("Total Trades", f"{summary.get('total_trades', 0)}"),
+            ("Closed Trades", f"{summary.get('closed_trades', 0)}"),
+            ("Winners", f"{summary.get('winners', 0)}"),
+            ("Losers", f"{summary.get('losers', 0)}"),
+            ("Win Rate", f"{summary.get('win_rate', 0):.1f}%"),
+        ]
+        tw = max(len(r[0]) for r in ts_rows)
+        for label, val in ts_rows:
+            print(f"  {label:<{tw}} : {val}")
 
         print(f"\nPROFITABILITY:")
-        print(f"  Total P&L: ${summary.get('total_pnl', 0):+,.2f}")
-        print(f"  Commissions: ${summary.get('commission_total', 0):,.2f}")
-        print(f"  Net P&L: ${summary.get('net_pnl', 0):+,.2f}")
-        print(f"  Best Trade: ${summary.get('best_trade', 0):+,.2f}")
-        print(f"  Worst Trade: ${summary.get('worst_trade', 0):+,.2f}")
-        print(f"  Profit Factor: {summary.get('profit_factor', 0):.2f}")
+        pr_rows = [
+            ("Total P&L", f"${summary.get('total_pnl', 0):+,.2f}"),
+            ("Commissions", f"${summary.get('commission_total', 0):,.2f}"),
+            ("Net P&L", f"${summary.get('net_pnl', 0):+,.2f}"),
+            ("Best Trade", f"${summary.get('best_trade', 0):+,.2f}"),
+            ("Worst Trade", f"${summary.get('worst_trade', 0):+,.2f}"),
+            ("Profit Factor", f"{summary.get('profit_factor', 0):.2f}"),
+        ]
+        pw = max(len(r[0]) for r in pr_rows)
+        for label, val in pr_rows:
+            print(f"  {label:<{pw}} : {val}")
 
         print(f"\nTIMING:")
-        print(f"  Avg Hold Time: {summary.get('average_minutes_held', 0):.1f} minutes")
+        print(f"  Avg Hold Time : {summary.get('average_minutes_held', 0):.1f} minutes")
 
         print(f"\nSTATISTICS:")
-        print(f"  Profit[min]: ${summary.get('profit_min', 0):+,.2f}")
+        print(f"  Profit[min] : ${summary.get('profit_min', 0):+,.2f}")
 
         print(f"\nEXIT REASONS:")
         exit_pnl = summary.get('exit_reason_pnl', {})
@@ -4233,21 +4248,33 @@ class LiveTest:
         print("LIVE TEST SUMMARY")
         print(f"{'='*60}")
 
-        print(f"\n  Signals: {len(self.signals)}")
         closed = sum(1 for p in self.positions.values() if p.is_closed)
         active = sum(1 for p in self.positions.values() if not p.is_closed)
-        print(f"  Closed positions: {closed}")
-        print(f"  Active positions: {active}")
-        print(f"  Cycles: {self._cycle_count}")
+        lt_rows = [
+            ("Signals", f"{len(self.signals)}"),
+            ("Closed positions", f"{closed}"),
+            ("Active positions", f"{active}"),
+            ("Cycles", f"{self._cycle_count}"),
+        ]
+        lw = max(len(r[0]) for r in lt_rows)
+        print()
+        for label, val in lt_rows:
+            print(f"  {label:<{lw}} : {val}")
 
         if not stats_df.empty and 'pnl_pct' in stats_df.columns:
             completed = stats_df[stats_df['pnl_pct'].notna()]
             if not completed.empty:
                 winners = completed[completed['pnl_pct'] > 0]
-                print(f"\n  Win rate: {len(winners)/len(completed)*100:.1f}%")
-                print(f"  Avg PnL: {completed['pnl_pct'].mean():+.1f}%")
-                print(f"  Best: {completed['pnl_pct'].max():+.1f}%")
-                print(f"  Worst: {completed['pnl_pct'].min():+.1f}%")
+                perf_rows = [
+                    ("Win rate", f"{len(winners)/len(completed)*100:.1f}%"),
+                    ("Avg PnL", f"{completed['pnl_pct'].mean():+.1f}%"),
+                    ("Best", f"{completed['pnl_pct'].max():+.1f}%"),
+                    ("Worst", f"{completed['pnl_pct'].min():+.1f}%"),
+                ]
+                perfw = max(len(r[0]) for r in perf_rows)
+                print()
+                for label, val in perf_rows:
+                    print(f"  {label:<{perfw}} : {val}")
 
         # Exit reason breakdown with P&L
         closed_positions = [p for p in self.positions.values() if p.is_closed]
@@ -4541,19 +4568,29 @@ class LiveRerun:
             return
 
         data_source = "Live Data" if self._has_live_data else "Backtest (yfinance)"
-        print(f"\n  Data Source: {data_source}")
+        print(f"\n  Data Source : {data_source}")
 
         print(f"\n  TRADES:")
-        print(f"    Total: {summary.get('total_trades', 0)}")
-        print(f"    Winners: {summary.get('winners', 0)}")
-        print(f"    Losers: {summary.get('losers', 0)}")
-        print(f"    Win Rate: {summary.get('win_rate', 0):.1f}%")
+        tr_rows = [
+            ("Total", f"{summary.get('total_trades', 0)}"),
+            ("Winners", f"{summary.get('winners', 0)}"),
+            ("Losers", f"{summary.get('losers', 0)}"),
+            ("Win Rate", f"{summary.get('win_rate', 0):.1f}%"),
+        ]
+        trw = max(len(r[0]) for r in tr_rows)
+        for label, val in tr_rows:
+            print(f"    {label:<{trw}} : {val}")
 
         print(f"\n  P&L:")
-        print(f"    Total: ${summary.get('total_pnl', 0):+,.2f}")
-        print(f"    Net: ${summary.get('net_pnl', 0):+,.2f}")
-        print(f"    Best: ${summary.get('best_trade', 0):+,.2f}")
-        print(f"    Worst: ${summary.get('worst_trade', 0):+,.2f}")
+        pl_rows = [
+            ("Total", f"${summary.get('total_pnl', 0):+,.2f}"),
+            ("Net", f"${summary.get('net_pnl', 0):+,.2f}"),
+            ("Best", f"${summary.get('best_trade', 0):+,.2f}"),
+            ("Worst", f"${summary.get('worst_trade', 0):+,.2f}"),
+        ]
+        plw = max(len(r[0]) for r in pl_rows)
+        for label, val in pl_rows:
+            print(f"    {label:<{plw}} : {val}")
 
         print(f"\n  EXIT REASONS:")
         exit_pnl = summary.get('exit_reason_pnl', {})
