@@ -1026,11 +1026,13 @@ class OptionsExitDetector:
         self.is_call = option_type.upper() in ['CALL', 'CALLS', 'C']
 
         # Hard SL
+        self.hard_sl_enabled = config.get('hard_sl_enabled', True)
         self.initial_sl_pct = config.get('initial_sl_pct', 20)
         self.hard_sl_price = entry_option_price * (1 - self.initial_sl_pct / 100)
         self.hard_sl_tighten_on_peak = config.get('hard_sl_tighten_on_peak', True)
 
         # Trailing SL parameters
+        self.trail_tp_enabled = config.get('trail_tp_enabled', True)
         self.trail_activation_pct = config.get('trail_activation_pct', 10)
         # Cheap options have amplified % swings — require more profit before trailing
         cheap_threshold = config.get('trail_cheap_option_threshold', 0.40)
@@ -1637,7 +1639,7 @@ class OptionsExitDetector:
             if new_hard_sl > self.hard_sl_price:
                 self.hard_sl_price = new_hard_sl
 
-        if option_price <= self.hard_sl_price:
+        if self.hard_sl_enabled and option_price <= self.hard_sl_price:
             state = self._build_state(option_price, profit_pct)
             return True, 'Hard-SL', state
 
@@ -1656,7 +1658,7 @@ class OptionsExitDetector:
 
             # Check if price hit trailing TP
             # Trend gate: suppress Trail-TP exit while ATR-SL trend is favorable
-            if option_price <= self.trailing_tp_price:
+            if self.trail_tp_enabled and option_price <= self.trailing_tp_price:
                 if self.atr_sl_trend_gate_active:
                     # Trend is intact — hold the position, don't exit yet.
                     # The trailing TP price continues to ratchet up, so when
@@ -2396,13 +2398,15 @@ class PeakPeakExit:
     Factory for creating PeakPeakDetector instances.
 
     Captures a specific missed opportunity pattern: after the option reaches
-    a peak price, if at least 10 minutes pass and the option price returns to
-    that peak (or higher), exit immediately.
+    a peak price, if at least min_hold_minutes pass and the option price
+    returns to that peak (or higher), the detector **engages**.
 
-    Rationale: When price revisits a previous high after significant time,
-    it often fails to break through and reverses — a double-top pattern on
-    the option price itself. Exiting on the second touch captures the
-    opportunity that was missed on the first peak.
+    Once engaged, the detector tracks the price upward — letting it run
+    as long as it keeps increasing. When the price starts decreasing from
+    the engaged high, exit.
+
+    This improves on a simple double-top exit by allowing continuation
+    moves to play out while still capturing the reversal.
 
     Config: BACKTEST_CONFIG['peak_peak_exit']
         {
@@ -2430,15 +2434,23 @@ class PeakPeakDetector:
 
     Logic:
     1. Track the maximum option price seen since entry (the "peak").
-    2. Once price drops below the peak, record the peak price and the time
-       it was reached.
-    3. If at least min_hold_minutes have elapsed since the peak was set,
-       and the option price returns to the peak level (or higher), exit.
-    4. The peak only counts if the option has been profitable above
-       min_profit_pct at some point.
+    2. Once price drops below the peak, the peak is "confirmed" (real).
+    3. If at least min_hold_minutes have elapsed since the confirmed peak,
+       and the option price returns to the peak level (or higher), the
+       detector becomes **engaged**.
+    4. While engaged, continue tracking the price upward (new running high).
+       As long as price keeps increasing, keep following it.
+    5. When price starts decreasing from the engaged high, exit.
 
-    This catches the "double-top" pattern on option prices where the
-    second touch is the exit opportunity missed on the first.
+    This catches the "second touch" of a peak and lets the price run
+    higher if momentum continues, only exiting when it turns back down.
+
+    Config: BACKTEST_CONFIG['peak_peak_exit']
+        {
+            'enabled': True,
+            'min_hold_minutes': 10,        # Minimum minutes between peak and re-touch
+            'min_profit_pct': 5,           # Minimum option profit % to consider exit
+        }
     """
 
     def __init__(self, config):
@@ -2450,6 +2462,10 @@ class PeakPeakDetector:
         self.peak_time = None           # Timestamp when peak was set
         self.peak_confirmed = False     # True once price has moved below peak (peak is "real")
         self.entry_price = None         # Set on first update
+
+        # Engaged state: activated when price re-touches the confirmed peak
+        self.engaged = False            # True once peak is re-touched
+        self.engaged_high = None        # Highest price seen while engaged
 
     def update(self, option_price, pnl_pct, timestamp):
         """
@@ -2473,16 +2489,29 @@ class PeakPeakDetector:
             self.peak_time = timestamp
             return False, None
 
-        # Update peak if we have a new high
+        # --- Engaged mode: price already re-touched the peak ---
+        if self.engaged:
+            if option_price > self.engaged_high:
+                # Price still increasing — keep tracking
+                self.engaged_high = option_price
+                return False, None
+            else:
+                # Price started decreasing from engaged high — exit
+                return True, 'Peak-Peak'
+
+        # --- Pre-engaged: tracking peaks and waiting for re-touch ---
+
+        # Update peak if we have a new high (before confirmation)
         if option_price > self.peak_price:
-            # Only count as a meaningful peak if profitable
-            if pnl_pct >= self.min_profit_pct:
-                if self.peak_confirmed:
-                    # Price returned to or exceeded previous confirmed peak —
-                    # check if enough time has passed since that peak
-                    minutes_since_peak = (timestamp - self.peak_time).total_seconds() / 60
-                    if minutes_since_peak >= self.min_hold_minutes:
-                        return True, 'Peak-Peak'
+            if self.peak_confirmed and pnl_pct >= self.min_profit_pct:
+                # Price returned to or exceeded the confirmed peak —
+                # check if enough time has passed since that peak
+                minutes_since_peak = (timestamp - self.peak_time).total_seconds() / 60
+                if minutes_since_peak >= self.min_hold_minutes:
+                    # Engage: start tracking the upward run
+                    self.engaged = True
+                    self.engaged_high = option_price
+                    return False, None
 
             # Update peak regardless (track the true high)
             self.peak_price = option_price
@@ -2494,11 +2523,14 @@ class PeakPeakDetector:
         if not self.peak_confirmed and self.peak_price > self.entry_price:
             self.peak_confirmed = True
 
-        # Check if price is returning to the confirmed peak level
+        # Check if price is returning to the confirmed peak level (at or above)
         if self.peak_confirmed and self.peak_time is not None:
             minutes_since_peak = (timestamp - self.peak_time).total_seconds() / 60
             if minutes_since_peak >= self.min_hold_minutes:
                 if option_price >= self.peak_price and pnl_pct >= self.min_profit_pct:
-                    return True, 'Peak-Peak'
+                    # Engage: start tracking the upward run
+                    self.engaged = True
+                    self.engaged_high = option_price
+                    return False, None
 
         return False, None
