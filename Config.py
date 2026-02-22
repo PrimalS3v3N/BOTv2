@@ -444,9 +444,23 @@ BACKTEST_CONFIG = {
 
         # --- Initial Stop Loss ---
         'hard_sl_enabled': HARD_SL_EXIT_ENABLED,  # Toggle hard stop loss exit on/off
-        'initial_sl_pct': 20,              # Hard SL: exit if option drops X% below entry (adjustable)
+        'initial_sl_pct': 20,              # Hard SL: exit if option drops X% below entry (fallback when adaptive off)
         'hard_sl_tighten_on_peak': True,   # Tighten hard SL based on peak gain before trailing activates
                                             # E.g. entry=100, peak=105 → SL% shrinks 20→15%, hard SL 80→85
+
+        # --- Adaptive Stop Loss (price-scaled) ---
+        # Cheaper options swing harder in %, so wider SL is needed.
+        # Piecewise linear interpolation between anchor points.
+        # Below lowest anchor: capped at that anchor's SL%.
+        # Above highest anchor: floored at adaptive_sl_min_pct.
+        # When disabled, falls back to fixed initial_sl_pct above.
+        'adaptive_sl_enabled': True,
+        'adaptive_sl_anchors': [           # (option_price, sl_pct) — must be sorted by price
+            (50,  50),                     # $50 and below → 50% SL
+            (75,  30),                     # $75  → 30% SL
+            (200, 15),                     # $200 → 15% SL
+        ],
+        'adaptive_sl_min_pct': 10.0,       # Floor for prices above highest anchor
 
         # --- Trailing Stop Loss ---
         'trail_tp_enabled': TRAIL_TP_EXIT_ENABLED,  # Toggle trailing take profit exit on/off

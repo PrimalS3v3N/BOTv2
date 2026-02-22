@@ -221,14 +221,29 @@ between CALLs and PUTs — a rising stock is good for calls but bad for puts.
 
 #### Hard Stop Loss
 
-On entry, a hard SL is placed at `entry_option_price * (1 - initial_sl_pct / 100)`.
+On entry, a hard SL is placed at `entry_option_price * (1 - sl_pct / 100)`.
 
-Default: **20%** below entry. If the option price touches this level, exit immediately
-with reason `OE-Hard-SL`. This is the maximum acceptable loss per trade.
+By default, `sl_pct` is **adaptive** — it scales with the option's entry price so
+that cheaper contracts (which swing harder in %) get wider stops.  Uses piecewise
+linear interpolation between configurable anchor points:
+
+| Option Price | Stop Loss % |
+|-------------|-------------|
+| ≤ $50       | 50%         |
+| $75         | 30%         |
+| $200        | 15%         |
+| above $200  | 10% (floor) |
+
+Between anchors the SL% is linearly interpolated (e.g. $62.50 → 40%).
+
+When `adaptive_sl_enabled` is `False`, falls back to the fixed `initial_sl_pct`.
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `initial_sl_pct` | 20 | Hard SL distance below entry (%) |
+| `initial_sl_pct` | 20 | Fixed SL distance below entry (%) — used when adaptive is off |
+| `adaptive_sl_enabled` | True | Scale SL% with option price |
+| `adaptive_sl_anchors` | [(50,50),(75,30),(200,15)] | Price→SL% anchor points (sorted by price) |
+| `adaptive_sl_min_pct` | 10.0 | Floor for prices above highest anchor |
 
 #### Trailing Take Profit
 

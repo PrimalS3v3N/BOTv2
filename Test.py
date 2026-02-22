@@ -1618,7 +1618,7 @@ class SimulationEngine:
         signal_window = delay_config.get('signal_window_minutes', 15)
         delay_window = delay_config.get('delay_window_minutes', 30)
         sl_discount_factor = delay_config.get('sl_discount_factor', 0.5)
-        initial_sl_pct = self.config.get('options_exit', {}).get('initial_sl_pct', 20)
+        oe_config = self.config.get('options_exit', {})
 
         signal_time = signal.get('signal_time')
         if signal_time is None:
@@ -1665,9 +1665,11 @@ class SimulationEngine:
             return None
 
         # Compute option price discount threshold
-        # "half of stop_loss amount" = signal_option_price * initial_sl_pct / 100 * sl_discount_factor
+        # Uses adaptive SL% when enabled so discount scales with option price
         signal_option_price = signal.get('cost')
         if signal_option_price and signal_option_price > 0:
+            initial_sl_pct = Strategy.OptionsExitDetector.compute_adaptive_sl_pct(
+                signal_option_price, oe_config)
             sl_discount_amount = signal_option_price * (initial_sl_pct / 100) * sl_discount_factor
             option_target_price = signal_option_price - sl_discount_amount
         else:
@@ -2168,6 +2170,9 @@ class SimulationEngine:
 
                     # Reset the OptionsExit detector with new entry price
                     oe_detector.entry_option_price = new_entry_option_price
+                    oe_config_de = self.config.get('options_exit', {})
+                    oe_detector.initial_sl_pct = Strategy.OptionsExitDetector.compute_adaptive_sl_pct(
+                        new_entry_option_price, oe_config_de)
                     oe_detector.hard_sl_price = new_entry_option_price * (1 - oe_detector.initial_sl_pct / 100)
                     oe_detector.trailing_sl_price = None
                     oe_detector.trailing_active = False
@@ -3820,7 +3825,7 @@ class LiveTest:
         signal_window = delay_config.get('signal_window_minutes', 15)
         delay_window = delay_config.get('delay_window_minutes', 30)
         sl_discount_factor = delay_config.get('sl_discount_factor', 0.5)
-        initial_sl_pct = self.config.get('options_exit', {}).get('initial_sl_pct', 20)
+        oe_config = self.config.get('options_exit', {})
 
         signal_time = signal.get('signal_time')
         if signal_time is None:
@@ -3864,9 +3869,11 @@ class LiveTest:
         if not needs_delay:
             return False
 
-        # Compute option price target
+        # Compute option price target (adaptive SL scales discount with price)
         signal_option_price = signal.get('cost', 0)
         if signal_option_price and signal_option_price > 0:
+            initial_sl_pct = Strategy.OptionsExitDetector.compute_adaptive_sl_pct(
+                signal_option_price, oe_config)
             sl_amount = signal_option_price * (initial_sl_pct / 100) * sl_discount_factor
             option_target = signal_option_price - sl_amount
         else:

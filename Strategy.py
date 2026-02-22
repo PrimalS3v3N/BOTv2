@@ -1020,6 +1020,48 @@ class OptionsExitDetector:
     It only moves up (for profit protection), never down.
     """
 
+    @staticmethod
+    def compute_adaptive_sl_pct(option_price, config):
+        """
+        Compute stop loss % based on option price via piecewise linear
+        interpolation between configurable anchor points.
+
+        Cheaper options swing harder in %, so they need wider SL to avoid
+        noise-triggered exits.
+
+        Default anchors:  $50→50%   $75→30%   $200→15%
+        Below lowest anchor: capped at that anchor's SL%.
+        Above highest anchor: floored at adaptive_sl_min_pct.
+
+        Returns fixed initial_sl_pct when adaptive_sl_enabled is False.
+        """
+        if not config.get('adaptive_sl_enabled', False):
+            return config.get('initial_sl_pct', 20)
+
+        anchors = config.get('adaptive_sl_anchors', [(50, 50), (75, 30), (200, 15)])
+        sl_min = config.get('adaptive_sl_min_pct', 10.0)
+
+        if not anchors or option_price <= 0:
+            return anchors[0][1] if anchors else config.get('initial_sl_pct', 20)
+
+        # Below lowest anchor — cap at that anchor's SL%
+        if option_price <= anchors[0][0]:
+            return anchors[0][1]
+
+        # Above highest anchor — floor
+        if option_price >= anchors[-1][0]:
+            return max(sl_min, anchors[-1][1])
+
+        # Linear interpolation between surrounding anchors
+        for j in range(len(anchors) - 1):
+            p0, sl0 = anchors[j]
+            p1, sl1 = anchors[j + 1]
+            if p0 <= option_price <= p1:
+                t = (option_price - p0) / (p1 - p0)
+                return sl0 + t * (sl1 - sl0)
+
+        return config.get('initial_sl_pct', 20)
+
     def __init__(self, config, entry_option_price, option_type,
                  entry_stock_price=None, entry_delta=None, statsbook=None):
         self.entry_option_price = entry_option_price
@@ -1027,7 +1069,7 @@ class OptionsExitDetector:
 
         # Hard SL
         self.hard_sl_enabled = config.get('hard_sl_enabled', True)
-        self.initial_sl_pct = config.get('initial_sl_pct', 20)
+        self.initial_sl_pct = self.compute_adaptive_sl_pct(entry_option_price, config)
         self.hard_sl_price = entry_option_price * (1 - self.initial_sl_pct / 100)
         self.hard_sl_tighten_on_peak = config.get('hard_sl_tighten_on_peak', True)
 
