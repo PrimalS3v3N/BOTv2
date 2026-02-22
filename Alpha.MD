@@ -224,19 +224,17 @@ between CALLs and PUTs — a rising stock is good for calls but bad for puts.
 On entry, a hard SL is placed at `entry_option_price * (1 - sl_pct / 100)`.
 
 By default, `sl_pct` is **adaptive** — it scales with the option's entry price so
-that cheaper contracts (which swing harder in %) get wider stops:
-
-```
-sl_pct = clamp(offset + coeff / sqrt(option_price), min_pct, max_pct)
-```
+that cheaper contracts (which swing harder in %) get wider stops.  Uses piecewise
+linear interpolation between configurable anchor points:
 
 | Option Price | Stop Loss % |
 |-------------|-------------|
 | ≤ $50       | 50%         |
-| $100        | ~30%        |
-| $150        | ~20%        |
+| $75         | 30%         |
 | $200        | 15%         |
-| $300+       | 10% (floor) |
+| above $200  | 10% (floor) |
+
+Between anchors the SL% is linearly interpolated (e.g. $62.50 → 40%).
 
 When `adaptive_sl_enabled` is `False`, falls back to the fixed `initial_sl_pct`.
 
@@ -244,10 +242,8 @@ When `adaptive_sl_enabled` is `False`, falls back to the fixed `initial_sl_pct`.
 |-----------|---------|-------------|
 | `initial_sl_pct` | 20 | Fixed SL distance below entry (%) — used when adaptive is off |
 | `adaptive_sl_enabled` | True | Scale SL% with option price |
-| `adaptive_sl_coeff` | 495.0 | Numerator coefficient (curve steepness) |
-| `adaptive_sl_offset` | -20.0 | Vertical offset (shifts curve up/down) |
-| `adaptive_sl_min_pct` | 10.0 | Floor for expensive options |
-| `adaptive_sl_max_pct` | 50.0 | Cap for cheap options |
+| `adaptive_sl_anchors` | [(50,50),(75,30),(200,15)] | Price→SL% anchor points (sorted by price) |
+| `adaptive_sl_min_pct` | 10.0 | Floor for prices above highest anchor |
 
 #### Trailing Take Profit
 

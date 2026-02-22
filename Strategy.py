@@ -1023,29 +1023,44 @@ class OptionsExitDetector:
     @staticmethod
     def compute_adaptive_sl_pct(option_price, config):
         """
-        Compute stop loss % based on option price.
+        Compute stop loss % based on option price via piecewise linear
+        interpolation between configurable anchor points.
 
         Cheaper options swing harder in %, so they need wider SL to avoid
-        noise-triggered exits.  Formula: offset + coeff / sqrt(price).
+        noise-triggered exits.
 
-        Anchor points (default coefficients):
-            $50  → 50%    $100 → ~30%    $150 → ~20%    $200 → 15%
+        Default anchors:  $50→50%   $75→30%   $200→15%
+        Below lowest anchor: capped at that anchor's SL%.
+        Above highest anchor: floored at adaptive_sl_min_pct.
 
         Returns fixed initial_sl_pct when adaptive_sl_enabled is False.
         """
         if not config.get('adaptive_sl_enabled', False):
             return config.get('initial_sl_pct', 20)
 
-        coeff  = config.get('adaptive_sl_coeff', 495.0)
-        offset = config.get('adaptive_sl_offset', -20.0)
+        anchors = config.get('adaptive_sl_anchors', [(50, 50), (75, 30), (200, 15)])
         sl_min = config.get('adaptive_sl_min_pct', 10.0)
-        sl_max = config.get('adaptive_sl_max_pct', 50.0)
 
-        if option_price <= 0:
-            return sl_max
+        if not anchors or option_price <= 0:
+            return anchors[0][1] if anchors else config.get('initial_sl_pct', 20)
 
-        raw = offset + coeff / math.sqrt(option_price)
-        return max(sl_min, min(sl_max, raw))
+        # Below lowest anchor — cap at that anchor's SL%
+        if option_price <= anchors[0][0]:
+            return anchors[0][1]
+
+        # Above highest anchor — floor
+        if option_price >= anchors[-1][0]:
+            return max(sl_min, anchors[-1][1])
+
+        # Linear interpolation between surrounding anchors
+        for j in range(len(anchors) - 1):
+            p0, sl0 = anchors[j]
+            p1, sl1 = anchors[j + 1]
+            if p0 <= option_price <= p1:
+                t = (option_price - p0) / (p1 - p0)
+                return sl0 + t * (sl1 - sl0)
+
+        return config.get('initial_sl_pct', 20)
 
     def __init__(self, config, entry_option_price, option_type,
                  entry_stock_price=None, entry_delta=None, statsbook=None):

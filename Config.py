@@ -450,15 +450,17 @@ BACKTEST_CONFIG = {
 
         # --- Adaptive Stop Loss (price-scaled) ---
         # Cheaper options swing harder in %, so wider SL is needed.
-        # Formula: SL% = adaptive_sl_offset + adaptive_sl_coeff / sqrt(option_price)
-        # Fitted to: $50→50%, $100→~30%, $150→~20%, $200→15%
-        # Clamped between adaptive_sl_min_pct and adaptive_sl_max_pct.
+        # Piecewise linear interpolation between anchor points.
+        # Below lowest anchor: capped at that anchor's SL%.
+        # Above highest anchor: floored at adaptive_sl_min_pct.
         # When disabled, falls back to fixed initial_sl_pct above.
         'adaptive_sl_enabled': True,
-        'adaptive_sl_coeff': 495.0,        # Numerator coefficient (controls curve steepness)
-        'adaptive_sl_offset': -20.0,       # Vertical offset (shifts entire curve up/down)
-        'adaptive_sl_min_pct': 10.0,       # Floor for expensive options (e.g. $300+)
-        'adaptive_sl_max_pct': 50.0,       # Cap for cheap options (e.g. $50 and below)
+        'adaptive_sl_anchors': [           # (option_price, sl_pct) — must be sorted by price
+            (50,  50),                     # $50 and below → 50% SL
+            (75,  30),                     # $75  → 30% SL
+            (200, 15),                     # $200 → 15% SL
+        ],
+        'adaptive_sl_min_pct': 10.0,       # Floor for prices above highest anchor
 
         # --- Trailing Stop Loss ---
         'trail_tp_enabled': TRAIL_TP_EXIT_ENABLED,  # Toggle trailing take profit exit on/off
