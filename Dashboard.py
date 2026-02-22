@@ -849,6 +849,7 @@ def create_trade_chart(df, trade_label, market_hours_only=False, show_ewo=True, 
         if 'pnl' in df.columns and df['pnl'].notna().any():
             holding_mask = df['holding'] == True if 'holding' in df.columns else pd.Series(True, index=df.index)
             pnl_data = df.loc[holding_mask, ['time', 'pnl']].dropna()
+            pnl_data['pnl'] = pnl_data['pnl'].round(2)
             if not pnl_data.empty:
                 fig.add_trace(
                     go.Scatter(
@@ -956,12 +957,12 @@ def create_trade_chart(df, trade_label, market_hours_only=False, show_ewo=True, 
     )
 
     # Update axes
-    fig.update_xaxes(title_text="Time", tickformat='%H:%M', row=1, col=1)
+    fig.update_xaxes(title_text="Time", tickformat='%H:%M:%S', row=1, col=1)
     fig.update_yaxes(title_text="Price ($)", secondary_y=False, tickformat='$.2f', row=1, col=1)
     fig.update_yaxes(title_text="Option ($)", secondary_y=True, tickformat='$.2f', row=1, col=1)
 
     if has_indicators:
-        fig.update_xaxes(title_text="Time", tickformat='%H:%M', row=2, col=1)
+        fig.update_xaxes(title_text="Time", tickformat='%H:%M:%S', row=2, col=1)
 
     if has_ewo:
         ewo_title = "EWO / Trend" if has_market_trend else "EWO"
@@ -979,7 +980,7 @@ def create_trade_chart(df, trade_label, market_hours_only=False, show_ewo=True, 
         )
 
     if has_spy and spy_row:
-        fig.update_xaxes(title_text="Time", tickformat='%H:%M', row=spy_row, col=1)
+        fig.update_xaxes(title_text="Time", tickformat='%H:%M:%S', row=spy_row, col=1)
         # Set explicit y-axis range for tight fit around price data
         spy_prices = df['spy_price'].dropna()
         if not spy_prices.empty:
