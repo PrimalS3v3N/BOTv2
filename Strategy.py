@@ -1030,10 +1030,12 @@ class OptionsExitDetector:
         self.initial_sl_pct = config.get('initial_sl_pct', 20)
         self.hard_sl_price = entry_option_price * (1 - self.initial_sl_pct / 100)
         self.hard_sl_tighten_on_peak = config.get('hard_sl_tighten_on_peak', True)
+        self.hard_sl_min_pct = config.get('hard_sl_min_pct', self.initial_sl_pct * 0.5)
 
         # Trailing SL parameters
         self.trail_tp_enabled = config.get('trail_tp_enabled', True)
         self.trail_activation_pct = config.get('trail_activation_pct', 10)
+        self.trail_min_lock_pct = config.get('trail_min_lock_pct', 3.0)
         # Cheap options have amplified % swings — require more profit before trailing
         cheap_threshold = config.get('trail_cheap_option_threshold', 0.40)
         if cheap_threshold and entry_option_price < cheap_threshold:
@@ -1368,6 +1370,9 @@ class OptionsExitDetector:
         buffer = self._get_buffer(profit_pct)
         sl_pct = min(sl_pct, profit_pct - buffer)
 
+        # Guarantee minimum profit lock so trail-TP never sits at entry price
+        sl_pct = max(sl_pct, self.trail_min_lock_pct)
+
         return max(0.0, sl_pct)
 
     # ------------------------------------------------------------------
@@ -1633,7 +1638,7 @@ class OptionsExitDetector:
                 peak_gain *= 2
 
             adjusted_sl_pct = self.initial_sl_pct - peak_gain
-            adjusted_sl_pct = max(adjusted_sl_pct, 0.0)  # Never go above entry
+            adjusted_sl_pct = max(adjusted_sl_pct, self.hard_sl_min_pct)  # Never tighten past floor
             new_hard_sl = self.entry_option_price * (1 - adjusted_sl_pct / 100)
             # Ratchet: only tighten (move up), never loosen
             if new_hard_sl > self.hard_sl_price:

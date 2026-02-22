@@ -447,6 +447,8 @@ BACKTEST_CONFIG = {
         'initial_sl_pct': 20,              # Hard SL: exit if option drops X% below entry (adjustable)
         'hard_sl_tighten_on_peak': True,   # Tighten hard SL based on peak gain before trailing activates
                                             # E.g. entry=100, peak=105 → SL% shrinks 20→15%, hard SL 80→85
+        'hard_sl_min_pct': 10,             # Floor: never tighten hard SL below this % of entry
+                                            # Prevents hard SL from converging on entry price (0% P&L exits)
 
         # --- Trailing Stop Loss ---
         'trail_tp_enabled': TRAIL_TP_EXIT_ENABLED,  # Toggle trailing take profit exit on/off
@@ -455,6 +457,8 @@ BACKTEST_CONFIG = {
                                                 # Cheap options have amplified % swings on small moves
         'trail_base_floor_pct': 5,         # At activation: lock in X% above entry as floor
         'trail_early_floor_minutes': 5,    # First N minutes: SL floor = 0% (breakeven) instead of base
+        'trail_min_lock_pct': 3.0,         # Minimum % above entry that trail-TP will lock in
+                                            # Prevents trail-TP from sitting at entry price (0% P&L exits)
 
         # Continuous trailing TP scaling parameters (logarithmic curve)
         # trail_tp = base + scale * ln(1 + profit / norm)

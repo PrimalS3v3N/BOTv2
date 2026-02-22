@@ -2122,7 +2122,7 @@ class SimulationEngine:
                     # Reset the OptionsExit detector with new entry price
                     oe_detector.entry_option_price = new_entry_option_price
                     oe_detector.hard_sl_price = new_entry_option_price * (1 - oe_detector.initial_sl_pct / 100)
-                    oe_detector.trailing_sl_price = None
+                    oe_detector.trailing_tp_price = None
                     oe_detector.trailing_active = False
                     oe_detector.highest_profit_pct = 0.0
                     oe_detector.bar_count = 0
