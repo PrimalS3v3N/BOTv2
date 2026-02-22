@@ -113,7 +113,7 @@ def EWO(df, column='close', fast_period=5, slow_period=35):
 
 def true_price(stock_price, stock_high, stock_low):
     """Deprecated: Previously calculated (high+low+close)/3.
-    Now replaced by per-second extrapolation which naturally incorporates high/low."""
+    Now replaced by intra-minute extrapolation which naturally incorporates high/low."""
     return stock_price
 
 
@@ -722,7 +722,7 @@ def add_indicators(df, ema_periods=None, ewo_fast=5, ewo_slow=35, ewo_avg_period
     df = df.copy()
 
     # All indicators use close price directly.
-    # (Previously used true_price = (high+low+close)/3, now replaced by per-second
+    # (Previously used true_price = (high+low+close)/3, now replaced by intra-minute
     # extrapolation which naturally incorporates high/low into the price path.)
 
     # Add EMAs at multiple periods
@@ -1007,11 +1007,11 @@ def extrapolate_bar_prices(open_price, high_price, low_price, close_price,
                            n=60, high_span_max=None, low_span_max=None,
                            min_segment=1):
     """
-    Extrapolate a single OHLC bar into n per-second price points.
+    Extrapolate a single 1-minute OHLC bar into n intra-minute price points.
 
     Creates a realistic intra-bar price path that visits the high and low
-    within the bar. Segment durations are randomized each call for realistic
-    variation in when the high/low occur within the bar.
+    within the minute. Segment durations are randomized each call for realistic
+    variation in when the high/low occur within the minute.
 
     Path logic:
       - Bearish bar (open > close): open → high → low → close
@@ -1028,10 +1028,10 @@ def extrapolate_bar_prices(open_price, high_price, low_price, close_price,
         high_price: Bar high price
         low_price: Bar low price
         close_price: Bar close price
-        n: Number of points to generate (default: 60 for 1 point/second)
-        high_span_max: Max seconds for segment reaching the high (None = n//3)
-        low_span_max: Max seconds for segment reaching the low (None = n//3)
-        min_segment: Minimum seconds per segment (default: 1)
+        n: Number of points to generate per minute (default: 60)
+        high_span_max: Max points for segment reaching the high (None = n//3)
+        low_span_max: Max points for segment reaching the low (None = n//3)
+        min_segment: Minimum points per segment (default: 1)
 
     Returns:
         numpy array of n interpolated prices
