@@ -1020,6 +1020,33 @@ class OptionsExitDetector:
     It only moves up (for profit protection), never down.
     """
 
+    @staticmethod
+    def compute_adaptive_sl_pct(option_price, config):
+        """
+        Compute stop loss % based on option price.
+
+        Cheaper options swing harder in %, so they need wider SL to avoid
+        noise-triggered exits.  Formula: offset + coeff / sqrt(price).
+
+        Anchor points (default coefficients):
+            $50  → 50%    $100 → ~30%    $150 → ~20%    $200 → 15%
+
+        Returns fixed initial_sl_pct when adaptive_sl_enabled is False.
+        """
+        if not config.get('adaptive_sl_enabled', False):
+            return config.get('initial_sl_pct', 20)
+
+        coeff  = config.get('adaptive_sl_coeff', 495.0)
+        offset = config.get('adaptive_sl_offset', -20.0)
+        sl_min = config.get('adaptive_sl_min_pct', 10.0)
+        sl_max = config.get('adaptive_sl_max_pct', 50.0)
+
+        if option_price <= 0:
+            return sl_max
+
+        raw = offset + coeff / math.sqrt(option_price)
+        return max(sl_min, min(sl_max, raw))
+
     def __init__(self, config, entry_option_price, option_type,
                  entry_stock_price=None, entry_delta=None, statsbook=None):
         self.entry_option_price = entry_option_price
@@ -1027,7 +1054,7 @@ class OptionsExitDetector:
 
         # Hard SL
         self.hard_sl_enabled = config.get('hard_sl_enabled', True)
-        self.initial_sl_pct = config.get('initial_sl_pct', 20)
+        self.initial_sl_pct = self.compute_adaptive_sl_pct(entry_option_price, config)
         self.hard_sl_price = entry_option_price * (1 - self.initial_sl_pct / 100)
         self.hard_sl_tighten_on_peak = config.get('hard_sl_tighten_on_peak', True)
 

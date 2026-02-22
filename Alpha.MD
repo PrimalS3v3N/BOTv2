@@ -221,14 +221,33 @@ between CALLs and PUTs — a rising stock is good for calls but bad for puts.
 
 #### Hard Stop Loss
 
-On entry, a hard SL is placed at `entry_option_price * (1 - initial_sl_pct / 100)`.
+On entry, a hard SL is placed at `entry_option_price * (1 - sl_pct / 100)`.
 
-Default: **20%** below entry. If the option price touches this level, exit immediately
-with reason `OE-Hard-SL`. This is the maximum acceptable loss per trade.
+By default, `sl_pct` is **adaptive** — it scales with the option's entry price so
+that cheaper contracts (which swing harder in %) get wider stops:
+
+```
+sl_pct = clamp(offset + coeff / sqrt(option_price), min_pct, max_pct)
+```
+
+| Option Price | Stop Loss % |
+|-------------|-------------|
+| ≤ $50       | 50%         |
+| $100        | ~30%        |
+| $150        | ~20%        |
+| $200        | 15%         |
+| $300+       | 10% (floor) |
+
+When `adaptive_sl_enabled` is `False`, falls back to the fixed `initial_sl_pct`.
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `initial_sl_pct` | 20 | Hard SL distance below entry (%) |
+| `initial_sl_pct` | 20 | Fixed SL distance below entry (%) — used when adaptive is off |
+| `adaptive_sl_enabled` | True | Scale SL% with option price |
+| `adaptive_sl_coeff` | 495.0 | Numerator coefficient (curve steepness) |
+| `adaptive_sl_offset` | -20.0 | Vertical offset (shifts curve up/down) |
+| `adaptive_sl_min_pct` | 10.0 | Floor for expensive options |
+| `adaptive_sl_max_pct` | 50.0 | Cap for cheap options |
 
 #### Trailing Take Profit
 
